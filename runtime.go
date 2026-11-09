@@ -1151,6 +1151,13 @@ func (a *App) runSubAgent(parent *SessionMeta, sub *SessionMeta, run *sessionRun
 		followUp = "这是用户主动叫停，不是故障：不要再自动重新派发、续跑或补做这个任务，用一句话向用户确认已停止即可。"
 	}
 	reportText := head + "\n\n" + summary + "\n\n" + followUp
+	// 桥派子任务（run_python 脚本经 jx.dispatch 派的）：回报定向存给脚本的
+	// jx.wait 收取，不投父会话、不起汇报轮——脚本结束后统一经【后台脚本回报】
+	// 或转交投递到达，主对话只被打扰一次（bridge.go）。
+	if a.bridgeInterceptReport(sub, reportText) {
+		a.broadcast(Event{Type: "session_updated", SessionID: sub.ID})
+		return
+	}
 	// 回报的投递路径仍然统一在 deliverToSession 一族（按「用户侧消息」投，父会话
 	// 空闲就落库并起汇报轮；正被占用就插话注入它正在执行的那一轮——AI 发话
 	// 一律插话，不排队）：正常结束与失败都走 deliverToSession；唯一例外是人为

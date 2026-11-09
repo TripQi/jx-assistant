@@ -66,6 +66,9 @@ type App struct {
 	questions           map[string]*UserQuestion // 等待用户回答的提问/计划审批（interact.go）
 	jobsMu              sync.Mutex
 	jobs                map[string]*jobRun // 会话内后台作业（jobs.go）
+	bridgeMu            sync.Mutex
+	bridgeTokens        map[string]*bridgeToken // run_python 工具桥的一次性凭证（bridge.go）
+	bridgeWaits         map[string]*bridgeWait  // 桥派子任务的回报收集表（bridge.go）
 	protectPaths        []string           // 助手自身配置/数据目录，任何模式禁访问
 	skillsMu            sync.Mutex
 	skillsReady         bool   // 技能母本是否已释放（SkillsDir 首次解析后置位）
@@ -510,6 +513,10 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/device/poll", a.handleDevicePoll)
 	mux.HandleFunc("POST /api/device/result", a.handleDeviceResult)
 	mux.HandleFunc("GET /api/device/selftest", a.handleDeviceSelftest)
+
+	// run_python 工具桥（bridge.go）：脚本以本会话身份调白名单工具/派子任务。
+	// 与设备桥同款回环闸（仅 127.0.0.1 可达，LAN/远程 403）。
+	mux.HandleFunc("POST /api/bridge/tool", a.handleBridgeTool)
 	// 浏览器（browser_host.go / browser_panel_windows.go）：桌面右栏是原生
 	// WebView2 面板（前端经 panel-rect 上报占位区矩形），navigate/viewport/
 	// state 面向内嵌形态目标；open-view/view 是聊天链接与 html 交付文件点开

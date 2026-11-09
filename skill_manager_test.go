@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -133,6 +134,67 @@ func TestUserSkillsPromptBlockDisplayNameAndTruncation(t *testing.T) {
 	}
 	if r := []rune(strings.TrimSpace(block)); len(r) > 400 { // 快照本身不该膨胀
 		t.Fatalf("快照过长: %d runes", len(r))
+	}
+}
+
+// renderSkillListing 预算降级（对齐 ZCode skills.ts 的两级形态）：完整版超
+// skillListingBudget 时整段降级为仅名字行，名字+id 全保留、描述不出现；
+// 预算内走完整版。
+func TestRenderSkillListingBudgetDowngrade(t *testing.T) {
+	full, names := make([]string, 100), make([]string, 100)
+	for i := range full {
+		id := fmt.Sprintf("s%d", i)
+		full[i] = "  - 技能" + id + "（id=" + id + "）：" + strings.Repeat("述", 300)
+		names[i] = "  - 技能" + id + "（id=" + id + "）"
+	}
+	out := renderSkillListing("# 头", full, names)
+	if len(out) > skillListingBudget {
+		t.Fatalf("超预算应降级: %d > %d", len(out), skillListingBudget)
+	}
+	if !strings.Contains(out, "（id=s0）") || !strings.Contains(out, "（id=s99）") {
+		t.Fatal("降级版应保留全部名字+id")
+	}
+	if strings.Contains(out, "述述") {
+		t.Fatal("降级后不应出现描述正文")
+	}
+	if !strings.Contains(out, "# 头") {
+		t.Fatal("段头应保留")
+	}
+	// 预算内：完整版原样输出
+	out2 := renderSkillListing("# 头", names, names)
+	if len(out2) > skillListingBudget || !strings.Contains(out2, "（id=s0）") {
+		t.Fatalf("预算内应走完整版: %q", out2[:60])
+	}
+	// 空清单返回空串
+	if got := renderSkillListing("# 头", nil, nil); got != "" {
+		t.Fatalf("空清单应返回空串: %q", got)
+	}
+}
+
+// 用户技能清单段的集成降级：装一堆长描述技能，环境快照段应降级在预算内，
+// 名字+id 全在、描述不进快照（read_skill 按需取全文的契约不受影响）。
+func TestUserSkillsPromptBlockBudgetDowngrade(t *testing.T) {
+	a := newSkillTestApp(t)
+	userDir, _ := a.userSkillsDir()
+	for i := 0; i < 90; i++ { // 90 × 300 字描述（截断后 600 字节/条）≈ 5.4 万字节 > 2 万预算
+		id := fmt.Sprintf("sk%02d", i)
+		skill := filepath.Join(userDir, id)
+		os.MkdirAll(skill, 0755)
+		os.WriteFile(filepath.Join(skill, "SKILL.md"),
+			[]byte(fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n正文", id, strings.Repeat("述", 300))), 0644)
+	}
+	block := a.userSkillsPromptBlock()
+	if len(block) > skillListingBudget {
+		t.Fatalf("清单段应降级在预算内: %d > %d", len(block), skillListingBudget)
+	}
+	if !strings.Contains(block, "（id=sk00）") || !strings.Contains(block, "（id=sk89）") {
+		t.Fatal("降级版应保留全部名字+id")
+	}
+	if strings.Contains(block, "述述") {
+		t.Fatal("降级后描述正文不应进环境快照")
+	}
+	if !strings.Contains(block, "用户技能清单") {
+		t.Fatal("段头应保留")
 	}
 }
 

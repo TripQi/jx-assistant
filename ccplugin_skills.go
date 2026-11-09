@@ -125,21 +125,24 @@ func (r *CCPluginRegistry) ccSkillByID(id string) (ccSkillEntry, *CCPlugin, bool
 }
 
 // ccSkillsPromptBlock 生成插件技能清单段（归入环境快照，追加在用户技能清单后）。
+// 与用户技能段同一纪律：描述单条截断（userSkillDescPromptMax）、整段超
+// skillListingBudget 降级为仅名字行（renderSkillListing，对齐 ZCode skills.ts）。
 func (r *CCPluginRegistry) ccSkillsPromptBlock() string {
 	skills := r.ccSkills()
 	if len(skills) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("# 插件技能清单（来自 Claude Code 插件；要用某个技能时，先调用 read_skill 读它的完整说明）\n")
+	const header = "# 插件技能清单（来自 Claude Code 插件；要用某个技能时，先调用 read_skill 读它的完整说明）"
+	var full, namesOnly []string
 	for _, s := range skills {
-		if s.Description == "" {
-			b.WriteString("  - " + s.Name + "（id=" + s.ID + "）\n")
+		namesOnly = append(namesOnly, "  - "+s.Name+"（id="+s.ID+"）")
+		if desc := truncateRunesForPrompt(s.Description, userSkillDescPromptMax); desc != "" {
+			full = append(full, "  - "+s.Name+"（id="+s.ID+"）："+desc)
 		} else {
-			b.WriteString("  - " + s.Name + "（id=" + s.ID + "）：" + s.Description + "\n")
+			full = append(full, namesOnly[len(namesOnly)-1])
 		}
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return renderSkillListing(header, full, namesOnly)
 }
 
 // ccSkillBody 读取技能正文（read_skill 的插件分支）：剥 frontmatter、

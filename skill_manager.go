@@ -51,6 +51,12 @@ const (
 	// userSkillDescPromptMax 环境快照里一句话描述的截断上限：快照每个会话都
 	// 注入，超长描述会污染全部对话的上下文（行业规范本身也限 description ≤1024）
 	userSkillDescPromptMax = 200
+	// skillListingBudget 单个技能清单段的字符预算（字节口径，对标 ZCode skills.ts
+	// 的 DEFAULT_SKILL_METADATA_BUDGET=20000：英文 20K 字符 ≈ 5K token，我们按
+	// 字节算时中文 6.6K 字/英文 20K 字符 ≈ 同一 token 量级）。用户技能段与
+	// 插件技能段各自计算，超预算即整段降级为仅「名字（id=…）」行——技能再
+	// 多也不吃掉环境快照；名字+id 恒在，read_skill 按需取全文。
+	skillListingBudget = 20000
 )
 
 // truncateRunesForPrompt 按 rune 数截断并加省略号（不破坏多字节字符）。
@@ -59,6 +65,21 @@ func truncateRunesForPrompt(s string, n int) string {
 		return string(r[:n]) + "…"
 	}
 	return s
+}
+
+// renderSkillListing 按预算渲染技能清单段：full 为逐条「名字（id=…）：描述」
+// 行，namesOnly 为同序的仅名字行；整段超 skillListingBudget 时降级用后者
+//（对齐 ZCode skills.ts 的两级形态：先拼完整版，超预算一次性降级，降级版
+// 不再二次截断——名字行极短，条目数失控也膨胀有限）。
+func renderSkillListing(header string, full, namesOnly []string) string {
+	if len(full) == 0 {
+		return ""
+	}
+	join := func(lines []string) string { return header + "\n" + strings.Join(lines, "\n") }
+	if s := join(full); len(s) <= skillListingBudget {
+		return s
+	}
+	return join(namesOnly)
 }
 
 type userSkillEntry struct {
@@ -449,29 +470,28 @@ func (a *App) deleteUserSkill(id string) error {
 // 只列 显示名（id）与一句话描述，正文不注入——模型要用哪个技能，先调用
 // read_skill(id) 按需读完整说明（对齐 ZCode 的技能模式：清单先行、内容按需，
 // 技能增减不动工具定义、不打断前缀缓存）。显示名中文优先（displayName →
-// name）；描述超长截断（一句话描述的本意，全文在 read_skill）。
+// name）；描述超长截断（一句话描述的本意，全文在 read_skill）；整段超
+// skillListingBudget 时降级为仅名字行（预算与两级形态均对齐 ZCode skills.ts）。
 func (a *App) userSkillsPromptBlock() string {
 	list, err := a.listSkills()
 	if err != nil || len(list.User) == 0 {
 		return ""
 	}
-	var b strings.Builder
+	const header = "# 用户技能清单（要用某个技能时，先调用 read_skill 读它的完整说明）"
+	var full, namesOnly []string
 	for _, s := range list.User {
 		if !s.Enabled {
 			continue
 		}
 		disp := skillDisplayOf(s.DisplayName, s.Name, s.ID)
-		desc := truncateRunesForPrompt(s.Description, userSkillDescPromptMax)
-		if desc == "" {
-			b.WriteString("  - " + disp + "（id=" + s.ID + "）\n")
+		namesOnly = append(namesOnly, "  - "+disp+"（id="+s.ID+"）")
+		if desc := truncateRunesForPrompt(s.Description, userSkillDescPromptMax); desc != "" {
+			full = append(full, "  - "+disp+"（id="+s.ID+"）："+desc)
 		} else {
-			b.WriteString("  - " + disp + "（id=" + s.ID + "）：" + desc + "\n")
+			full = append(full, namesOnly[len(namesOnly)-1])
 		}
 	}
-	if b.Len() == 0 {
-		return ""
-	}
-	return "# 用户技能清单（要用某个技能时，先调用 read_skill 读它的完整说明）\n" + b.String()
+	return renderSkillListing(header, full, namesOnly)
 }
 
 // assertSkillVisibility 启动自检（NewApp 调用）：技能可见性是全模式契约——

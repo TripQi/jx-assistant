@@ -105,8 +105,16 @@ func TestRunPythonBadNameFallsBack(t *testing.T) {
 	}
 	dir := filepath.Join(a.Cfg.Workspace, ".jxai", "tmp", sess.ID)
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), ".py") || strings.Contains(entries[0].Name(), "evil") {
-		t.Fatalf("应落一个默认名脚本, got: %v (out=%s)", entries, out)
+	// jx.py 是工具桥客户端（bridge.go 每次 run_python 生成），不算业务脚本；
+	// 业务脚本应恰好一个：默认时间戳名、不含 evil。
+	scripts := []string{}
+	for _, e := range entries {
+		if e.Name() != "jx.py" {
+			scripts = append(scripts, e.Name())
+		}
+	}
+	if len(scripts) != 1 || !strings.HasSuffix(scripts[0], ".py") || strings.Contains(scripts[0], "evil") {
+		t.Fatalf("应落一个默认名脚本, got: %v (out=%s)", scripts, out)
 	}
 }
 

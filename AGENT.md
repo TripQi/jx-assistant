@@ -1570,7 +1570,31 @@ worker 的 stdin/stdout 升级为带 id 的帧协议（req/event/decision/host/h
   （字数统计）已删除，新建组件照「manifest.json + client.js（client.css 可选）」
   的最小结构手写即可。界面强调色（主题色）原为示例组件，现已并入主程序
   `web/app-settings.js`（常规 → 外观 → 主题色）。
-- 现成组件：`todo-scheduler`（待办与定时任务——侧栏入口 + 持久清单 + 定时调度，
+- **组件能力分发＝基础工具 `component_call`（方案 A，2026-11-09 用户定调）**：
+  **工具定义只装基础工具，组件的动态能力不进工具目录**——否则每加一个组件
+  能力就要改一次工具定义，请求前缀抖动、缓存与多模式目录都得跟着维护。
+  现在走两半：
+  - **声明**：组件 `manifest.json` 顶层 `capabilities` 数组（一条一个能力：
+    `name` 能力名、`description` 一句中文说明、`parameters` 参数 JSON Schema、
+    `modes` 可用模式白名单〔空＝全部模式〕、`writes` 是否写入型〔计划模式下
+    暂停〕）。**声明是白名单**：没声明的能力宿主不给调。
+  - **实现**：宿主注册表——组件自己的 .go 文件在 `init()` 里
+    `registerComponentCapability(组件id, 能力名, 函数)`（样板见 usermemory.go
+    的 `memory_query` / `memory_update`）。声明了但没有实现的照样不可调（报错
+    指路）。分发与门控都在 `componentcall.go`。
+  - **调用**：模型调 `component_call(component, capability, args)`——它作为
+    **基础工具全模式注册**（assistant/aux 也有，能不能调由声明的 modes 决定），
+    参数说明不在工具定义里，而在**环境快照的「组件能力」块**（`envPrompt` →
+    `componentCapabilityBlock`：逐个启用组件列出当前模式下可调的能力、参数
+    要点、是否写入型）。组成链路：组件存在 → 本会话启用（会话级覆盖优先）→
+    能力已声明 → 本模式可用 → 宿主已实现 → 执行。
+  - **开关只影响环境提示词块，工具定义恒定**：组件开关在快照尾部以差分送达
+    （前缀缓存不动）；`TestComponentCallToolCatalogStable` 钉住「开关前后
+    `toolsFor` 名称与 schema 逐字一致」。
+  - 新增组件能力的三步：①manifest `capabilities` 加一条声明 → ②宿主 `init()`
+    登记实现 → ③确认「组件能力」块出现。**不改 `toolsFor`、不改任何工具定义**。
+    格式与扩展方式详见《组件/README.md》。
+- **现成组件：`todo-scheduler`（待办与定时任务——侧栏入口 + 持久清单 + 定时调度，
   宿主半边在 `todo.go`，关掉后入口、`/api/todos` 接口与调度一起停）、
   `git-panel`（Git 面板——右栏「Git」页签：同屏双区（默认上下堆叠、可切左右分栏、
   分隔条可拖）——更改区为 VSCode 式清单（暂存/取消暂存/提交/AI 摘要/逐行 diff；已暂存与未暂存的文件可右键「移出跟踪」变未跟踪），
@@ -1656,14 +1680,17 @@ worker 的 stdin/stdout 升级为带 id 的帧协议（req/event/decision/host/h
   （envPrompt 的 userMemoryEnvBlock：组件开启且任一字段有内容才出现，变化经
   快照差分送达全部会话，关闭即整块消失——不进系统提示词、不进工具定义；
   注入侧对超长字段截断到 1000 字加尾注，防手工编辑的超长内容撑爆快照）。
-  **权限分级**：普通任务对话拿专用工具 `user_memory`（查询全部字段 + 只更新
+  **权限分级（方案 A 后：经 `component_call` 调两条能力，不占工具目录）**：
+  普通任务对话可调 `memory_query`（查询全部字段）与 `memory_update`（只更新
   「用户身份与喜好」记忆段，其余字段只读——称呼与 AI 名字/身份是用户的自我
-  设定；挂全部执行模式，aux/assistant 不挂）；长期助理（assistant 模式）的
-  环境快照里告知**整个记忆文件可读可改**——call_api 调
+  设定）；两条能力在组件 manifest 的 `capabilities` 里声明（`modes` ＝五个
+  执行模式，aux/assistant 不含），实现在 usermemory.go 的
+  `userMemoryCapabilityQuery/Update` 经 `registerComponentCapability` 登记；
+  长期助理（assistant 模式）的环境快照里告知**整个记忆文件可读可改**——call_api 调
   `GET/POST /api/user-memory`（按字段保存，未给出的字段保持不变；文件在助手
   数据目录内、受保护路径拦文件工具，接口是唯一通道）。**长度约束在写入入口**
   （1000 字/字段，rune 计）：设置页前端超长红字告知、按截断版提交（浏览器
-  保留完整草稿，不回填）；模型侧（工具与 call_api POST）超长整单报错、
+  保留完整草稿，不回填）；模型侧（`memory_update` 与 call_api POST）超长整单报错、
   不写入。设置页独立选项卡（设置 → AI 记忆与拟人化）由组件 client.js 注册；
   气泡颜色是纯前端设置：`--ai-bubble` CSS 变量注入 `<html>`
   （`web/style.css` 的 `.msg.user.ai` 气泡引用，缺省回退主题灰），保存后即时
@@ -1672,11 +1699,12 @@ worker 的 stdin/stdout 升级为带 id 的帧协议（req/event/decision/host/h
   之后开关即点即生效。**会话级记忆合并（2026-11-08）**：环境注入与模型侧
   读写按**会话视角**——该会话开关覆盖关闭时整块不注入；「会话独立」（浮窗
   总开关 CfgScope 开且未标跟随，见 sessioncx.go）时四字段+颜色逐项
-  「会话覆盖 > 全局值」（覆盖键=API 字段名，存会话附属数据），注入块与工具
+  「会话覆盖 > 全局值」（覆盖键=API 字段名，存会话附属数据），注入块与能力
   回执标注「本对话独立记忆」；`GET/POST /api/user-memory` 带 `?s=<会话id>`
   ＝会话读写（POST 在独立会话写覆盖、全局文档不动，与全局同值归一删记录），
-  不带 s＝全局（设置浮窗、经理 call_api）；`user_memory` 工具按所属会话的
-  视角查写。envPrompt 每轮现算，覆盖变化经环境快照差分自然送达该会话）。
+  不带 s＝全局（设置浮窗、经理 call_api）；`memory_query/memory_update` 按
+  所属会话的视角查写（component_call 分发时按会话开关核对）。envPrompt 每轮
+  现算，覆盖变化经环境快照差分自然送达该会话）。
 
 ## 插件与插件兼容层
 

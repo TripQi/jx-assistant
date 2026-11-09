@@ -106,6 +106,81 @@ manifest 顶层声明 `workers` 数组，主程序通用桥按声明拉起子进
   （见下节）按 id 解复用可交织；请求上限 32MB、call 超时 180 秒；市场服务端
   对 workers/hooks 声明的校验待硬化（当前未知字段放行，可发布）
 
+## 可分发能力：模型经统一入口 `component_call` 调用（方案 A，硬规矩）
+
+组件的**动态能力不进工具目录**。用户定调的原因：每个组件能力各占一个工具定义，
+加一个能力就改一次工具目录——请求前缀抖动、缓存失效、多模式目录维护成本全部
+上升。所以工具定义只装基础工具，组件能力走「**环境提示词声明 + 统一入口执行**」：
+
+- **入口**：基础工具 `component_call`（`componentcall.go`），参数
+  `component`（组件 id）+ `capability`（能力名）+ `args`（参数对象）。它**全模式
+  注册**（task/coding/office/beginner-coding/skill-create/aux/assistant 都在），
+  能不能调由能力声明决定。
+- **声明**：组件 `manifest.json` 顶层 `capabilities` 数组，声明的才是**白名单**
+  （没声明的能力宿主不给调）：
+
+```json
+"capabilities": [
+  {
+    "name": "memory_query",
+    "description": "查询用户记忆的全部字段（进模型可见的能力清单，一句中文说清干什么）",
+    "parameters": { "type": "object", "properties": {} },
+    "modes": ["task", "office", "coding", "beginner-coding", "skill-create"]
+  },
+  {
+    "name": "memory_update",
+    "description": "把「用户身份与喜好」记忆段整体替换为给定内容",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "memory": { "type": "string", "description": "新的记忆段全文（上限 1000 字）" }
+      },
+      "required": ["memory"]
+    },
+    "modes": ["task", "office", "coding", "beginner-coding", "skill-create"],
+    "writes": true
+  }
+]
+```
+
+  | 字段 | 含义 |
+  |---|---|
+  | `name` | 能力名，组件内唯一（`component_call` 的 `capability` 参数） |
+  | `description` | 一句中文，进环境快照的「组件能力」块——模型据此挑能力，写清**干什么**而不是怎么实现 |
+  | `parameters` | 参数 JSON Schema；只有 `properties` 的键与 `description` 会压成一行提示进能力行（宿主不对复杂 schema 建模，参数语义归组件实现）；缺省＝无参数 |
+  | `modes` | 可用模式白名单，**空＝全部模式**。沿用原专用工具的门控口径：只读答疑（aux）、长期助理（assistant）通常不声明 |
+  | `writes` | 写入型标记：计划模式下暂停（报错指路，与 write/edit 同理）；只读能力不受影响 |
+
+- **实现**：宿主注册表。组件后端代码在主程序里（B/C 形态都行——B 形态就是
+  主程序的组件文件），在该文件的 `init()` 里登记实现：
+
+```go
+func init() {
+    registerComponentCapability("user-memory", "memory_query", userMemoryCapabilityQuery)
+    registerComponentCapability("user-memory", "memory_update", userMemoryCapabilityUpdate)
+}
+
+func userMemoryCapabilityUpdate(t *toolContext, args json.RawMessage) (string, error) {
+    // args 是模型给的参数 JSON（可能 "{}"）；返回值是给模型看的文本回执
+}
+```
+
+- **模型怎么知道有这些能力**：`envPrompt` 的 `componentCapabilityBlock`
+  （`componentcall.go`）按「组件启用（会话视角）∩ 声明 ∩ 当前模式」渲染
+  「组件能力」块——组件名 + 能力清单 + 参数要点 + 调用方式。**组件开关只影响
+  这一块**（环境快照差分送达，前缀缓存不动），工具定义恒定。
+- **门控链**（`runComponentCall`，报错都指路）：组件存在 → 本会话启用
+  （会话级覆盖优先）→ 能力已声明（否则列出该组件已声明的能力名）→ 本模式
+  可用（否则列出可用模式）→ `writes` 能力的计划模式拦截 → 宿主已实现 → 执行。
+- **接一个新组件能力只要三步**：①manifest `capabilities` 加一条声明 →
+  ②宿主 `init()` 里 `registerComponentCapability` 登记实现 → ③构建后确认
+  环境快照的「组件能力」块出现，`component_call` 能调通。**不改 `toolsFor`、
+  不改任何工具定义**。
+- 参照实现：`usermemory.go` 的 `memory_query` / `memory_update`（原
+  `user_memory` 专用工具已退役，拆成这两条能力）；自检
+  `usermemory_test.go` 的 `TestComponentCallWhitelist`（白名单/模式/计划模式）
+  与 `TestComponentCallToolCatalogStable`（开关前后工具目录逐字一致）。
+
 ## 组件钩子（worker ⇄ 主程序后端的双向通道）
 
 哑管只有「前端 → worker」的单向请求。worker 需要参与主程序流程——拦截对话、

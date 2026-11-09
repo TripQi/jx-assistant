@@ -364,6 +364,14 @@ func jxaiHiddenRel(rel string) bool {
 // .jxai/uploads（用户上传文件的统一存放处）与 .jxai 其余内容照常可检索；
 // 按路径直接 read 访问不受影响。
 func (t *toolContext) envWalk(root string, fn func(rel string, e envEntry) error) error {
+	return t.envWalkSkip(root, nil, fn)
+}
+
+// envWalkSkip 是 envWalk 的可剪枝版本：skip 收到相对路径、名字与是否目录，返回
+// true 的目录整棵跳过、文件直接略过；内置的 .git/node_modules/.jxai 规则照旧生效
+// （任一命中即跳过）。只给需要按调用方条件剪枝的工具用（grep 的 exclude 参数），
+// list_dir/glob 等其余遍历保持 envWalk 原样——排除是显式请求，不是默认行为。
+func (t *toolContext) envWalkSkip(root string, skip func(rel, name string, isDir bool) bool, fn func(rel string, e envEntry) error) error {
 	if t.isRemote() {
 		rc, err := t.app.getRemoteClient(t.sess)
 		if err != nil {
@@ -384,6 +392,9 @@ func (t *toolContext) envWalk(root string, fn func(rel string, e envEntry) error
 				r := e.Name
 				if rel != "" {
 					r = rel + "/" + e.Name
+				}
+				if skip != nil && skip(r, e.Name, e.IsDir) {
+					continue
 				}
 				if e.IsDir {
 					if e.Name == ".git" || e.Name == "node_modules" {
@@ -423,6 +434,9 @@ func (t *toolContext) envWalk(root string, fn func(rel string, e envEntry) error
 				return nil
 			}
 			r := filepath.ToSlash(rel)
+			if skip != nil && skip(r, name, true) {
+				return filepath.SkipDir
+			}
 			if name == ".git" || (name == "node_modules" && p != root) {
 				return filepath.SkipDir
 			}
@@ -436,6 +450,9 @@ func (t *toolContext) envWalk(root string, fn func(rel string, e envEntry) error
 		}
 		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil {
+			return nil
+		}
+		if skip != nil && skip(filepath.ToSlash(rel), info.Name(), false) {
 			return nil
 		}
 		return fn(filepath.ToSlash(rel), envEntry{Name: info.Name(), Size: info.Size()})
@@ -913,19 +930,67 @@ func runGlob(t *toolContext, args json.RawMessage) (string, error) {
 
 func grepTool() Tool {
 	return Tool{
-		Spec: toolSpec("grep", "在目录内的文本文件中搜索内容，pattern 为正则表达式（非法时按字面量匹配）。返回 文件:行号: 内容。",
+		Spec: toolSpec("grep", "在目录内的文本文件中搜索内容，pattern 为正则表达式（非法时按字面量匹配）。返回 文件:行号: 内容。可选 exclude 忽略指定的目录/文件（逗号分隔）：纯名字（data、node_modules、*.log）匹配任意层级的目录名或文件名并整棵跳过；含 / 的按相对路径匹配（src/gen 连同子目录）；含通配符按 path.Match 匹配，一律不分大小写。默认不忽略任何业务目录（.git 与 node_modules 本就跳过）。",
 			objSchema(map[string]any{
 				"pattern": strProp("搜索模式（正则表达式）"),
 				"path":    strProp("起始目录，默认工作区根目录"),
+				"exclude": strProp("可选：忽略的目录/文件模式，逗号分隔，如 data,*.log,dist/generated"),
 			}, "pattern")),
 		Run: runGrep,
 	}
+}
+
+// splitExcludeList 把 exclude 参数拆成模式列表：逗号（中英文）/分号/空白都当分隔，
+// 反斜杠统一成斜杠、去掉前导 ./ 与结尾 /。默认空 = 不忽略任何东西。
+func splitExcludeList(s string) []string {
+	var out []string
+	f := func(r rune) bool { return r == ',' || r == '，' || r == ';' || r == '；' || r == ' ' || r == '\t' || r == '\r' || r == '\n' }
+	for _, raw := range strings.FieldsFunc(s, f) {
+		pat := strings.TrimPrefix(strings.TrimSuffix(strings.ReplaceAll(raw, "\\", "/"), "/"), "./")
+		if pat != "" {
+			out = append(out, pat)
+		}
+	}
+	return out
+}
+
+// excludedBy 判断相对路径 rel（及它这一级名字 name）是否被 exclude 模式命中：
+// 纯名字匹配任意层级的目录名/文件名（目录命中即整棵剪枝），含 / 的按相对路径
+// 前缀或通配匹配。一律不分大小写——搜索时大小写不一致几乎总是笔误而非意图。
+func excludedBy(pats []string, rel, name string) bool {
+	if len(pats) == 0 {
+		return false
+	}
+	lrel, lname := strings.ToLower(rel), strings.ToLower(name)
+	for _, pat := range pats {
+		p := strings.ToLower(pat)
+		if strings.Contains(p, "/") {
+			if lrel == p || strings.HasPrefix(lrel, p+"/") {
+				return true
+			}
+			if ok, _ := path.Match(p, lrel); ok {
+				return true
+			}
+			continue
+		}
+		if strings.ContainsAny(p, "*?[") {
+			if ok, _ := path.Match(p, lname); ok {
+				return true
+			}
+			continue
+		}
+		if lname == p {
+			return true
+		}
+	}
+	return false
 }
 
 func runGrep(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
 		Pattern string `json:"pattern"`
 		Path    string `json:"path"`
+		Exclude string `json:"exclude"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -942,8 +1007,13 @@ func runGrep(t *toolContext, args json.RawMessage) (string, error) {
 	if _, err := t.authorize(permAction{Op: "info", Tool: "grep", Path: root}); err != nil {
 		return "", err
 	}
+	excl := splitExcludeList(p.Exclude)
+	var skip func(rel, name string, isDir bool) bool
+	if len(excl) > 0 {
+		skip = func(rel, name string, isDir bool) bool { return excludedBy(excl, rel, name) }
+	}
 	found := []string{}
-	_ = t.envWalk(root, func(rel string, e envEntry) error {
+	_ = t.envWalkSkip(root, skip, func(rel string, e envEntry) error {
 		if len(found) >= 200 {
 			return filepath.SkipAll
 		}

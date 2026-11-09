@@ -43,7 +43,73 @@ func TestGrepDecodesGBK(t *testing.T) {
 	}
 }
 
-// TestGrepSkipsBinaryButReadsUTF16 回归：原来用「含 NUL 就跳过」判二进制，
+// TestGrepExclude 验证 exclude 参数（默认不忽略任何业务目录，全是显式请求）：
+// 纯名字剪整棵目录、通配符按名字过滤、含 / 的按相对路径前缀剪枝。
+func TestGrepExclude(t *testing.T) {
+	a := newCapTestApp(t, "data-grep-exclude-test")
+	ws, _ := filepath.Abs(roTestWS(t))
+	sess := &SessionMeta{ID: "s1", Mode: "task", Permission: permFull, Workspace: ws}
+	mustCreateSession(t, a, sess)
+	tc := &toolContext{ctx: context.Background(), app: a, sess: sess, toolName: "grep"}
+
+	files := []string{
+		"data/notes.md",
+		"src/main.go",
+		"src/app.log",
+		"gen/deep/x.go",
+	}
+	for _, rel := range files {
+		full := filepath.Join(ws, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("命中词 在这里\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	search := func(args string) string {
+		t.Helper()
+		out, err := runGrep(tc, json.RawMessage(fmt.Sprintf(`{"pattern":"命中词","path":%q%s}`, ws, args)))
+		if err != nil {
+			t.Fatalf("grep 失败: %v", err)
+		}
+		return out
+	}
+
+	// 1) 不传 exclude：四个都命中（默认不排除业务目录 data/）
+	all := search("")
+	for _, rel := range files {
+		if !strings.Contains(all, filepath.FromSlash(rel)) && !strings.Contains(all, rel) {
+			t.Fatalf("默认应命中 %s，实得:\n%s", rel, all)
+		}
+	}
+
+	// 2) 纯名字：data 整棵跳过
+	out := search(`,"exclude":"data"`)
+	if strings.Contains(out, "notes.md") || !strings.Contains(out, "main.go") || !strings.Contains(out, "x.go") {
+		t.Fatalf("exclude=data 只应剪掉 data/，实得:\n%s", out)
+	}
+
+	// 3) 通配符按名字过滤：*.log
+	out = search(`,"exclude":"*.log"`)
+	if strings.Contains(out, "app.log") || !strings.Contains(out, "main.go") {
+		t.Fatalf("exclude=*.log 只应剪掉日志，实得:\n%s", out)
+	}
+
+	// 4) 含 / 的相对路径前缀：gen/deep 连同子目录
+	out = search(`,"exclude":"gen/deep"`)
+	if strings.Contains(out, "x.go") || !strings.Contains(out, "notes.md") {
+		t.Fatalf("exclude=gen/deep 应剪掉 gen/deep 子树，实得:\n%s", out)
+	}
+
+	// 5) 多项 + 大小写不敏感
+	out = search(`,"exclude":"DATA, Gen"`)
+	if strings.Contains(out, "notes.md") || strings.Contains(out, "x.go") || !strings.Contains(out, "main.go") {
+		t.Fatalf("exclude=DATA, Gen 应剪掉两棵目录，实得:\n%s", out)
+	}
+}
+
 // UTF-16 文本必然带 NUL、会被整份误跳；改成按探测结果判二进制后应能搜到，
 // 而真正的二进制仍被跳过。
 func TestGrepSkipsBinaryButReadsUTF16(t *testing.T) {

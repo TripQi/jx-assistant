@@ -223,15 +223,22 @@ func TestUserMemoryEnvPromptToggle(t *testing.T) {
 	if _, err := runMemoryCap(t, a, &SessionMeta{ID: "um-sess-a", Mode: "task"}, "memory_query", ""); err == nil || !strings.Contains(err.Error(), "未启用") {
 		t.Fatalf("组件关闭后能力调用应报未启用: %v", err)
 	}
-	// 全空记忆：开启也不注入（没内容就没有块）
+	// 全空记忆：块照样有（靠「记忆维护」条目撑起，组件启用即可见），但不注入
+	// 任何内容条目、也不写占位行——记忆没填就不注入内容（用户口径）
 	if err := a.Components.SetEnabled(userMemoryComponentID, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.saveUserMemory(UserMemoryData{}); err != nil {
 		t.Fatal(err)
 	}
-	if env3 := a.envPrompt(sess); strings.Contains(env3, "# 用户记忆") {
-		t.Fatalf("记忆全空时环境快照不应有记忆块:\n%s", env3)
+	env3 := a.envPrompt(sess)
+	if !strings.Contains(env3, "# 用户记忆") || !strings.Contains(env3, "- 记忆维护：") {
+		t.Fatalf("记忆全空时环境快照应仍有记忆块与维护条目:\n%s", env3)
+	}
+	for _, bad := range []string{"- 用户的名字：", "- 你的名字（", "- 用户定义的你的身份：", "尚未填写"} {
+		if strings.Contains(env3, bad) {
+			t.Fatalf("记忆全空时不该出现 %q（没填就不注入内容）:\n%s", bad, env3)
+		}
 	}
 }
 

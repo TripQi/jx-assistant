@@ -264,11 +264,19 @@ func renderUserMemoryDoc(d UserMemoryData) string {
 
 // ---------- 环境提示词块（agent.go envPrompt 调用；不进系统提示词/工具定义） ----------
 
-// userMemoryEnvBlock 渲染注入各会话环境快照的记忆块：组件开启且任一文本字段
-// 有内容时出现；内容变化（设置页/工具/经理改动）经环境快照差分送达全部会话。
-// 颜色是前端设置不进提示词。多行字段压成单行（快照条目行语义，差分按行精确）；
-// md 文件存完整内容（写入入口把关长度），注入侧对超长字段截断到 1000 字加
-// 尾注——手工编辑写了超长内容也不会撑爆环境快照。
+// userMemoryEnvBlock 渲染注入各会话环境快照的记忆块：**组件在本会话启用就出块**，
+// 块里永远有「记忆维护」这一条（组件提供的读写入口：长期助理走 call_api 的
+// /api/user-memory，普通对话走 component_call 的记忆能力）；四个字段有内容才出
+// 对应的内容条目，全空时只有维护条目、不写占位内容（没填就不注入）。
+// 为什么必须「启用即出块」：开关状态得成为快照条目，关组件时差分引擎才有东西
+// 可减、下轮注入才收得到【移除】变更清单。2026-11-09 排障：此前以「任一字段有
+// 内容」为出现条件，全局记忆全空（首装/清空后即是）快照里从来没有这一块，关组件
+// 后快照逐字节不变、不落新 env 行，模型只看到工具目录变更、看不到环境变化；空
+// 记忆时长期助理也不知道有记忆维护通道可写。
+// 内容变化（设置页/工具/经理改动）经环境快照差分送达全部会话。颜色是前端设置
+// 不进提示词。多行字段压成单行（快照条目行语义，差分按行精确）；md 文件存完整
+// 内容（写入入口把关长度），注入侧对超长字段截断到 1000 字加尾注——手工编辑
+// 写了超长内容也不会撑爆环境快照。
 func (a *App) userMemoryEnvBlock(sess *SessionMeta) string {
 	// 会话视角：开关被本会话覆盖关闭 → 整块不注入（与开关覆盖语义一致）；
 	// 值按「会话覆盖 > 全局值」合并（CfgScope 开且未标跟随时）。envPrompt 每
@@ -292,16 +300,15 @@ func (a *App) userMemoryEnvBlock(sess *SessionMeta) string {
 	if v := envLine(d.AIIdentity); v != "" {
 		b.WriteString("- 用户定义的你的身份：" + v + "\n")
 	}
-	if b.Len() == 0 {
-		return "" // 四个字段全空：整块不出现
-	}
+	// 内容条目只在字段有内容时出现——记忆没填就不注入内容（空块也照样出，
+	// 靠下面的「记忆维护」条目撑起块的语义：组件提供的读写入口与开关状态）
 	switch sess.Mode {
 	case "assistant":
-		b.WriteString("- 记忆维护（长期助理专属）：整个记忆文件可读可改——call_api 调 GET /api/user-memory 读取、POST /api/user-memory 按字段保存（userName/userMemory/aiName/aiIdentity/bubbleColor，各上限 1000 字，超长会整单报错、不会静默截断；未给出的字段保持不变）" + userMemoryScopeNote(sessionScoped) + "。文件位于 " + filepath.ToSlash(a.userMemoryPath()) + "（助手数据目录内，文件工具被受保护路径拦截，读写一律走 call_api）。改动自下一轮起注入全部会话的环境提示词，请保持字段本意、谨慎修改\n")
+		b.WriteString("- 记忆维护（长期助理专属）：整个记忆文件可读可改——call_api 调 GET /api/user-memory 读取、POST /api/user-memory 按字段保存（userName/userMemory/aiName/aiIdentity/bubbleColor，各上限 1000 字，超长会整单报错、不会静默截断；未给出的字段保持不变）" + userMemoryScopeNote(sessionScoped) + "。文件位于 " + filepath.ToSlash(a.userMemoryPath()) + "（助手数据目录内，文件工具被受保护路径拦截，读写一律走 call_api）。改动自下一轮起注入全部会话的环境提示词，请保持字段本意、谨慎修改；记忆为空也照此读写（不要自己编造用户信息）\n")
 	case "aux":
-		b.WriteString("- 记忆维护：以上内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有记忆读写能力）\n")
+		b.WriteString("- 记忆维护：记忆内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有记忆读写能力）\n")
 	default:
-		b.WriteString("- 记忆维护：component_call 调组件 " + userMemoryComponentID + " 的两条能力——memory_query 查询全部字段、memory_update 更新「用户身份与喜好」段（对应上面「用户身份与习惯、喜好」一行；了解到用户新的身份/偏好/习惯/项目背景时主动更新；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
+		b.WriteString("- 记忆维护：component_call 调组件 " + userMemoryComponentID + " 的两条能力——memory_query 查询全部字段、memory_update 更新「用户身份与喜好」段（即「用户身份与习惯、喜好」一项；了解到用户新的身份/偏好/习惯/项目背景时主动更新；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
 	}
 	return "# 用户记忆（用户与助手的长期设定，全部会话生效）\n" + b.String()
 }

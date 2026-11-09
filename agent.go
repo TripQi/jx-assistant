@@ -691,10 +691,11 @@ func (a *App) envPrompt(sess *SessionMeta) string {
 			b.WriteString(extra + "\n")
 		}
 	}
-	// 用户记忆（组件 user-memory，usermemory.go）：开启且任一字段有内容时
-	// 注入——用户称呼/身份与喜好/AI 名字/AI 身份进快照，模型据此称呼用户、
-	// 自称与定位。变化（设置页/工具/经理改动）以环境快照差分送达全部会话；
-	// 组件关闭即整块消失（自查项「开关注入生效/关闭即移除」的落点在这）。
+	// 用户记忆（组件 user-memory，usermemory.go）：组件在本会话启用就注入——
+	// 内容字段（用户称呼/身份与喜好/AI 名字/AI 身份）填了才出条目，没填不注入；
+	// 块里始终带「记忆维护」条目（组件提供的读写入口），所以空记忆时块也在，
+	// 开关本身即快照条目（关组件＝条目移除，差分引擎发【移除】清单）。
+	// 变化（设置页/工具/经理改动）以环境快照差分送达全部会话。
 	if block := a.userMemoryEnvBlock(sess); block != "" {
 		b.WriteString(block + "\n")
 	}

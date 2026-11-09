@@ -5941,8 +5941,17 @@ async function prepareSend(forceContent, view) {
       // 没选中子对话：懒创建（与主对话首页同款）——发出第一条消息才真正建
       // 子对话（继承主对话上下文）并就地打开，消息照发，不提前留空会话；
       // 无主对话可挂靠或创建失败由 newAuxChat 就地提示，输入内容保留、本轮中止
+      const typedText = input.value; // 空态里打进来的这句话
       await newAuxChat();
       if (!view.state.cur) { if (armed) runHintOff(view); return; }
+      // 懒创建走的是 openSubSession，它按「切换会话即整体换草稿」的铁律把输入框
+      // 换成新子对话的空草稿——空态里刚打的这句话会被一并清掉，下面组装正文就
+      // 只剩空串（后端以 content 不能为空拒收），右栏留下一个「话没发出去」的空
+      // 子对话。这条消息是用户点发送之前就写好的，与切换会话无关：放回输入框，
+      // 后面组装正文、发送失败兜底都还认输入框这一处。
+      input.value = typedText;
+      autoGrow(input);
+      persistSubDraftLS(); // 放回的字同样落盘：万一这次发送失败，切走再回来还在
     }
   }
   // 附件先落盘：注记要拼进消息头（真实落盘文件名/uid/判重说明上传完才知道），

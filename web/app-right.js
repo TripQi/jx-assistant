@@ -423,6 +423,10 @@ function subClearCurrent() {
   renderPanels();            // 子对话的待办卡随之回到主对话区/角标堆
   subView.col.innerHTML = '<div class="empty"><h2>子对话</h2><p>在下方输入框直接发消息，会自动新建子对话；顶部下拉可切换已有的，数字助理派发的也出现在这里。</p></div>';
   $('sub-input').value = ''; // 没有选中的子对话：不留上一个子对话的草稿
+  // 空态没有「会话草稿」这个上下文，引用胶囊只可能是不该留在这儿的上一个子对话
+  // 的残留（它的正文标记也在上面被清掉的输入框里）。留着它，空态直发时那句
+  // 「引用N」就会指向一条已经不存在的引用——空态一律收掉。
+  clearQuote(subView);
   setSubPlaceholder('发消息自动新建子对话…'); // 空态引导：像新对话页一样直接打字就能开聊
   autoGrow($('sub-input'));
 }

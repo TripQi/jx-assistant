@@ -1,6 +1,6 @@
 package main
 
-// 数字经理主对话的「版本」模型（设置 · 对话历史与压缩）。
+// 长期助理主对话的「版本」模型（设置 · 对话历史与压缩）。
 //
 // 历史：以前想让助理「重新开始」只能「清空」——真删历史，旧对话、文件快照、
 // 交付记录一并没了。现在改成「换版本」：新建一版就是从零开始的全新数字助理，
@@ -52,7 +52,7 @@ type AssistantVersion struct {
 	Current   bool   `json:"current"`
 }
 
-// isAssistantVersionSession 判定一个会话是不是「数字经理主对话的某一版」：
+// isAssistantVersionSession 判定一个会话是不是「长期助理主对话的某一版」：
 // assistant 模式且是顶层会话（子对话另有自己的标题与生命周期，不算一版）。
 // 与前端 isAssistantMainSession 同一口径。
 func isAssistantVersionSession(m *SessionMeta) bool {
@@ -147,7 +147,7 @@ func (a *App) currentAssistantID() string {
 }
 
 // currentAssistant 取当前版本的会话。设置页的压缩/清空、待办转交、任务求助
-//（request_manager）、前端「跟数字经理对话」入口全都认它——这是「当前主对话是谁」
+//（request_manager）、前端「跟长期助理对话」入口全都认它——这是「当前主对话是谁」
 // 的唯一口径。
 //
 // 没有版本时返回 nil：设置页的动作不该顺手建出一个空对话（要建的地方显式走
@@ -166,7 +166,7 @@ func (a *App) currentAssistant() *SessionMeta {
 	for _, m := range sessions {
 		if isAssistantVersionSession(m) && !m.Archived {
 			if err := a.setCurrentAssistant(m.ID); err != nil {
-				log.Printf("[数字经理] 落「当前版本」指针失败（会话 %s）：%v", m.ID, err)
+				log.Printf("[长期助理] 落「当前版本」指针失败（会话 %s）：%v", m.ID, err)
 			}
 			return m
 		}
@@ -217,7 +217,7 @@ func (a *App) createAssistantVersion() (*AssistantVersion, error) {
 		return nil, fmt.Errorf("切换当前版本失败：%w", err)
 	}
 	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
-	log.Printf("[设置] 已新建数字经理第 %d 版（会话 %s），老版本原样保留", next, m.ID)
+	log.Printf("[设置] 已新建长期助理第 %d 版（会话 %s），老版本原样保留", next, m.ID)
 	return &AssistantVersion{
 		SessionID: m.ID, Version: next, Title: m.Title, Messages: 0,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, Current: true,
@@ -232,7 +232,7 @@ func (a *App) switchAssistantVersion(id string) (*AssistantVersion, error) {
 		return nil, errors.New("这一版不存在（可能已被删除）")
 	}
 	if !isAssistantVersionSession(m) {
-		return nil, errors.New("只能切到数字经理主对话的某一版")
+		return nil, errors.New("只能切到长期助理主对话的某一版")
 	}
 	if m.Archived {
 		return nil, errors.New("这一版已归档，先恢复再切过去")
@@ -241,7 +241,7 @@ func (a *App) switchAssistantVersion(id string) (*AssistantVersion, error) {
 		return nil, fmt.Errorf("切换当前版本失败：%w", err)
 	}
 	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
-	log.Printf("[设置] 数字经理当前版本已切到会话 %s", m.ID)
+	log.Printf("[设置] 长期助理当前版本已切到会话 %s", m.ID)
 	// 版本号由 assistantVersions 统一补号/排序得出，切换响应也照它的口径回（避免两处口径）
 	versions, err := a.assistantVersions()
 	if err != nil {
@@ -256,7 +256,7 @@ func (a *App) switchAssistantVersion(id string) (*AssistantVersion, error) {
 }
 
 // handleAssistantVersions 版本清单 + 当前版本（设置 · 对话历史与压缩；
-// 前端「跟数字经理对话」入口也靠它拿当前版本 id，不再自己按更新时间猜）。
+// 前端「跟长期助理对话」入口也靠它拿当前版本 id，不再自己按更新时间猜）。
 func (a *App) handleAssistantVersions(w http.ResponseWriter, r *http.Request) {
 	versions, err := a.assistantVersions()
 	if err != nil {

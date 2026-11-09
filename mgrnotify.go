@@ -2,7 +2,7 @@ package main
 
 // 「审批/提问的经理代理」：经理触达过的会话里，审批卡/提问卡（含计划审批）
 // 挂出 mgrNotifyAfterSec 秒（默认 30，设置 mgrNotify）仍无人处理时，自动给
-// 数字经理主对话投一条通知——会话标题/id、卡片 id、问题或申请摘要、可选项
+// 长期助理主对话投一条通知——会话标题/id、卡片 id、问题或申请摘要、可选项
 // 与 call_api 代批路径齐全；之后无论谁给出决议（用户在界面选 / 等待超时 /
 // 经理经 call_api 代选）都回告经理一条，并标注来源（经理自己选的标「你已
 // 代选」）。与「久等声光提醒用户」（askAlert，默认 4 分钟唤窗口+叮声+盖屏）
@@ -11,7 +11,7 @@ package main
 // 通知范围只限「经理触达过的会话」（防骚扰，用户自建且经理从未碰过的对话
 // 不通知）：
 //   - dispatch_task 派生：会话天生带 DispatchedBy（与回报链同源，直接当依据）；
-//     待办调度器的系统派生（todoComponentID）除外——它明确不打扰数字经理；
+//     待办调度器的系统派生（todoComponentID）除外——它明确不打扰长期助理；
 //   - send_to_session 发过话：首次发话时补一条会话附属数据标记（mgrLinkKey）。
 //     转达消息本身（origin=task）与普通会话的 dispatch_sub 投递无法区分，
 //     只能在经理发话那一刻标。
@@ -37,7 +37,7 @@ const mgrLinkKey = "mgrlink"
 const mgrNotifyOrigin = "mgrcard"
 
 // managerLinked 判定一个会话是否「经理触达过」。经理主对话自己不算（不会
-// 通知自己）；待办调度器的系统派生不算（它的派生标记本就注明不打扰数字经理）。
+// 通知自己）；待办调度器的系统派生不算（它的派生标记本就注明不打扰长期助理）。
 func (a *App) managerLinked(m *SessionMeta) bool {
 	if m == nil || m.Mode == "assistant" {
 		return false
@@ -130,7 +130,7 @@ func (a *App) deliverManagerReport(text string) {
 
 // ---------- 决议来源标注（谁点的，回告里说清） ----------
 
-// managerResolveCaller 判断这条决定请求是否数字经理自己经 call_api 代批的：
+// managerResolveCaller 判断这条决定请求是否长期助理自己经 call_api 代批的：
 // 直调请求带调用者会话头（runCallAPI 注入），与当前经理主对话相符才算。
 // 前端按钮与远程转发都不带这个头，一律算用户。这只是回告的来源标注，不是
 // 鉴权——call_api 自己已过目录/权限/危险三道闸。
@@ -204,14 +204,14 @@ func (a *App) reportQuestionOutcome(q *UserQuestion, ans string, timedOut bool) 
 		"）的提问卡（" + q.ID + "）已有结果：" + outcome + "。" + mgrOutcomeSourceLine(byMgr, timedOut))
 }
 
-// mgrOutcomeSourceLine 决议来源的回告口径：经理自己选的标「你已代选」；
+// mgrOutcomeSourceLine 决议来源的回告口径：经理自己选的标「长期助理代选」；
 // 超时是没人处理，不算谁的决议，不落来源。
 func mgrOutcomeSourceLine(byManager, timedOut bool) string {
 	if timedOut {
 		return ""
 	}
 	if byManager {
-		return "来源：你已代选。"
+		return "来源：长期助理代选。"
 	}
 	return "来源：用户在界面处理。"
 }

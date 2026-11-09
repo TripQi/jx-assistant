@@ -138,7 +138,7 @@ body.sb-collapsed #sidebar { width: 0; min-width: 0; border-right-width: 0; }
   transform-box: fill-box; transform-origin: center;   /* 以图标自身盒中心为轴心，扭动不跑偏 */
   /* 图标颜色不单独设：currentColor 跟随按钮文字色（浅色主题黑、深色主题浅，自适应） */
 }
-/* 三个入口图标比全局默认（16px）稍放大；数字经理的小人是视觉主角，再大一号 */
+/* 三个入口图标比全局默认（16px）稍放大；长期助理的小人是视觉主角，再大一号 */
 #sidebar .actions .side-btn > svg { width: 18px; height: 18px; }
 #sidebar .actions #btn-new-assistant .doll-wrap svg { width: 20px; height: 20px; }
 #sidebar .actions .side-btn.wig > svg,
@@ -1610,7 +1610,7 @@ body.rp-open .w-handle { display: none; }
 
 /* 设置页：上下文压缩 */
 .compact-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-/* 设置 · 对话历史与压缩：数字经理主对话按版本管理（新建一版为主入口，压缩次之）。
+/* 设置 · 对话历史与压缩：长期助理主对话按版本管理（新建一版为主入口，压缩次之）。
    版本**不铺开成一串卡片**：一个紧凑下拉选当前用哪一版（设置页唯一入口，见
    app-core.js 的 renderAssistantVersionPicker），动作按钮放在下拉下面。 */
 .cs-sub { font-size: 12px; color: var(--text-2); margin: 16px 0 8px; }
@@ -1624,7 +1624,7 @@ body.rp-open .w-handle { display: none; }
 .compact-actions .set-act:disabled { opacity: .55; cursor: default; }
 .compact-actions .set-act.primary { color: var(--accent); border-color: rgba(77, 107, 254, .45); font-weight: 600; }
 
-/* 数字经理版本下拉（只在设置页「跟数字经理对话」那一节一处）。按钮是一枚细条
+/* 长期助理版本下拉（只在设置页「跟长期助理对话」那一节一处）。按钮是一枚细条
    （写「第 N 版」），点开**就地展开**列出全部版本：每项「第几版 + 消息数 · 最后
    更新时间」，当前版打勾高亮。菜单不浮层——设置页所在的 .set-pane 是滚动容器，
    浮层会被它的滚动边界裁掉（这里是唯一的入口，按就地展开写即可）。 */
@@ -1711,7 +1711,7 @@ body.rp-open .w-handle { display: none; }
   background: transparent;
   /* 内容自适应高度交给浏览器原生（Chromium≥123）：不再由 JS「写 auto→读
      scrollHeight→写回」量高——那条路径每次按键强制同步布局，在几百条消息的
-     超大对话（数字经理主对话）上是逐键卡顿的主凶。不支持的内核（如 iOS
+     超大对话（长期助理主对话）上是逐键卡顿的主凶。不支持的内核（如 iOS
      Safari）由 app-core.js 的 autoGrow 兜底量高。max/min-height 照常生效：
      高度被钳住时超出部分走 textarea 自带滚动。 */
   field-sizing: content;

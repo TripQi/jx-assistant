@@ -38,7 +38,7 @@ func TestCallAPICatalogFull(t *testing.T) {
 
 	// 各档接口齐全：只读 / 读写 / 完全访问 / 危险各至少一条
 	for _, want := range []string{"GET /api/status", "POST /api/sessions [", "POST /api/config [", "DELETE /api/sessions/{id} [",
-		// 组件（内置/用户两档）与插件的清单与开关：数字经理要能查能开关（含会话级覆盖）
+		// 组件（内置/用户两档）与插件的清单与开关：长期助理要能查能开关（含会话级覆盖）
 		"GET /api/components [", "POST /api/components [", "GET /api/plugins [", "POST /api/plugins ["} {
 		if !strings.Contains(cat, want) {
 			t.Fatalf("完整目录应含 %s：\n%s", want, cat)

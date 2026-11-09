@@ -4,12 +4,12 @@ package main
 //
 // 一条持久化的任务清单 + 一个 20 秒一拍的调度循环。任务分两类：
 //   - assistant（AI 任务）：到点按**执行目标**（Target）分发——
-//     manager=数字经理（默认，现状）：把描述作为一条用户消息投给数字助理主对话，
+//     manager=长期助理（默认，现状）：把描述作为一条用户消息投给数字助理主对话，
 //       由它按自己的编排能力安排执行（派子会话、选工作区、汇报结果都是它的事）。
 //       这里不做任何模型/模式设置，也【不】等它跑完——记录落「已转交」即完成。
 //     task=新的工作任务：走 createSession 单源（sessioncreate.go，与 dispatch_task
 //       同一入口收敛）建一个独立的工作任务会话，把描述直接投给它执行——不打扰
-//       数字经理，结果在工作任务会话与执行记录里看（sessionId 指向新会话）。
+//       长期助理，结果在工作任务会话与执行记录里看（sessionId 指向新会话）。
 //   - command（程序任务）：到点用系统 shell 在指定工作目录直接运行命令（不经过
 //     模型）。默认进 OS 级沙箱（修改工作区），任务上可显式改成完全访问；
 //     退出码与输出节选进执行记录。
@@ -66,7 +66,7 @@ const (
 )
 
 // AI 任务（executor=assistant）的执行目标：到点把任务描述发给谁。
-//   - manager：数字经理（数字助理主对话）——既有行为，默认值；
+//   - manager：长期助理（数字助理主对话）——既有行为，默认值；
 //   - task：新的工作任务——建独立工作任务会话直接执行（见 handToTaskSession）。
 const (
 	targetManager = "manager"
@@ -95,7 +95,7 @@ type TaskItem struct {
 	Description string   `json:"description"` // 将来原样派出去的那段话（自足，不依赖聊天记录）
 	Enabled     bool     `json:"enabled"`
 	Executor    string   `json:"executor"`         // assistant | command
-	Target      string   `json:"target,omitempty"` // 仅 assistant 类：manager=数字经理（默认）| task=新工作任务
+	Target      string   `json:"target,omitempty"` // 仅 assistant 类：manager=长期助理（默认）| task=新工作任务
 	Schedule    Schedule `json:"schedule"`
 	// 以下仅 command 类：工作目录、要在那里运行的命令、执行档位（沙箱 / 完全访问）。
 	Dir        string `json:"dir,omitempty"`
@@ -506,7 +506,7 @@ func describeExecutor(t *TaskItem) string {
 	if t.Target == targetTask {
 		return "AI 任务（到点新建工作任务会话执行）"
 	}
-	return "AI 任务（到点转交数字经理执行）"
+	return "AI 任务（到点转交长期助理执行）"
 }
 
 // describeTarget 是 AI 任务执行目标的中文称呼（工具详情与立即执行的回执共用）。
@@ -514,7 +514,7 @@ func describeTarget(t *TaskItem) string {
 	if t.Target == targetTask {
 		return "新的工作任务"
 	}
-	return "数字经理"
+	return "长期助理"
 }
 
 // weekdayName 是星期编号的中文名。
@@ -621,7 +621,7 @@ func seedTodoData() *TodoData {
 				"这是一条示例待办，本身没有任何实际工作要做，只用来演示效果：",
 				"",
 				"- 它是不定时任务，不会自己触发；",
-				"- 点卡片上的「立即执行」，任务描述会原样转交给数字经理，数字经理那边像收到一条新消息一样开始处理；",
+				"- 点卡片上的「立即执行」，任务描述会原样转交给长期助理，长期助理那边像收到一条新消息一样开始处理；",
 				"- 想看定时/循环定时的效果，可以编辑它把执行方式改成「每天 21:00」之类，或者直接新建一条。",
 				"",
 				"（给数字助理的说明：收到本条时不要执行任何实际操作、不要读写文件、不要派人干活，只回一句「示例任务已收到，转交链路正常」即可。看完可以删掉这条示例。）",
@@ -856,7 +856,7 @@ func (r todoRequest) normalize() (executor, dir, command, shell, perm, target st
 		}
 		return executor, dir, command, shell, perm, "", nil
 	}
-	// AI 任务的执行目标：空与未知值一律回落数字经理（历史数据没有该字段，
+	// AI 任务的执行目标：空与未知值一律回落长期助理（历史数据没有该字段，
 	// 读出来就是空——全部按既有行为走，不需要数据迁移）。
 	target = strings.ToLower(strings.TrimSpace(r.Target))
 	if target != targetTask {
@@ -1161,14 +1161,14 @@ func (s *todoScheduler) handToAssistant(task *TaskItem, record *RunRecord) (stri
 				run.publish(ev)
 			}, true, s.app.queueAutoSendOn())
 			if err != nil {
-				log.Printf("[待办] 任务 %s 转交后数字经理（会话 %s）本轮执行失败: %v", task.ID, sess.ID, err)
+				log.Printf("[待办] 任务 %s 转交后长期助理（会话 %s）本轮执行失败: %v", task.ID, sess.ID, err)
 			} else {
 				run.markCleanEnd() // 正常收尾：收口时兜底续发窗口期内新挤进队列的消息
 			}
 			s.app.broadcast(Event{Type: "session_updated", SessionID: sess.ID})
 		}()
 	}
-	summary := fmt.Sprintf("已转交数字经理（会话 %s），由它安排执行并在完成后汇报结果。", sess.ID)
+	summary := fmt.Sprintf("已转交长期助理（会话 %s），由它安排执行并在完成后汇报结果。", sess.ID)
 	s.mu.Lock()
 	s.patchRecord(record.ID, map[string]any{"status": "ok", "sessionId": sess.ID, "summary": summary})
 	s.mu.Unlock()
@@ -1176,12 +1176,12 @@ func (s *todoScheduler) handToAssistant(task *TaskItem, record *RunRecord) (stri
 }
 
 // handToTaskSession 是 AI 任务「新的工作任务」目标的执行体：建一个独立的工作
-// 任务会话，把描述作为首条任务消息交给它直接执行——不经数字经理转手，也不
+// 任务会话，把描述作为首条任务消息交给它直接执行——不经长期助理转手，也不
 // 打扰它。建会话必须走 createSession 单源（sessioncreate.go，与 dispatch_task
 // 同一入口收敛，不另写建会话逻辑）：字段构造、权限默认、.jxai/tmp 预建与人工
 // /派发建会话同一处。派生标记 dispatched_by 记待办调度器（todoComponentID，
 // 系统/定时派生）：它不是会话 id，回报链解析（dispatchOwner）按它找派发方时
-// 查无此会话，即如实「无回报对象」——数字经理不会被定时任务自动叫醒；执行
+// 查无此会话，即如实「无回报对象」——长期助理不会被定时任务自动叫醒；执行
 // 体与收尾广播用现有任务回报链同一套 runSubAgent（sub_end / session_updated /
 // done、侧栏未读绿点照发），结果在工作任务会话与待办执行记录（sessionId 指向
 // 新会话，页面「查看会话」直达）里看。
@@ -1193,15 +1193,15 @@ func (s *todoScheduler) handToTaskSession(task *TaskItem, record *RunRecord) (st
 	sub, err := s.app.createSession(createSessionParams{
 		Mode:         "task", // 按任务性质默认通用工作任务（与 dispatch_task 不传 mode 同一默认）
 		Title:        title,
-		Workspace:    s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与数字经理主对话同口径）
+		Workspace:    s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与长期助理主对话同口径）
 		Permission:   permWorkspace,
-		DispatchedBy: todoComponentID, // 系统派生标记：回报链查无此会话，不自动回报、不打扰数字经理
+		DispatchedBy: todoComponentID, // 系统派生标记：回报链查无此会话，不自动回报、不打扰长期助理
 	})
 	if err != nil {
 		return "", fmt.Errorf("创建工作任务会话失败: %w", err)
 	}
 	text := fmt.Sprintf("【待办任务派发｜%s】\n任务：%s\n\n%s", triggerLabel(record.Trigger), task.Title, task.Description)
-	// 投递走统一收口 deliverToSession（与用户发消息/数字经理派发同路）：AI 发出的
+	// 投递走统一收口 deliverToSession（与用户发消息/长期助理派发同路）：AI 发出的
 	// 用户消息（kind=aiuser），空闲即落库并占住执行权，忙则插话（AI 发话一律
 	// 插话）。新建会话必然空闲（Started 恒真），防御分支照抄不省略。
 	d := s.app.deliverToSession(sub, text, kindAiUser, "todo")
@@ -1216,7 +1216,7 @@ func (s *todoScheduler) handToTaskSession(task *TaskItem, record *RunRecord) (st
 }
 
 // assistantSession 取当前版本的数字助理主对话；没有版本就建第一版（与前端
-// 「跟数字经理对话」入口、设置页版本清单同一套参数、同一个「当前版本」指针，
+// 「跟长期助理对话」入口、设置页版本清单同一套参数、同一个「当前版本」指针，
 // 见 assistant_versions.go）。定时任务转交与任务求助都认这一版——用户切到哪一版，
 // 任务就找哪一版，不会各自找各自「最近更新的那个」。
 func (a *App) assistantSession() (*SessionMeta, error) {

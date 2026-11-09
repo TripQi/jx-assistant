@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// newRequestMgrTestApp 建一个带临时库与临时工作区的 App，**不预置数字经理会话**
+// newRequestMgrTestApp 建一个带临时库与临时工作区的 App，**不预置长期助理会话**
 // （求助通道要能自己找/建它），并返回一个顶层任务会话。
 func newRequestMgrTestApp(t *testing.T) (*App, *SessionMeta) {
 	t.Helper()
@@ -97,7 +97,7 @@ func TestRequestManagerDeliversToManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("求助失败: %v", err)
 	}
-	if !strings.Contains(out, "已发给数字经理") || !strings.Contains(out, "不用等") {
+	if !strings.Contains(out, "已发给长期助理") || !strings.Contains(out, "不用等") {
 		t.Fatalf("返回值应写明已发出且不用等：%s", out)
 	}
 	mgr := managerOf(t, a)
@@ -375,7 +375,7 @@ func TestRequestManagerEndToEndWithFakeModel(t *testing.T) {
 
 	// ① 模型真的调到了 request_manager，工具结果写明已发出且不用等
 	waitFor(t, "任务侧工具调用落库", func() bool { return msgHas(t, a, task.ID, "request_manager") })
-	waitFor(t, "任务侧工具结果落库", func() bool { return msgHas(t, a, task.ID, "已发给数字经理", "不用等") })
+	waitFor(t, "任务侧工具结果落库", func() bool { return msgHas(t, a, task.ID, "已发给长期助理", "不用等") })
 	// ② 经理会话收到求助（没经理会话就自动建出来），身份是 aiuser/origin=help
 	mgr := managerOf(t, a)
 	if mgr == nil {

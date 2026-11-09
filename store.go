@@ -1203,7 +1203,7 @@ func (s *Store) RawMessages(id string, offset, limit int) ([]*StoredMessage, int
 	return out, total, rows.Err()
 }
 
-// MessageCount 返回会话的消息条数。数字经理主对话的版本清单只要条数、
+// MessageCount 返回会话的消息条数。长期助理主对话的版本清单只要条数、
 // 不读正文（那边一版几万条，读完只为数字数不值得）。
 func (s *Store) MessageCount(id string) (int, error) {
 	var n int

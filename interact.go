@@ -96,7 +96,7 @@ type UserQuestion struct {
 	decided    bool
 	ch         chan string
 	timer      *time.Timer // 停表入口（holdQuestion）用它掐掉超时；permMu 保护
-	// 经理代理通知（mgrnotify.go）：notified=已通知过数字经理（决议据此回告）；
+	// 经理代理通知（mgrnotify.go）：notified=已通知过长期助理（决议据此回告）；
 	// byManager=决议由经理经 call_api 代选（回告标注来源）。permMu 保护。
 	notified  bool
 	byManager bool
@@ -158,7 +158,7 @@ func (a *App) requestUserAnswer(ctx context.Context, sess *SessionMeta, q *UserQ
 		})
 	}
 	// 经理代理通知（mgrnotify.go）：经理触达过的会话，卡挂了设置时长（默认
-	// 30 秒）仍无人回答（且未停表——用户碰过卡片=有人在场）就通知数字经理
+	// 30 秒）仍无人回答（且未停表——用户碰过卡片=有人在场）就通知长期助理
 	//——与上面的用户声光提醒并行，各管各。
 	var mgrNotifyTimer *time.Timer
 	if a.Cfg.mgrNotifyOn() {

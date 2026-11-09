@@ -13,7 +13,7 @@ const kindChat = "chat" // 正常对话：role=user/assistant/tool；assistant �
 // 系统对待与用户消息完全一致：开新回合、组装时后面跟一条时间提示词（time
 // 通道，见规范 §1.2）、发模型就是 user 消息；前端右对齐偏白的「AI 用户」气泡
 // （可复制、不可编辑重发）。origin 沿用 report 的子类记法（task/dispatch/todo/help——
-// help=任务会话找数字经理协调的【任务求助】消息，见 requestmgr.go）。
+// help=任务会话找长期助理协调的【任务求助】消息，见 requestmgr.go）。
 const kindAiUser = "aiuser"
 
 // 上下文注入（发给模型的拼装材料；历史行不进上下文，组装时现场归位）

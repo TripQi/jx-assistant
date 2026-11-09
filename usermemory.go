@@ -11,7 +11,7 @@ package main
 //     不撑爆快照，文件仍存全文）；
 //   - 权限分级：普通任务对话拿到专用工具 user_memory（查询全部字段，但只
 //     能更新「用户身份与喜好」记忆段——称呼与 AI 名字/身份是用户的自我
-//     设定，模型只读）；数字经理（assistant 模式）在环境提示词里被告知
+//     设定，模型只读）；长期助理（assistant 模式）在环境提示词里被告知
 //     整个记忆文件可读可改，走 call_api 的 GET/POST /api/user-memory——
 //     文件在助手数据目录内，文件工具被受保护路径拦下，接口是唯一通道；
 //   - 长度约束（1000 字/字段，rune 计）在写入入口把关而非存储层：设置页
@@ -295,7 +295,7 @@ func (a *App) userMemoryEnvBlock(sess *SessionMeta) string {
 	}
 	switch sess.Mode {
 	case "assistant":
-		b.WriteString("- 记忆维护（数字经理专属）：整个记忆文件可读可改——call_api 调 GET /api/user-memory 读取、POST /api/user-memory 按字段保存（userName/userMemory/aiName/aiIdentity/bubbleColor，各上限 1000 字，超长会整单报错、不会静默截断；未给出的字段保持不变）" + userMemoryScopeNote(sessionScoped) + "。文件位于 " + filepath.ToSlash(a.userMemoryPath()) + "（助手数据目录内，文件工具被受保护路径拦截，读写一律走 call_api）。改动自下一轮起注入全部会话的环境提示词，请保持字段本意、谨慎修改\n")
+		b.WriteString("- 记忆维护（长期助理专属）：整个记忆文件可读可改——call_api 调 GET /api/user-memory 读取、POST /api/user-memory 按字段保存（userName/userMemory/aiName/aiIdentity/bubbleColor，各上限 1000 字，超长会整单报错、不会静默截断；未给出的字段保持不变）" + userMemoryScopeNote(sessionScoped) + "。文件位于 " + filepath.ToSlash(a.userMemoryPath()) + "（助手数据目录内，文件工具被受保护路径拦截，读写一律走 call_api）。改动自下一轮起注入全部会话的环境提示词，请保持字段本意、谨慎修改\n")
 	case "aux":
 		b.WriteString("- 记忆维护：以上内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有修改工具）\n")
 	default:
@@ -328,7 +328,7 @@ func oneLine(s string) string {
 	return strings.TrimSpace(strings.NewReplacer("\r\n", "；", "\n", "；", "\r", "").Replace(s))
 }
 
-// ---------- HTTP（前端设置页 + 数字经理 call_api 共用） ----------
+// ---------- HTTP（前端设置页 + 长期助理 call_api 共用） ----------
 
 // userMemoryReqSession 请求的会话语境：?s=<会话id> 带 s 时返回（会话视角的
 // 读写）；不带 s＝全局（设置浮窗、经理 call_api）。空 ID 安全回落全局。

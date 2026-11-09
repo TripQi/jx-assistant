@@ -165,7 +165,7 @@ type Config struct {
 	AskAlert AskAlertCfg `json:"askAlert,omitempty"`
 	// 经理代理通知（mgrnotify.go）：经理触达过的会话（dispatch_task 派生 /
 	// send_to_session 发过话）里，审批/提问卡挂出 AfterSec 秒（默认 30）仍
-	// 无人处理时，自动给数字经理主对话投一条通知（含 call_api 代批路径），
+	// 无人处理时，自动给长期助理主对话投一条通知（含 call_api 代批路径），
 	// 决议随后回告并标注来源。与上面的询问提醒并行，各管各：一个叫醒用户、
 	// 一个叫醒经理。Enabled=nil 表示未写过该键＝默认开启。
 	MgrNotify MgrNotifyCfg `json:"mgrNotify,omitempty"`

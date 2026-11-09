@@ -178,7 +178,7 @@ func TestUserMemoryEnvPromptToggle(t *testing.T) {
 	}
 	// 经理模式的环境快照说明整文件通道与文件路径
 	mgrEnv := a.envPrompt(&SessionMeta{Mode: "assistant", Permission: permWorkspace, Workspace: a.Cfg.Workspace})
-	for _, want := range []string{"数字经理专属", "GET /api/user-memory", "POST /api/user-memory", "user-memory.md"} {
+	for _, want := range []string{"长期助理专属", "GET /api/user-memory", "POST /api/user-memory", "user-memory.md"} {
 		if !strings.Contains(mgrEnv, want) {
 			t.Fatalf("经理环境快照应含 %q:\n%s", want, mgrEnv)
 		}

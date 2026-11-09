@@ -44,7 +44,7 @@ func newMgrNotifyTestApp(t *testing.T) (a *App, mgr, task, solo *SessionMeta) {
 		}
 		return m
 	}
-	mgr = mk("mgr-main", "数字经理", "assistant", "")
+	mgr = mk("mgr-main", "长期助理", "assistant", "")
 	task = mk("task-disp", "登录页样式", "coding", "mgr-main") // dispatch_task 派生（存量直接拿 DispatchedBy 当依据）
 	solo = mk("task-solo", "私人调研", "coding", "")            // 用户自建，经理从未触达
 	return a, mgr, task, solo
@@ -201,7 +201,7 @@ func TestMgrNotifyApprovalFlow(t *testing.T) {
 	}
 }
 
-// 经理代答（计划审批）：通知含计划摘要与哨兵答案说明；经理代选后回告标「你已代选」。
+// 经理代答（计划审批）：通知含计划摘要与哨兵答案说明；经理代选后回告标「长期助理代选」。
 func TestMgrNotifyManagerProxyOnPlan(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
@@ -238,7 +238,7 @@ func TestMgrNotifyManagerProxyOnPlan(t *testing.T) {
 		t.Fatal("代批没有唤醒等待方")
 	}
 	texts = waitMgrRows(t, a, mgr.ID, 2)
-	for _, want := range []string{"【提问结果】", "已批准（按计划执行）", "你已代选"} {
+	for _, want := range []string{"【提问结果】", "已批准（按计划执行）", "长期助理代选"} {
 		if !strings.Contains(texts[1], want) {
 			t.Fatalf("代选回告应含 %q：\n%s", want, texts[1])
 		}
@@ -323,7 +323,7 @@ func TestManagerLinkedMarking(t *testing.T) {
 		t.Fatal("经理主对话自己不算（不会通知自己）")
 	}
 	if a.managerLinked(&SessionMeta{ID: "x", Mode: "coding", DispatchedBy: todoComponentID}) {
-		t.Fatal("待办调度器的系统派生不算（它明确不打扰数字经理）")
+		t.Fatal("待办调度器的系统派生不算（它明确不打扰长期助理）")
 	}
 	if a.managerLinked(nil) {
 		t.Fatal("nil 会话不该算经理关联")
@@ -358,7 +358,7 @@ func TestManagerResolveCaller(t *testing.T) {
 // 端到端（真执行体 + 假模型，不联网不花额度）：派生会话的提问卡挂到点 →
 // 经理收到【提问代理】并被唤醒 → 经理用 call_api 代答（POST /api/questions，
 // 直调请求带调用者头）→ 任务等待方拿到答案，决议回告插话回到经理并标
-// 「你已代选」→ 经理带着回告收尾。验收的是整条产品链路：通知、唤醒、
+// 「长期助理代选」→ 经理带着回告收尾。验收的是整条产品链路：通知、唤醒、
 // call_api 代批通路、来源标注、回告，一个不缺。
 func TestMgrNotifyEndToEndManagerProxiesViaCallAPI(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
@@ -459,11 +459,11 @@ func TestMgrNotifyEndToEndManagerProxiesViaCallAPI(t *testing.T) {
 		}
 		t.Fatalf("经理没有在时限内代答。actions=[%s]；经理会话消息：%s", acts, strings.Join(dump, " | "))
 	}
-	// ③ 决议回告落进经理会话，来源标「你已代选」（直调调用者头被认到）
+	// ③ 决议回告落进经理会话，来源标「长期助理代选」（直调调用者头被认到）
 	texts := waitMgrRows(t, a, mgr.ID, 2)
 	if !strings.Contains(texts[1], "【提问结果】") || !strings.Contains(texts[1], "方案甲") ||
-		!strings.Contains(texts[1], "你已代选") {
-		t.Fatalf("端到端回告应含结果与「你已代选」：\n%s", texts[1])
+		!strings.Contains(texts[1], "长期助理代选") {
+		t.Fatalf("端到端回告应含结果与「长期助理代选」：\n%s", texts[1])
 	}
 	// ④ 经理带着回告正常收尾（假模型第二轮说话）
 	waitFor(t, "经理收尾发言落库", func() bool { return msgHas(t, a, mgr.ID, "我已替它选了方案甲") })

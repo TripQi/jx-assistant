@@ -563,7 +563,7 @@ type Approval struct {
 	expiresAt    time.Time
 	decided      bool
 	ch           chan approvalResult
-	// 经理代理通知（mgrnotify.go）：notified=已通知过数字经理（决议据此回告）；
+	// 经理代理通知（mgrnotify.go）：notified=已通知过长期助理（决议据此回告）；
 	// byManager=决议由经理经 call_api 代选（回告标注来源）。permMu 保护。
 	notified  bool
 	byManager bool
@@ -598,7 +598,7 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 		})
 	}
 	// 经理代理通知（mgrnotify.go）：经理触达过的会话，卡挂了设置时长（默认
-	// 30 秒）仍无人处理就通知数字经理——与上面的用户声光提醒并行，各管各。
+	// 30 秒）仍无人处理就通知长期助理——与上面的用户声光提醒并行，各管各。
 	var mgrNotifyTimer *time.Timer
 	if a.Cfg.mgrNotifyOn() {
 		mgrNotifyTimer = time.AfterFunc(mgrNotifyDelay(a), func() {

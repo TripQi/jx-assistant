@@ -40,7 +40,7 @@ func createSessionErrCode(err error) int {
 
 // createSessionParams 三入口共用的建会话参数。权限/模式是**入口校验后的最终
 // 值**（service 只兜底默认：模式未知退 task、权限空按「workspace-write +
-// 创建技能/数字经理主对话 full」补——与人工口径一致；派发入口总是显式传值，
+// 创建技能/长期助理主对话 full」补——与人工口径一致；派发入口总是显式传值，
 // 不走默认）。
 type createSessionParams struct {
 	Mode       string
@@ -79,7 +79,7 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		if mode == "skill-create" {
 			perm = permFull
 		}
-		// 数字经理主对话（新装机首启自动创建的那个）默认完全访问：派发
+		// 长期助理主对话（新装机首启自动创建的那个）默认完全访问：派发
 		// 「只能同等或降权」，总控自己先站到最高档，派出去的任务才有完整的
 		// 档位空间（任务默认仍是修改工作区）；入口显式传权限则尊重。已建
 		// 主对话的权限存在会话库里，不受这个默认影响。

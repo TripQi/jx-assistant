@@ -286,7 +286,7 @@ func runTodoTaskGet(t *toolContext, args json.RawMessage) (string, error) {
 func todoTaskCreateTool() Tool {
 	return Tool{
 		Spec: toolSpec("todo_task_create",
-			"新建一条待办事项或定时任务。任务分两类：executor=\"assistant\"（AI 任务，默认：到点把描述转交数字经理执行，用户说“记个待办/提醒我几点做某事”用这类；可用 target 指定执行目标：manager=数字经理（默认）/ task=新的工作任务（到点自动创建工作任务会话直接执行））与 executor=\"command\"（程序任务：到点在指定工作目录直接运行命令，需同时给 command 与 dir）。描述要写成自足的一段话（将来会原样派出去执行）。",
+			"新建一条待办事项或定时任务。任务分两类：executor=\"assistant\"（AI 任务，默认：到点把描述转交长期助理执行，用户说“记个待办/提醒我几点做某事”用这类；可用 target 指定执行目标：manager=长期助理（默认）/ task=新的工作任务（到点自动创建工作任务会话直接执行））与 executor=\"command\"（程序任务：到点在指定工作目录直接运行命令，需同时给 command 与 dir）。描述要写成自足的一段话（将来会原样派出去执行）。",
 			objSchema(map[string]any{
 				"title":       strProp("任务标题（简短一行）。"),
 				"description": strProp("任务描述：将来原样派发执行的完整需求，自足、不依赖聊天上下文。"),
@@ -294,12 +294,12 @@ func todoTaskCreateTool() Tool {
 				"executor": map[string]any{
 					"type":        "string",
 					"enum":        []string{execAssistant, execCommand},
-					"description": "任务类型：assistant=AI 任务（默认，转交数字经理）；command=程序任务（到点运行命令）。",
+					"description": "任务类型：assistant=AI 任务（默认，转交长期助理）；command=程序任务（到点运行命令）。",
 				},
 				"target": map[string]any{
 					"type":        "string",
 					"enum":        []string{targetManager, targetTask},
-					"description": "仅 AI 任务：执行目标——manager=数字经理（默认，转交数字助理主对话处理）；task=新的工作任务（到点自动创建工作任务会话直接执行，不打扰数字经理）。与界面「执行目标」选框同一取值。",
+					"description": "仅 AI 任务：执行目标——manager=长期助理（默认，转交数字助理主对话处理）；task=新的工作任务（到点自动创建工作任务会话直接执行，不打扰长期助理）。与界面「执行目标」选框同一取值。",
 				},
 				"command":    strProp("仅程序任务：要运行的命令行（如 “git pull”）。"),
 				"dir":        strProp("仅程序任务：工作目录的绝对路径（先用 todo_workspace_list 查可选目录）。"),
@@ -350,7 +350,7 @@ func runTodoTaskCreate(t *toolContext, args json.RawMessage) (string, error) {
 func todoTaskUpdateTool() Tool {
 	return Tool{
 		Spec: toolSpec("todo_task_update",
-			"修改一条待办/定时任务：只传要改的字段（未传的保持不变）。可改标题、描述、执行方式（schedule 结构与新建相同）、任务类型（executor 与 command/dir/shell/permission 配套）、执行目标（target，仅 AI 任务：manager=数字经理 / task=新的工作任务）、启用状态、完成标记（done：true＝收进「已完成」页并停掉调度，false＝重新打开）。",
+			"修改一条待办/定时任务：只传要改的字段（未传的保持不变）。可改标题、描述、执行方式（schedule 结构与新建相同）、任务类型（executor 与 command/dir/shell/permission 配套）、执行目标（target，仅 AI 任务：manager=长期助理 / task=新的工作任务）、启用状态、完成标记（done：true＝收进「已完成」页并停掉调度，false＝重新打开）。",
 			objSchema(map[string]any{
 				"task_id":     strProp("任务 id（来自 todo_task_list）。"),
 				"title":       strProp("新的标题。"),
@@ -363,7 +363,7 @@ func todoTaskUpdateTool() Tool {
 				"target": map[string]any{
 					"type":        "string",
 					"enum":        []string{targetManager, targetTask},
-					"description": "仅 AI 任务：新的执行目标——manager=数字经理；task=新的工作任务。",
+					"description": "仅 AI 任务：新的执行目标——manager=长期助理；task=新的工作任务。",
 				},
 				"command":    strProp("仅程序任务：新的命令行。"),
 				"dir":        strProp("仅程序任务：新的工作目录绝对路径。"),
@@ -473,7 +473,7 @@ func runTodoTaskDelete(t *toolContext, args json.RawMessage) (string, error) {
 func todoTaskRunTool() Tool {
 	return Tool{
 		Spec: toolSpec("todo_task_run",
-			"立即执行一条待办/定时任务（不等它的定时点）：AI 任务立刻转交它的执行目标（数字经理或新的工作任务），程序任务立刻运行命令。执行前会请求用户审批。想验证任务配置或用户说“现在就跑”时用。",
+			"立即执行一条待办/定时任务（不等它的定时点）：AI 任务立刻转交它的执行目标（长期助理或新的工作任务），程序任务立刻运行命令。执行前会请求用户审批。想验证任务配置或用户说“现在就跑”时用。",
 			objSchema(map[string]any{
 				"task_id": strProp("任务 id（来自 todo_task_list）。"),
 			}, "task_id")),

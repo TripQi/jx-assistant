@@ -407,6 +407,52 @@ type inheritMark struct {
 	Count  int    `json:"count"`
 }
 
+// trimOpenToolGroup 剥掉尾部未闭合的工具调用组，返回可安全复制的前缀。
+//
+// 为什么只需要这一处截断：落库时机是「这一步结束」——模型正在流式输出的那一步
+// 根本不落库（被打断才写半截带中断标注），工具结果也只在工具跑完时落。但
+// **assistant 那一行（含 tool_calls）在模型这一步输出完就落库了**，工具随后才逐个
+// 执行、逐个落结果。于是从「模型输出完成」到「最后一个工具结果回来」之间，库里
+// 存在「有 tool_calls、对应 tool 结果还没齐」的半开组（实测：父会话 01:26:38 落了
+// 带 tool_call 的 assistant，它的结果 01:28:09 才落，中间 91 秒正是用户建子对话的
+// 时刻）。这种前缀发给模型不合法（每个 tool_call 必须紧跟自己的 tool 结果），
+// 所以整组剥掉、退到上一组为止；其余已落库的行原样保留。
+//
+// 不看运行状态：进程被强杀在工具中途时，空闲会话同样可能留下半开组。
+// 子对话继承（copyInheritedContext）与两处分支对话（handleFork）共用本函数。
+func trimOpenToolGroup(rows []*StoredMessage) []*StoredMessage {
+	for len(rows) > 0 {
+		ai := -1
+		for i := len(rows) - 1; i >= 0; i-- {
+			if rows[i].Role == "assistant" {
+				ai = i
+				break
+			}
+		}
+		if ai < 0 || len(rows[ai].ToolCalls) == 0 {
+			return rows // 尾巴没有未闭合的工具组
+		}
+		got := make(map[string]bool, len(rows)-ai)
+		for _, x := range rows[ai+1:] {
+			if x.Role == "tool" && x.ToolCallID != "" {
+				got[x.ToolCallID] = true
+			}
+		}
+		closed := true
+		for _, tc := range rows[ai].ToolCalls {
+			if !got[tc.ID] {
+				closed = false
+				break
+			}
+		}
+		if closed {
+			return rows
+		}
+		rows = rows[:ai] // 整组剥掉（那条 assistant 与它的部分结果），再看前一组
+	}
+	return rows
+}
+
 // copyInheritedContext 把父会话的完整消息历史复制进子会话，作为子对话继承的上下文。
 // 复制的是**原始行**（含摘要与压缩标记，逐行保序、seq 重排），不是渲染成的一段文本——
 // 这样复制后子会话的「模型可见序列」与父会话此前的请求逐条一致（同一套摘要边界、
@@ -424,20 +470,10 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 		}
 		rows = append(rows, x)
 	}
-	if a.IsRunning(parentID) {
-		// 父会话正在执行：只复制到最后一条已完成答复，避免把悬空的工具调用带进来
-		// （与「分支对话」同一判定：最后一条带正文且无工具调用的助手消息）
-		last := -1
-		for i, x := range rows {
-			if x.Role == "assistant" && len(x.ToolCalls) == 0 && strings.TrimSpace(x.Text()) != "" {
-				last = i
-			}
-		}
-		if last < 0 {
-			return 0, nil // 一条完整答复都还没有，没什么可继承的
-		}
-		rows = rows[:last+1]
-	}
+	// 落库即完成：库里有的都是「已完成的小步」（模型正在流式输出的那一步不落库），
+	// 所以整份复制即可，不判断"整轮"、也不区分父会话是否正在执行。唯一不能带走的
+	// 是尾部未闭合的工具调用组——见 trimOpenToolGroup。
+	rows = trimOpenToolGroup(rows)
 	if len(rows) == 0 {
 		return 0, nil
 	}

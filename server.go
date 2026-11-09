@@ -2982,19 +2982,11 @@ func (a *App) handleFork(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "分支点之前没有可复制的历史")
 		return
 	}
-	// 指定分支点时前缀在执行中也稳定（seq 只增不改），无需再截断
-	if body.UpTo <= 0 && a.IsRunning(m.ID) {
-		last := -1
-		for i, x := range msgs {
-			if x.Role == "assistant" && len(x.ToolCalls) == 0 && strings.TrimSpace(x.Text()) != "" {
-				last = i
-			}
-		}
-		if last >= 0 {
-			msgs = msgs[:last+1]
-		}
-	}
-	// 源会话若带继承标记行，分支复制后条目数可能被上面的截断改小，
+	// 落库即完成：库里有的都是已完成的小步，整份复制即可（不判断"整轮"）。
+	// 唯一不能带走的是尾部未闭合的工具调用组（模型输出完就落库、工具结果还没回来
+	// 的那一组，对模型请求不合法）——与子对话继承同一个函数，两个分支入口都过一遍。
+	msgs = trimOpenToolGroup(msgs)
+	// 源会话若带继承标记行，分支复制后条目数可能被上面的剥尾巴改小，
 	// 重写标记里的计数——子对话前端靠它切分继承段，数字不对会错位
 	if len(msgs) > 0 && msgs[0].Kind == inheritKind {
 		var im inheritMark

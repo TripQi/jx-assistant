@@ -765,7 +765,7 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
   完全访问），右列能力多选（允许工作区外执行命令 / 操作浏览器 / 操作电脑）。
   切到完全访问时三项能力联动勾选并置灰（不可单独关闭）。新建会话默认权限是
   修改工作区，因此**新建对话默认就勾着「操作浏览器」**（显式取消后不被覆盖；
-  从完全访问切回修改工作区时会自动补回）。**例外：数字经理主对话（新装机
+  从完全访问切回修改工作区时会自动补回）。**例外：长期助理主对话（新装机
   首启自动创建的 `mode=assistant` 会话）默认完全访问**——派发「只能同等或降权」，
   总控自己站最高档，派出去的任务才有完整档位空间（任务默认仍是修改工作区；
   见 `createSession` 的权限兜底）。已建主对话的权限存在会话库里，不追改。
@@ -1021,7 +1021,7 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
 
 | 模式 | 说明 | 工具 |
 |---|---|---|
-| `task` | 任务会话，实际干活 | 读/写/编辑/glob/grep/shell（含后台作业 job_*）/web_fetch/**web_search（联网搜索，经服务端搜索网关，见 websearch.go；服务端半边是 jxaiserver 的 search.go，协议改动需双侧同步）** + ask_user_question / exit_plan_mode / progress_write + **dispatch_sub（派子对话）** + **call_api（与前端同接口的通用直调，见 callapi.go）** + **request_manager（找数字经理协调，见 requestmgr.go）** + 历史查询 |
+| `task` | 任务会话，实际干活 | 读/写/编辑/glob/grep/shell（含后台作业 job_*）/web_fetch/**web_search（联网搜索，经服务端搜索网关，见 websearch.go；服务端半边是 jxaiserver 的 search.go，协议改动需双侧同步）** + ask_user_question / exit_plan_mode / progress_write + **dispatch_sub（派子对话）** + **call_api（与前端同接口的通用直调，见 callapi.go）** + **request_manager（找长期助理协调，见 requestmgr.go）** + 历史查询 |
 | `assistant` | 数字助理总控（左上角唯一入口，不占侧栏） | 编排：list_sessions / read_session_summary / **dispatch_task（派顶层工作任务）** / send_to_session（给已有会话发话：执行中＝**插话**注入当前轮、空闲＝直接开跑，可选 permission 只能同等或降权）/ stop_session（按用户指示分级停止：协作取消→3 秒未收口自动强制终结，与人工停止按钮同一停止函数、仅触发者不同）/ **call_api（与前端同接口的通用直调，见 callapi.go）** + deliver_result（把派发产出的成果文件登记为本对话的交付卡片，只展示不搬文件）+ **只读四件套 read/list_dir/glob/grep + web_fetch（答小问题：约十步内的查看自己看文件回答，大文件通读与批量分析仍派任务；写与执行类工具绝不给总控——纪律见 agent.go 的 assistantPrompt）**+ 历史查询 |
 | `aux` | 辅助对话：早期的只读答疑小会话（右栏可见；新建子对话自 0007 起改为分支克隆，见下节） | 只读文件 + web_fetch/web_search + 历史查询 |
 | `skill-create` | 创建技能：把「怎么做」沉淀成给后续 AI 照做的 SKILL.md 教程——用户点按钮录演示让 AI 分析，或直接派活让 AI 探路总结；**默认完全访问**（演示记录与亲自验证都刚需电脑/浏览器）；提示词核心是「顿悟操作逻辑 + 写大致步骤不写死细节」（推荐/避免方式、快捷键、抗界面变化，见 agent.go `skillPrompt`） | task 全量工具 + **register_skill（注册/覆盖技能）**；演示录制归用户直控（界面按钮经 `/api/demo-record/*`，材料以【演示记录】通知进对话） |
@@ -1127,7 +1127,7 @@ report_ready / done / stopped），前端常驻订阅：父对话里的子任务
 ## 任务找经理协调（request_manager / requestmgr.go）
 
 任务会话在「问自己看不到的情况」或「要一个同时只能一个人用的资源」时，可以
-主动找数字经理（数字助理主对话）——这是任务侧**唯一**能触到经理的通道，也是
+主动找长期助理（数字助理主对话）——这是任务侧**唯一**能触到经理的通道，也是
 经理跨会话视野真正被用起来的地方（典型案例：多个会话改同一仓库，谁都不知道
 现在合不合适跑测试）。
 
@@ -1462,7 +1462,7 @@ worker 的 stdin/stdout 升级为带 id 的帧协议（req/event/decision/host/h
   `data/components.json`（缺省启用，删目录即清记录）。接口 `GET/POST /api/components`（带 `?s=`/`session` 走会话
   级覆盖）、`POST /api/components/delete`（只删用户组件）、资产
   `GET /api/components/{id}/{file}`（仅启用时提供，按组件自身目录解析）。
-  这两个接口与 `/api/plugins` 都登记进 call_api 可调目录（`apiMeta`），数字经理
+  这两个接口与 `/api/plugins` 都登记进 call_api 可调目录（`apiMeta`），长期助理
   能直接查询与开关组件/插件（含会话级覆盖）。资产挂 `/api/` 下且
   `web/cx.js` 统一用 fetch 拿文本注入（不插相对 src 标签）——远程中继模式下
   `/api/` 前缀被 remote-boot 的 fetch 劫持自动走隧道，组件在远程同样可用。
@@ -1658,7 +1658,7 @@ worker 的 stdin/stdout 升级为带 id 的帧协议（req/event/decision/host/h
   注入侧对超长字段截断到 1000 字加尾注，防手工编辑的超长内容撑爆快照）。
   **权限分级**：普通任务对话拿专用工具 `user_memory`（查询全部字段 + 只更新
   「用户身份与喜好」记忆段，其余字段只读——称呼与 AI 名字/身份是用户的自我
-  设定；挂全部执行模式，aux/assistant 不挂）；数字经理（assistant 模式）的
+  设定；挂全部执行模式，aux/assistant 不挂）；长期助理（assistant 模式）的
   环境快照里告知**整个记忆文件可读可改**——call_api 调
   `GET/POST /api/user-memory`（按字段保存，未给出的字段保持不变；文件在助手
   数据目录内、受保护路径拦文件工具，接口是唯一通道）。**长度约束在写入入口**
@@ -1871,7 +1871,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `assistant.go` | 数字助理总控：编排工具 + 会话压缩摘要（建会话/模型选择走 sessioncreate.go 的 service） |
 | `callapi.go` | call_api 通用直通工具（仅 assistant 模式注入）：路由元数据注册表（server.go apiRoute 注册即元数据，AI 可调接口目录是注册的副产品）+ 进程内直调执行器（httptest Recorder 打到与前端同一 mux）+ 最低权限档标注与危险接口审批（调用时按会话档位校验）；完整目录渲染进 call_api 工具定义（含档位与 ⚠ 标记，进程内缓存） |
 | `sessioncreate.go` | 建会话/改权限的 service 单源：createSession（HTTP 人工建会话、dispatch_task、dispatch_sub 三入口共用：模式/权限默认、能力默认、分支克隆、历史继承（失败回滚）、skill-create 演示材料兜底）+ applyPermissionChange（权限档落装与能力联动，人工 PATCH 与 send_to_session 共用） |
-| `assistant_versions.go` | 数字经理主对话的「版本」：每一版就是一个 assistant 顶层会话（会话 id/标题/工作目录/权限/模型各自独立），版本号落 sessdata、当前版本指针落 globaldata（**唯一口径 currentAssistant()**——设置页压缩/清空、待办转交、request_manager、前端入口都认它，不再按「最近更新的那个」猜）；新建一版从零开始、老版本原样保留，切换只动指针 |
+| `assistant_versions.go` | 长期助理主对话的「版本」：每一版就是一个 assistant 顶层会话（会话 id/标题/工作目录/权限/模型各自独立），版本号落 sessdata、当前版本指针落 globaldata（**唯一口径 currentAssistant()**——设置页压缩/清空、待办转交、request_manager、前端入口都认它，不再按「最近更新的那个」猜）；新建一版从零开始、老版本原样保留，切换只动指针 |
 | `historytools.go` | 跨会话历史查询工具（search / read_session_messages） |
 | `context.go` | 上下文组装管线（环境快照**追加式**：首条整份、后续差分——纯新增发短补充、条目有减/换值发【移除】/【新增】中文标签变更清单（不用 +/- 记号：与条目行首 "- " 列表符撞车有歧义）、差分连续 5 条后完整重发一次校准（envRowRender 计数），已发送前缀绝不改写）+ 规则压缩 + 模型摘要 + 溢出兜底 + 压缩成功后无条件重发完整环境快照（resendEnvAfterCompact：基线被埋时保留区首条整份恢复，同文差分为空零冗余） |
 | `runtime.go` | 后台运行时：执行注册表、全局事件总线、派发执行体、中断恢复 |
@@ -1889,7 +1889,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `brand_sync.go` / `brand_sync_test.go` | 品牌下发客户端半边（服务端 jxaiserver brand.go → /announce.brand）：LOGO 与界面文字（侧栏/首页 hero/关于页/title）由服务端管理页统一配置，**客户端无配置入口**只消费；缓存于 `data/brand/`（brand.json + logo.png），渲染全程读本地（`/logo.png` 路由优先本地缓存图、`GET /api/brand` 出文字、前端 brand 事件刷新）；**LOGO 按 logoHash 比对只在该换时下载一次**（流量硬口径），nil（老服务端）不动本地，hash 空回退内置默认 |
 | `migrations.go` / `migrations_test.go` | 迁移机制（Flyway 式）：版本化一次性任务 + 执行账本 `data/migrations.json`（id→执行时刻）。一次性动作（清理误发文件、目录搬家……）往 `appMigrations` 清单**尾部**追加条目，NewApp 启动时跑：执行过记账永不再跑，失败记日志不记账下次重试，不阻断启动。id 规范「日期.短名」；任务体尽力而为（小失败内部消化、返回 nil 即记账；SkillsDir 等基础设施错误才返回 error）。首个收编条目：泄漏技能清理与内置技能搬家（此前是「每次启动全量扫描、靠自身幂等」的散装自愈）。数据库 schema 迁移另有一套（store.go 的 migration，管 SQLite），两者各管各的域 |
 | `market_publish.go` / `market_publish_test.go` / `market_publish_meta_test.go` | 市场·技能发布（**先装后传**）：只能发布已装到 `技能/user/` 的技能——后端从安装目录现场打 zip、走 inspectSkillZip/rewriteSkillZip 校验链（恰好一处 SKILL.md、内容体检、结构规整）、元信息按回退链补全（id 候选含中文→英文词表 `skillIDFromChinese`，词表只在 Go 一份），流式转发服务端用户端点 `/api/market/publish`；`GET /api/market/publish-meta` 给弹层预填；下架走 `/api/market/unpublish`——**归属校验与「挪进服务端回收站」都在服务端**，客户端只发消息（本地姓名比对只是按钮显隐的 UX） |
-| `todo.go` / `todotools.go` | 待办与定时任务（组件 `todo-scheduler` 的宿主半边）：清单、调度、两类执行（AI 任务可选执行目标：数字经理/新工作任务，后者走 `createSession` 单源建会话）/ 模型工具 |
+| `todo.go` / `todotools.go` | 待办与定时任务（组件 `todo-scheduler` 的宿主半边）：清单、调度、两类执行（AI 任务可选执行目标：长期助理/新工作任务，后者走 `createSession` 单源建会话）/ 模型工具 |
 | `gitpanel.go`（+`gitpanel_windows.go`/`_other.go`） | Git 面板（组件 `git-panel` 的宿主半边）：仓库扫描、porcelain/图谱/分支解析、暂存/提交（白名单 argv 直调 git，永不过 shell） |
 | `gittools.go` | git_sync 模型工具（组件 `git-panel`）：与面板共用 gitSync 执行缝的宿主通道远程同步，绕开沙箱内远程 git 必败的限制（背景与实测见《Git远程同步工具-改动说明.md》） |
 | `server.go` | 路由、聊天 SSE、全局事件流、压缩接口、插件注入、内嵌前端 |
@@ -1914,7 +1914,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `POST /api/sessions/{id}/interject` | 执行中发消息：`{content, mode}`，`steer`=插话（模型调用中立即打断当前流、下一步带着插话重调；工具执行中等下一步调用模型前注入）、`queue`=排队（本轮结束后作为独立一轮发送）；未在执行时按排队处理并顺手拉起执行 |
 | `POST /api/sessions/{id}/pending` | 排队坞操作：`{id, action:'remove'\|'steer'}`（移出队列 / 提前为插话）、`{id, action:'move', before:锚点id\|空=队尾}`（拖拽排序，只动排队队列顺序）、`{action:'pause'\|'resume'}`（队列级暂停/继续，不需要 id；恢复时空闲且有排队消息顺手拉起执行）；前端「编辑排队/插话消息」＝ `remove` 后把原文回填输入框草稿，复用 remove，无新 action |
 | `POST /api/sessions/{id}/compact` | 手动压缩为一条摘要 |
-| `GET /api/assistant/versions` | 数字经理主对话的版本清单（`{current, versions:[{sessionId,version,messages,updatedAt,running,current}]}`；当前版本指针存库，前端入口与设置页都按它走，见 assistant_versions.go） |
+| `GET /api/assistant/versions` | 长期助理主对话的版本清单（`{current, versions:[{sessionId,version,messages,updatedAt,running,current}]}`；当前版本指针存库，前端入口与设置页都按它走，见 assistant_versions.go） |
 | `POST /api/assistant/versions/new` | 新建一版数字助理主对话（从零开始聊，沿用当前版本的工作目录/权限/模型等设置；老版本历史、快照、交付原样保留） |
 | `POST /api/assistant/versions/switch` | 切换当前版本（`{sessionId}`）：只动指针，两边数据都不碰；切完主对话区显示那一版的历史 |
 | `POST /api/assistant/compact` `/clear` | 对**当前这一版**压缩 / 清空历史（clear 已不在设置页露出——那里换成了「新建一版」，接口保留给彻底重置本版历史用） |

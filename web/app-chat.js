@@ -216,21 +216,21 @@ function applySessionChrome(view) {
 }
 
 // 「数字助理主对话」在界面上的显示名：会话标题是创建主对话时写进会话 meta 的
-// 「数字助理主对话」（老会话里存的也是它），界面统一显示「跟长期助理对话」且
-// 「经理」两字加粗。这里只做显示层映射——内部标识（mode=assistant）、库里存的标题、
-// 以及所有按 mode/parentId 分流的功能逻辑都不动，所以旧会话不必重开、不用改数据，
-// 打开即显示新名。
-const ASSISTANT_MAIN_TITLE_HTML = '跟数字<b>经理</b>对话';
+// 「数字助理主对话」（老会话里存的也是它），界面统一显示「跟长期助理对话」（纯
+// 文本，与侧栏入口同款口径）。这里只做显示层映射——内部标识（mode=assistant）、
+// 库里存的标题、以及所有按 mode/parentId 分流的功能逻辑都不动，所以旧会话不必重
+// 开、不用改数据，打开即显示新名。
+const ASSISTANT_MAIN_TITLE = '跟长期助理对话';
 // 是否「数字助理主对话」本体（它名下的子对话有自己的标题，不套用这个名字）
 function isAssistantMainSession(s) {
   return !!s && s.mode === 'assistant' && !s.parentId;
 }
-// 顶栏会话标题：数字助理主对话恒显示新名（内部带 b 的加粗结构，故走 innerHTML），
-// 其余会话照原样显示自己的标题。空标题 = 刚建、还没发出第一条消息的新会话
+// 顶栏会话标题：数字助理主对话恒显示新名（纯文本，与侧栏入口同款），其余会话照
+// 原样显示自己的标题。空标题 = 刚建、还没发出第一条消息的新会话
 // （服务端起标题后就换成真标题）
 function applySessTitle(s) {
   const el = $('sess-title');
-  if (isAssistantMainSession(s)) el.innerHTML = ASSISTANT_MAIN_TITLE_HTML;
+  if (isAssistantMainSession(s)) el.textContent = ASSISTANT_MAIN_TITLE;
   else el.textContent = (s && s.title) || '新工作任务';
 }
 

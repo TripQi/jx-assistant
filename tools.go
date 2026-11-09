@@ -124,10 +124,9 @@ func (a *App) toolsFor(mode string) []Tool {
 	// （沙箱内远程 git 全灭，git_sync 是修改工作区档下唯一的远程通道，
 	// 见 gittools.go 文件头）。组件关掉时为空。
 	gits := a.gitTools()
-	// 用户记忆工具（组件 user-memory）：各执行模式可用——普通任务对话的
-	// 「弱通道」（查询全部字段 + 只更新记忆段）；aux 只读不挂，assistant
-	// 走 call_api 整文件通道（环境提示词里有说明），也不挂。组件关掉时为空。
-	mems := a.userMemoryTools()
+	// 组件的模型能力不再各占一个工具定义（用户拍板方案 A）：统一走基础工具
+	// component_call（componentcall.go），能调什么由环境快照的「组件能力」块
+	// 告知——组件增删能力不动工具目录，请求形状与前缀缓存稳定。
 	var tools []Tool
 	if mode == "assistant" {
 		// 数字助理总控只有「派发工作任务」这一条派发路径：dispatch_sub（派子对话）
@@ -136,7 +135,7 @@ func (a *App) toolsFor(mode string) []Tool {
 		// 只读四件套 + web_fetch：小问题（十步内的查看）总控自己看文件回答，
 		// 不必为「这个文件写了什么」专门派个任务；写与执行类工具绝不进场。
 		tools = append([]Tool{listSessionsTool(), readSummaryTool(), dispatchTaskTool(), sendToSessionTool(),
-			stopSessionTool(), a.callAPITool(),
+			stopSessionTool(), a.callAPITool(), componentCallTool(),
 			readFileTool(), listDirTool(), globTool(), grepTool(), webFetchTool(),
 			deliverResultTool(),
 			enterPlanModeTool(), exitPlanModeTool(), updateGoalTool()}, append(todos, history...)...)
@@ -144,7 +143,7 @@ func (a *App) toolsFor(mode string) []Tool {
 		// enter_plan_mode 不配：aux 只读答疑，没有可暂停的执行动作，计划无意义
 		// （exit 保留，用户手动给 aux 会话开计划模式时仍可退出）。
 		tools = append([]Tool{readFileTool(), listDirTool(), globTool(), grepTool(), webFetchTool(), a.webSearchTool(), readImageTool(),
-			exitPlanModeTool(), updateGoalTool()}, history...)
+			componentCallTool(), exitPlanModeTool(), updateGoalTool()}, history...)
 	} else {
 		// 创建技能模式专属工具：register_skill 注册闭环只挂在该模式——其他模式的
 		// 工具目录保持原形状（缓存与提示词都不受影响）。演示记录器 demo_record_*
@@ -167,7 +166,7 @@ func (a *App) toolsFor(mode string) []Tool {
 			// 任务会话专注实操（需要时由总控代调）。
 			askUserQuestionTool(), requestPermissionTool(), enterPlanModeTool(), exitPlanModeTool(), updateGoalTool(), progressWriteTool(),
 			jobOutputTool(), jobListTool(), jobKillTool(),
-		}, skillCreate...), append(append(append(append(append(append(todos, gits...), mems...), append(a.pluginAndMCPTools(), panelScreenshotTool())...), browserTools()...), deviceTools()...), history...)...)
+		}, skillCreate...), append(append(append(append(append(append(todos, gits...), componentCallTool()), append(a.pluginAndMCPTools(), panelScreenshotTool())...), browserTools()...), deviceTools()...), history...)...)
 	}
 	return append(tools, readUserSkillTool())
 }

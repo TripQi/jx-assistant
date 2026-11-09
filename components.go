@@ -72,6 +72,43 @@ type ComponentManifest struct {
 	// 旧校验把 host 解析为 bool，嵌套对象会被误判非法 JSON；未知字段 workers
 	// 静默放行，新组件包无需服务端先升级即可发布。
 	Workers []ComponentWorkerDef `json:"workers,omitempty"`
+	// Capabilities 可选：组件声明「可分发能力」——模型经统一入口 component_call
+	// 调用的那批能力（格式与扩展方式见 组件/README.md「可分发能力」一节，
+	// 分发逻辑见 componentcall.go）。声明是**白名单**：没声明的能力宿主不给调；
+	// 声明了但宿主没注册实现的能力同样不可调（报错指路）。
+	// 不占工具目录：能力增删只改这里 + 环境快照的「组件能力」块，工具定义不变。
+	Capabilities []ComponentCapability `json:"capabilities,omitempty"`
+}
+
+// ComponentCapability 是 manifest 顶层 capabilities 数组的一项：一条模型可调用的
+// 组件能力声明。
+//   - Name：能力名（组件内唯一，component_call 的 capability 参数）
+//   - Description：一句中文说明（进环境快照的「组件能力」块，模型据此挑能力）
+//   - Parameters：参数 JSON Schema（进环境快照的能力行说明与调用校验；缺省＝
+//     无参数。刻意保持原始 JSON——组件的参数长什么样由组件自己决定，宿主不建模）
+//   - Modes：可用模式白名单（空＝全部模式）。沿用原专用工具的门控口径：只读
+//     答疑（aux）与长期助理（assistant）通常不声明
+//   - Writes：是否会产生写入副作用（true 的能力在计划模式下暂停，与 write/edit
+//     同理；模型看得见、调用时被拦）
+type ComponentCapability struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Modes       []string        `json:"modes,omitempty"`
+	Writes      bool            `json:"writes,omitempty"`
+}
+
+// allowedIn 该能力在某会话模式下是否可见可调（Modes 为空＝全部模式）。
+func (c ComponentCapability) allowedIn(mode string) bool {
+	if len(c.Modes) == 0 {
+		return true
+	}
+	for _, m := range c.Modes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
 
 // ComponentStatus 是设置页展示的一条组件记录。
@@ -239,6 +276,25 @@ func (r *ComponentRegistry) Manifest(id string) (ComponentManifest, bool) {
 	defer r.mu.Unlock()
 	e, ok := r.items[id]
 	return e.Manifest, ok
+}
+
+// Capabilities 返回某组件声明的可分发能力（manifest 的 capabilities；没声明为空）。
+func (r *ComponentRegistry) Capabilities(id string) []ComponentCapability {
+	m, ok := r.Manifest(id)
+	if !ok {
+		return nil
+	}
+	return m.Capabilities
+}
+
+// Capability 按名字取一条能力声明（白名单查询：声明了才有）。
+func (r *ComponentRegistry) Capability(id, name string) (ComponentCapability, bool) {
+	for _, c := range r.Capabilities(id) {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return ComponentCapability{}, false
 }
 
 // CompDir 返回某个组件本体的绝对可用目录（内置=组件/<id>，用户=组件/user/<id>）。

@@ -698,6 +698,12 @@ func (a *App) envPrompt(sess *SessionMeta) string {
 	if block := a.userMemoryEnvBlock(sess); block != "" {
 		b.WriteString(block + "\n")
 	}
+	// 组件能力块（componentcall.go）：组件 manifest 里声明的可分发能力——组件
+	// 开关与当前模式只影响这一块，工具定义（component_call 等基础工具）恒定。
+	// 模型从这里知道「有这些能力、怎么调」，不必为每个组件能力占一个工具定义。
+	if block := a.componentCapabilityBlock(sess); block != "" {
+		b.WriteString(block + "\n")
+	}
 	// 自带技能一览（静态，中文为主、括注英文 id）；用户技能段也归入快照——
 	// 开关技能只影响尾部快照，系统提示词的稳定前缀不受影响（瞬态注入原则）。
 	b.WriteString("- 自带技能：PDF 文档（pdf，读 PDF 文档）、图片文字识别（ocr）、Office 文档（office_skill，Word/Excel/PPT 操作指南）、下载器（downloader，aria2c 下载落盘）、APK 信息（apkinfo，包名/版本/签名查看），需要时直接调用对应工具或子命令；本机网络搜索（web-search-local，web_search 连不上服务端时的本机搜索兜底，先用 read_skill 读用法），仅在 web_search 失败时使用\n")

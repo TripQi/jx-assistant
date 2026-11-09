@@ -9,9 +9,11 @@ package main
 //     userMemoryEnvBlock），不进系统提示词、不进工具定义——组件关闭即整块
 //     消失，前缀缓存不受影响；注入侧对超长字段截断（手工编辑的超长内容
 //     不撑爆快照，文件仍存全文）；
-//   - 权限分级：普通任务对话拿到专用工具 user_memory（查询全部字段，但只
-//     能更新「用户身份与喜好」记忆段——称呼与 AI 名字/身份是用户的自我
-//     设定，模型只读）；长期助理（assistant 模式）在环境提示词里被告知
+//   - 权限分级：普通任务对话经统一入口 component_call 调两条能力——memory_query
+//     （查询全部字段）与 memory_update（只能更新「用户身份与喜好」记忆段——
+//     称呼与 AI 名字/身份是用户的自我设定，模型只读），能力声明在组件的
+//     manifest.json 里、实现在本文件（componentcall.go 是分发与白名单）；
+//     长期助理（assistant 模式）在环境提示词里被告知
 //     整个记忆文件可读可改，走 call_api 的 GET/POST /api/user-memory——
 //     文件在助手数据目录内，文件工具被受保护路径拦下，接口是唯一通道；
 //   - 长度约束（1000 字/字段，rune 计）在写入入口把关而非存储层：设置页
@@ -41,7 +43,7 @@ const userMemoryFieldLimit = 1000
 // UserMemoryData 是记忆文档的全部字段。
 type UserMemoryData struct {
 	UserName    string `json:"userName"`    // 用户称呼
-	Memory      string `json:"userMemory"`  // 用户身份与喜好（记忆段——AI 可经 user_memory 工具更新）
+	Memory      string `json:"userMemory"`  // 用户身份与喜好（记忆段——AI 可经记忆的能力 memory_update 更新）
 	AIName      string `json:"aiName"`      // AI 助理名字
 	AIIdentity  string `json:"aiIdentity"`  // AI 助理身份
 	BubbleColor string `json:"bubbleColor"` // AI 对话气泡颜色（#rrggbb 或空=默认灰，前端展示用）
@@ -134,8 +136,8 @@ func (a *App) userMemorySessionView(sess *SessionMeta) (UserMemoryData, bool) {
 
 // userMemorySessionEnabled 某会话里 user-memory 是否生效：会话开关覆盖优先于
 // 全局开关（cxoComponentEnabled；sess 无 ID / 注册表未初始化时回落全局）。
-// 环境注入与工具调用时核的口径；工具**目录**的挂载仍按全局开关（工具目录
-// 未会话化是既有约定，见 AGENT.md 组件章节），关掉只影响注入与调用。
+// 环境注入核的口径；组件的模型能力（memory_query/memory_update）由
+// component_call 分发时按同一口径核（componentcall.go），关掉只影响注入与调用。
 func (a *App) userMemorySessionEnabled(sess *SessionMeta) bool {
 	if sess == nil || sess.ID == "" {
 		return a.userMemoryEnabled()
@@ -188,7 +190,7 @@ func (a *App) saveUserMemory(d UserMemoryData) (UserMemoryData, error) {
 }
 
 // overLimitFields 返回超长字段的中文名（rune 计）。设置页前端提交前已截断，
-// 走到这里的是模型侧（call_api POST / user_memory 工具）——超限一律整单拒绝，
+// 走到这里的是模型侧（call_api POST / memory_update 能力）——超限一律整单拒绝，
 // 不静默截断（模型必须知道写入失败，改短再试）。
 func (d UserMemoryData) overLimitFields() []string {
 	var over []string
@@ -297,9 +299,9 @@ func (a *App) userMemoryEnvBlock(sess *SessionMeta) string {
 	case "assistant":
 		b.WriteString("- 记忆维护（长期助理专属）：整个记忆文件可读可改——call_api 调 GET /api/user-memory 读取、POST /api/user-memory 按字段保存（userName/userMemory/aiName/aiIdentity/bubbleColor，各上限 1000 字，超长会整单报错、不会静默截断；未给出的字段保持不变）" + userMemoryScopeNote(sessionScoped) + "。文件位于 " + filepath.ToSlash(a.userMemoryPath()) + "（助手数据目录内，文件工具被受保护路径拦截，读写一律走 call_api）。改动自下一轮起注入全部会话的环境提示词，请保持字段本意、谨慎修改\n")
 	case "aux":
-		b.WriteString("- 记忆维护：以上内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有修改工具）\n")
+		b.WriteString("- 记忆维护：以上内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有记忆读写能力）\n")
 	default:
-		b.WriteString("- 记忆维护：user_memory 工具可查询并更新「用户身份与喜好」段（对应上面「用户身份与习惯、喜好」一行；了解到用户新的身份/偏好/习惯/项目背景时主动更新；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
+		b.WriteString("- 记忆维护：component_call 调组件 " + userMemoryComponentID + " 的两条能力——memory_query 查询全部字段、memory_update 更新「用户身份与喜好」段（对应上面「用户身份与习惯、喜好」一行；了解到用户新的身份/偏好/习惯/项目背景时主动更新；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
 	}
 	return "# 用户记忆（用户与助手的长期设定，全部会话生效）\n" + b.String()
 }
@@ -426,68 +428,66 @@ func (a *App) handleUserMemorySet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---------- 专用工具（普通任务对话：查询全部字段 + 只更新记忆段） ----------
+// ---------- 可分发能力（component_call 的两条：查 / 改） ----------
 
-// userMemoryTools 组件 user-memory 启用时返回 user_memory 工具（todoTools 同款
-// 组件门控）。挂各执行模式：aux 只读答疑不挂；assistant 不挂（经理的通道是
-// call_api 整文件读写，环境提示词里有说明——权限分级，工具是「弱通道」）。
-func (a *App) userMemoryTools() []Tool {
-	if !a.userMemoryEnabled() {
-		return nil
-	}
-	return []Tool{a.userMemoryTool()}
+// 设计意图（方案 A）：工具定义只装基础工具 component_call，组件的动态能力不进
+// 工具目录——原 user_memory 专用工具因此退役，拆成两条可分发能力：声明在
+// 组件/user-memory/manifest.json 的 capabilities（名称/参数 schema/可用模式），
+// 实现在这里登记。宿主没登记实现或组件没声明，component_call 都调不到（白名单）。
+func init() {
+	registerComponentCapability(userMemoryComponentID, "memory_query", userMemoryCapabilityQuery)
+	registerComponentCapability(userMemoryComponentID, "memory_update", userMemoryCapabilityUpdate)
 }
 
-func (a *App) userMemoryTool() Tool {
-	return Tool{
-		Spec: toolSpec("user_memory", "查询/更新用户记忆（用户的身份、相关信息与喜好的长期记忆，全部会话共享、每轮注入环境提示词；若本对话启用了独立记忆设定，则查询与更新只影响本对话）。不带参数 = 查询当前全部字段；带 memory 参数 = 把「用户身份与喜好」记忆段（注入为「用户身份与习惯、喜好」一行）整体替换为给定内容（先查询、在结果基础上改写，避免丢掉已有记忆；上限 1000 字，超长会报错、本次不写入，需精简后重试）。其余字段（用户的名字、你的名字与身份）是用户的自我设定，本工具只读不写。当你在对话中了解到值得长期记住的用户信息（身份、偏好、习惯、项目背景等）时，主动调用本工具更新记忆。",
-			objSchema(map[string]any{
-				"memory": strProp("新的「用户身份与喜好」记忆段全文（整体替换式写入，上限 1000 字）；不传 = 仅查询"),
-			})),
-		Run: func(t *toolContext, args json.RawMessage) (string, error) {
-			// 组件可能被会话中途关掉（工具目录在本轮开轮时定型）——调用时再核
-			// 一次，按**本会话**视角（会话开关覆盖优先于全局）
-			if !t.app.userMemorySessionEnabled(t.sess) {
-				return "", fmt.Errorf("「AI 记忆与拟人化」组件在本会话未启用，user_memory 不可用；请到 设置 → 内置组件 或 加号菜单「本对话的组件与插件」打开")
-			}
-			var p struct {
-				Memory *string `json:"memory"` // 指针区分「未传=查询」与「传空串=清空」
-			}
-			if len(args) > 0 {
-				if err := json.Unmarshal(args, &p); err != nil {
-					return "", err
-				}
-			}
-			userMemoryMu.Lock()
-			defer userMemoryMu.Unlock()
-			// 会话视角读写：本对话启用独立记忆时，查询与更新都落在会话覆盖
-			// （全局文档不动）；否则全局。「一个对话一套人格」的模型侧入口。
-			d, sessionScoped := t.app.userMemorySessionView(t.sess)
-			if p.Memory == nil {
-				out, _ := json.Marshal(map[string]string{
-					"userName": d.UserName, "userMemory": d.Memory,
-					"aiName": d.AIName, "aiIdentity": d.AIIdentity,
-				})
-				if sessionScoped {
-					return string(out) + "\n（本对话使用独立的记忆设定，改动只影响本对话）", nil
-				}
-				return string(out), nil
-			}
-			// 超长整单拒绝（用户拍板：写入入口报错，不静默截断、不写入）
-			if n := utf8.RuneCountInString(*p.Memory); n > userMemoryFieldLimit {
-				return "", fmt.Errorf("记忆段内容 %d 字超过 %d 字上限，本次未写入；请精简后重试", n, userMemoryFieldLimit)
-			}
-			d.Memory = *p.Memory
-			if sessionScoped {
-				t.app.saveUserMemorySession(t.sess.ID, d)
-				view, _ := t.app.userMemorySessionView(t.sess)
-				return "已更新「用户身份与喜好」记忆段（本对话独立记忆）。当前内容：\n" + view.Memory, nil
-			}
-			saved, err := t.app.saveUserMemory(d)
-			if err != nil {
-				return "", err
-			}
-			return "已更新「用户身份与喜好」记忆段。当前内容：\n" + saved.Memory, nil
-		},
+// userMemoryCapabilityQuery 查询记忆的全部字段（称呼/身份与喜好/AI 名字与身份）。
+// 只读——不涉及长度与写入约束。
+func userMemoryCapabilityQuery(t *toolContext, _ json.RawMessage) (string, error) {
+	userMemoryMu.Lock()
+	defer userMemoryMu.Unlock()
+	// 会话视角读写：本对话启用独立记忆时，查询与更新都落在会话覆盖
+	// （全局文档不动）；否则全局。「一个对话一套人格」的模型侧入口。
+	d, sessionScoped := t.app.userMemorySessionView(t.sess)
+	out, _ := json.Marshal(map[string]string{
+		"userName": d.UserName, "userMemory": d.Memory,
+		"aiName": d.AIName, "aiIdentity": d.AIIdentity,
+	})
+	if sessionScoped {
+		return string(out) + "\n（本对话使用独立的记忆设定，改动只影响本对话）", nil
 	}
+	return string(out), nil
 }
+
+// userMemoryCapabilityUpdate 整体替换「用户身份与喜好」记忆段；其余字段（称呼、
+// AI 名字/身份）是用户的自我设定，本能力不写。超长整单报错不写入（用户拍板：
+// 写入入口报错，不静默截断）。
+func userMemoryCapabilityUpdate(t *toolContext, raw json.RawMessage) (string, error) {
+	var p struct {
+		Memory *string `json:"memory"` // 指针区分「未传」与「传空串=清空」
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "", err
+		}
+	}
+	if p.Memory == nil {
+		return "", fmt.Errorf("memory_update 需要 memory 参数（新的「用户身份与喜好」记忆段全文，整体替换式写入）；只想看当前内容用 memory_query")
+	}
+	if n := utf8.RuneCountInString(*p.Memory); n > userMemoryFieldLimit {
+		return "", fmt.Errorf("记忆段内容 %d 字超过 %d 字上限，本次未写入；请精简后重试", n, userMemoryFieldLimit)
+	}
+	userMemoryMu.Lock()
+	defer userMemoryMu.Unlock()
+	d, sessionScoped := t.app.userMemorySessionView(t.sess)
+	d.Memory = *p.Memory
+	if sessionScoped {
+		t.app.saveUserMemorySession(t.sess.ID, d)
+		view, _ := t.app.userMemorySessionView(t.sess)
+		return "已更新「用户身份与喜好」记忆段（本对话独立记忆）。当前内容：\n" + view.Memory, nil
+	}
+	saved, err := t.app.saveUserMemory(d)
+	if err != nil {
+		return "", err
+	}
+	return "已更新「用户身份与喜好」记忆段。当前内容：\n" + saved.Memory, nil
+}
+

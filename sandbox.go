@@ -44,6 +44,12 @@ type sandboxRun struct {
 	Label   string   // 用途标签（进度面板/审计显示）：run_command｜skill:pdf｜py-probe…
 	Argv    []string // argv 形态：直接 exec 不过 shell（打开文件/起浏览器这类），与 Command 二选一
 	Model   bool     // true = 输出回给模型（附沙箱拒绝/升级 marker）
+
+	// EncodingMode 决定 PS 5.1 路径的命令前置哪种编码（encoding.go）：
+	// "utf8"（空值同义，默认）读面按 UTF-8；"gbk" 读面按 ANSI(936)——
+	// 命令涉及 GBK 老文件（.bat/.cmd/金蝶导出 CSV）时由 run_command 探测决定。
+	// 只影响 PS 5.1；pwsh/cmd/Linux/远程一律忽略。
+	EncodingMode string
 }
 
 // spawnConfinedLocal 本地沙箱分派：Windows 受限令牌 / Linux Landlock。

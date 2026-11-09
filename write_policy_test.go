@@ -95,8 +95,11 @@ func TestInJxAITmp(t *testing.T) {
 
 func TestWinEncodingNotes(t *testing.T) {
 	base := winEncodingNotes(false)
-	wantAll(t, base, "win 编码规则", "自动前置", "PYTHONUTF8=1", "GetEncoding(936)",
-		"UTF-8 无 BOM", "ANSI/GBK", "转存带 BOM", ".cmd/.bat", "Out-File / Set-Content")
+	// 文案口径（2026-11-10 编码自适应改造后）：输出与读文件都钉 UTF-8、
+	// 命令里文件自动探测切 GBK、乱码只读命令重跑一次、edit 保持原编码。
+	wantAll(t, base, "win 编码规则", "输出与读文件", "PYTHONUTF8=1", "GetEncoding(936)",
+		"UTF-8 无 BOM", "ANSI/GBK", "转存带 BOM", ".cmd/.bat", "Out-File / Set-Content",
+		"探测编码", "重跑一次", "保持原文件编码")
 	if strings.Contains(base, "chcp") {
 		t.Fatalf("cmd 路径不注入，不应再让模型手动 chcp:\n%s", base)
 	}

@@ -505,18 +505,35 @@ WebView2 内核渲染（浏览器组件已全部内嵌进 exe，整个程序就
   并经 `trap` 清理（历史版本曾按次泄漏 /tmp/jx-sbx-* 目录，已修复）。
 - **PS 5.1 编码注入（仅 PowerShell 5.1 路径）**：Windows PowerShell 5.1 的
   `$OutputEncoding` 默认 ASCII（PS→原生程序管道传中文丢字不可逆）、
-  `[Console]::OutputEncoding` 默认 OEM 代码页。三条命令构造点
+  `[Console]::OutputEncoding` 默认 OEM 代码页，且 **`Get-Content` /
+  `Select-String` / `Import-Csv` 读文件默认 ANSI(936)**——UTF-8 无 BOM 文件被
+  解成乱码，而乱码是合法 UTF-8 字符串，输出侧解码（`decodeCmdOutput` 的
+  GB18030 兜底）救不回来（2026-11-09 实际踩中）。三条命令构造点
   （`runUnconfinedLocal` / 沙箱 `buildShellCmdline` / 后台作业 `shellCmd`）
-  在解析为 PS 5.1（空 shell 缺省与显式 powershell）时统一前置
-  `try{$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8}catch{}; `
+  统一前置 `ps51Prologue(mode)`：UTF-8 模式设输出 UTF-8 + 三个
+  `$PSDefaultParameterValues[...]='utf8'`；**GBK 模式**（`sandboxRun.EncodingMode`）
+  设 `GetEncoding(936)` 输出 + 三个 `'Default'` 读面，输出成 GBK 字节正好被
+  `decodeCmdOutput` 接住。写面（`Out-File`/`Set-Content`）**故意不设默认值**：
+  5.1 的 `-Encoding utf8` 会写 BOM，落到 `.bat/.cmd/.ps1` 上就是命令失败。
   并注入 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`（`appendEnvUnique` 先摘后加，
-  环境块重复变量"先见为准"）。**cmd/pwsh/sh 分支与 Linux/安卓/SSH 远程零改动**
+  环境块重复变量"先见为准"）。
+  读面编码怎么定（`encoding.go`）：`detectEncodingMode` 从命令串里抓字面出现的
+  文件路径（`extractPathCandidates`）→ 读 64KB 头探测（BOM→严格 UTF-8→GBK/
+  GB18030 结构→UTF-16 启发→二进制）→ 全是 GB 族就整条切 GBK，混合按 UTF-8 并
+  给一句提示。**探测不到的（程序内部自己读文件）靠输出乱码检测兜底**：
+  `looksMojibake` 命中且 `isReadOnlyCommand` 且本地前台 → 换另一种编码
+  **重跑一次**，两次都脏如实报告；写/安装/提交/启服务/后台作业**绝不重跑**
+  （重跑=执行两遍），只附一句诊断。
+  **cmd/pwsh/sh 分支与 Linux/安卓/SSH 远程零改动**
   （pwsh 6+ 全平台默认 UTF-8；Linux 文件名是字节流、grep/sed 字节匹配，
-  locale 不影响中文；安卓 Termux 环境已有 LANG=en_US.UTF-8）。切回语义：
-  注入都是单条命令内可覆盖的机制，环境快照只写"引擎做了什么 + 怎么切回"
-  （`$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)`，
-  管出编码由 $OutputEncoding 决定，只改 [Console] 侧切不回去），不再写
-  "默认 XX"类陈述——模型自己知道默认，多余的默认描述只消耗注意力。
+  locale 不影响中文；安卓 Termux 环境已有 LANG=en_US.UTF-8）。
+- **write/edit/read 的编码语义**：`read` 探测解码后统一返回 UTF-8 文本（GBK/
+  UTF-16 不再显示成替换符），文末注记原编码；`write` 永远 UTF-8 无 BOM（覆盖
+  既有 GBK 文件会提示编码变化，想保留用 `edit`）；`edit` 按原编码解码匹配、
+  **按原编码写回**（GBK 仍 GBK、BOM 保留），原编码编不出的字符（emoji 写 GBK）
+  **直接报错、文件不动**，绝不静默替换成 `?`。入参永远是 Unicode 文本（JSON
+  字符串），因此只存在一次转换（Unicode↔原编码），不会出现"GBK 当 UTF-8 再
+  转 GBK"的叠加。
 - **write/edit 回读注记**：`snapshotWrite` 把写后回读（verified=真的从盘上/
   SFTP 读回来）交给工具成功文案拼注记（`readBackNote`）——write 带
   "回读一致，首行：<截 60 字符>"，edit 只报一致/不一致，不一致/多出 BOM

@@ -701,7 +701,7 @@ func startConfinedWindows(r sandboxRun) (*confinedChild, error) {
 	// 见文件头「历史注记」。
 
 	// 4) 解析 shell 与命令行（父进程解析，子进程环境可能不全）
-	app, cmdLine, ps51, err := buildShellCmdline(r.Shell, r.Command)
+	app, cmdLine, ps51, err := buildShellCmdline(r.Shell, r.Command, r.EncodingMode)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("sandbox unavailable: %w", err)
@@ -952,9 +952,9 @@ func (b *syncBuffer) Bytes() []byte {
 
 // buildShellCmdline 解析 shell 名并构造 (appName, commandLine, ps51)。
 // ps51 = 解析为 Windows PowerShell 5.1（空 shell 缺省与显式 powershell）：
-// 命令前置 UTF-8 编码设置，调用方据此注入配套环境变量；pwsh 本就 UTF-8、
-// cmd 不在此路径注入。
-func buildShellCmdline(shell, command string) (string, string, bool, error) {
+// 命令前置编码设置（mode 决定 UTF-8 或 GBK 读面），调用方据此注入配套环境
+// 变量；pwsh 本就 UTF-8、cmd 不在此路径注入。
+func buildShellCmdline(shell, command, encMode string) (string, string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(shell)) {
 	case "cmd":
 		comspec := os.Getenv("COMSPEC")
@@ -972,7 +972,7 @@ func buildShellCmdline(shell, command string) (string, string, bool, error) {
 		}
 		ps51 := strings.ToLower(shell) != "pwsh"
 		if ps51 {
-			command = ps51Utf8Prefix + command
+			command = ps51Prologue(encMode) + command
 		}
 		return exe, `"` + exe + `" -NoProfile -NonInteractive -Command ` + syscall.EscapeArg(command), ps51, nil
 	default:

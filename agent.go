@@ -860,13 +860,13 @@ func detectOSDescWindows() string {
 // 便于单测）。第一条只说引擎做的改动与切回方法——"默认 XX"类陈述不写
 // （模型自己知道默认，多余的默认描述只消耗注意力）。
 func winEncodingNotes(hasPwsh7 bool) string {
-	ps1 := "- .ps1 编码：write/edit 写出的文件固定为 UTF-8 无 BOM，而 Windows PowerShell 5.1 执行无 BOM 的 .ps1 时按 ANSI/GBK 解析源码，中文字面量必乱码——出路任选：① 脚本保持纯 ASCII（中文放数据文件或参数里）；② write 生成后转存带 BOM 再执行：$c=[IO.File]::ReadAllText('<脚本>'); [IO.File]::WriteAllText('<脚本>',$c,(New-Object Text.UTF8Encoding $true))；③ 含中文的脚本不用 write 落盘，改用 PowerShell 生成（Out-File / Set-Content -Encoding UTF8 自动带 BOM）"
+	ps1 := "- .ps1 编码：write 写出的文件固定为 UTF-8 无 BOM，而 Windows PowerShell 5.1 执行无 BOM 的 .ps1 时按 ANSI/GBK 解析源码，中文字面量必乱码——出路任选：① 脚本保持纯 ASCII（中文放数据文件或参数里）；② write 生成后转存带 BOM 再执行：$c=[IO.File]::ReadAllText('<脚本>'); [IO.File]::WriteAllText('<脚本>',$c,(New-Object Text.UTF8Encoding $true))；③ 含中文的脚本不用 write 落盘，改用 PowerShell 生成（Out-File / Set-Content -Encoding UTF8 自动带 BOM）"
 	if hasPwsh7 {
 		ps1 += "；④ run_command 带 shell=pwsh 执行（pwsh 默认按 UTF-8 读源码，无此坑）"
 	}
-	return "- 中文编码：PowerShell 命令引擎已自动前置 $OutputEncoding=[Console]::OutputEncoding=UTF8，并注入 PYTHONUTF8=1、PYTHONIOENCODING=utf-8；需要 GBK 老程序（如 findstr 按代码页匹配中文）时在命令内自行改回：$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)，只影响该条命令\n" +
+	return "- 中文编码：PowerShell 5.1 路径的引擎已把**输出与读文件**都钉在 UTF-8——前置 $OutputEncoding=[Console]::OutputEncoding=UTF8，并把 Get-Content/Select-String/Import-Csv 的默认编码设为 utf8（UTF-8 无 BOM 文件不再乱码），同时注入 PYTHONUTF8=1、PYTHONIOENCODING=utf-8。命令里字面出现的文件会先探测编码：全是 GBK 老文件（.bat/.cmd/金蝶导出 CSV）时整条自动切 ANSI(936)（即 $OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)）读；输出疑似乱码时只读命令会自动换编码重跑一次（两次都脏会如实说明），写/安装/提交类命令不重跑（重跑=执行两遍）。要固定读法就在命令里显式 -Encoding（如 -Encoding Default）\n" +
 		ps1 + "\n" +
-		"- 其他文件编码：文本文件一律 UTF-8 无 BOM 读写；.cmd/.bat 须 ANSI/GBK 编码 + CRLF 行尾（防 cmd 乱码/拆行）；路径、标识符、命令保持原文不翻译\n"
+		"- 其他文件编码：新建/整体覆盖的文本一律 UTF-8 无 BOM（write）；edit 局部修改**保持原文件编码**（GBK 文件仍写 GBK、BOM 保留，原编码编不出的字符会直接报错而不静默替换）；.cmd/.bat 须 ANSI/GBK 编码 + CRLF 行尾（防 cmd 乱码/拆行）；路径、标识符、命令保持原文不翻译\n"
 }
 
 // kernelRelease：uname -r，失败返回空。

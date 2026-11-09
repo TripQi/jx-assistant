@@ -446,7 +446,7 @@ func (t *toolContext) envWalk(root string, fn func(rel string, e envEntry) error
 
 func readFileTool() Tool {
 	return Tool{
-		Spec: toolSpec("read", "读取文本文件内容返回。用本工具——而不是 cat 等命令行——查看文本文件；大文件用 offset/limit 分段继续读取。path 支持相对工作区的路径。",
+		Spec: toolSpec("read", "读取文本文件内容返回。用本工具——而不是 cat 等命令行——查看文本文件；大文件用 offset/limit 分段继续读取。path 支持相对工作区的路径。非 UTF-8 文件（GBK/GB18030/UTF-16 等）会按探测到的编码自动解码后返回（文末注明原编码），不会出现乱码；二进制文件拒绝读取。",
 			objSchema(map[string]any{
 				"path":   strProp("文件路径（相对或绝对）"),
 				"offset": intProp("起始行号，从 1 开始，可选"),
@@ -477,10 +477,13 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 		return "", err
 	}
 	t.markObserved(path) // 观察策略：read 过的文件之后才能被 write 覆盖
-	if bytes.IndexByte(data, 0) >= 0 {
+	// 编码探测：GBK / UTF-16 等非 UTF-8 文件在这里一次性解成 UTF-8 文本，
+	// 模型看到的是正确中文而不是替换符；编码写进文末注记（edit 会按原编码写回）。
+	text, enc := decodeText(data)
+	if enc == EncBinary {
 		return "", fmt.Errorf("%s 是二进制文件，无法按文本读取", path)
 	}
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	start := p.Offset
 	if start < 1 {
 		start = 1
@@ -504,12 +507,18 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 	if end < len(lines) {
 		suffix = fmt.Sprintf("\n…（共 %d 行，可调大 limit 或用 offset 继续读取）", len(lines))
 	}
+	switch {
+	case enc.needsPreserveBytes():
+		suffix += fmt.Sprintf("\n（该文件是 %s 编码，已自动解码显示；用 edit 修改会按原编码写回）", enc)
+	case enc == EncUnknown:
+		suffix += "\n（该文件编码无法确定，已按 GB18030 宽松解码显示；写入前请确认内容）"
+	}
 	return out + suffix, nil
 }
 
 func writeFileTool() Tool {
 	return Tool{
-		Spec: toolSpec("write", "创建文件或整体替换文件内容（UTF-8 无 BOM 文本）。content 按你提供的原样落盘（不做行尾/编码转换），行尾用 LF 还是 CRLF 由你按目标文件类型自行决定。既有文件本会话 read 过才能覆盖（观察策略；.jxai/tmp 下跨会话残留的旧文件除外）；局部修改优先用 edit。按会话权限模式的文件沙箱执行：修改工作区档只允许写工作区与系统临时目录内；只读档写入被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
+		Spec: toolSpec("write", "创建文件或整体替换文件内容（UTF-8 无 BOM 文本）。content 按你提供的原样落盘（不做行尾/编码转换）——覆盖既有 GBK 等非 UTF-8 文件时会把它重写成 UTF-8 并在返回里提示（想保留原编码改用 edit）。既有文件本会话 read 过才能覆盖（观察策略；.jxai/tmp 下跨会话残留的旧文件除外）；局部修改优先用 edit。按会话权限模式的文件沙箱执行：修改工作区档只允许写工作区与系统临时目录内；只读档写入被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
 			objSchema(map[string]any{
 				"path":                strProp("目标文件路径（相对或绝对）"),
 				"content":             strProp("要写入的完整内容"),
@@ -547,6 +556,14 @@ func runWriteFile(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 覆盖既有非 UTF-8 文件会改变它的编码（write 语义固定 UTF-8 无 BOM），
+	// 这点必须让模型看见：想保留原编码请改用 edit。写前探测，写后提示。
+	prevEnc := EncUTF8
+	if !t.isRemote() {
+		if _, _, serr := t.envStat(path); serr == nil {
+			prevEnc = probeTextFile(path)
+		}
+	}
 	// 带快照写入：改动前内容自动落 checkpoint，编辑历史消息时可回退；
 	// 回读注记让模型第一轮就能发现"写进去的不是想要的"（乱码/被外部改写）
 	readBack, verified, err := t.snapshotWrite(path, grant, []byte(p.Content))
@@ -554,13 +571,17 @@ func runWriteFile(t *toolContext, args json.RawMessage) (string, error) {
 		return "", err
 	}
 	t.markObserved(path)
-	return fmt.Sprintf("已写入 %s（%d 字节）%s", filepath.ToSlash(path), len(p.Content),
-		readBackNote([]byte(p.Content), readBack, verified, true)), nil
+	encNote := ""
+	if prevEnc.needsPreserveBytes() {
+		encNote = fmt.Sprintf("（注意：该文件原为 %s 编码，已按 UTF-8 无 BOM 重写；想保留原编码请改用 edit）", prevEnc)
+	}
+	return fmt.Sprintf("已写入 %s（%d 字节）%s%s", filepath.ToSlash(path), len(p.Content),
+		readBackNote([]byte(p.Content), readBack, verified, true), encNote), nil
 }
 
 func editFileTool() Tool {
 	return Tool{
-		Spec: toolSpec("edit", "对既有文本文件做局部修改：把 old_string 字面量替换为 new_string（匹配时 CRLF/LF 行尾视为等价，写回自动保持文件原行尾风格）。默认要求 old_string 在文件中恰好出现一次（多次出现时给出更长的片段或设 replace_all）。只读档被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
+		Spec: toolSpec("edit", "对既有文本文件做局部修改：把 old_string 字面量替换为 new_string（匹配时 CRLF/LF 行尾视为等价，写回自动保持文件原行尾风格）。非 UTF-8 文件（GBK/GB18030/UTF-16）按原编码解码后匹配、并按**原编码写回**（GBK 文件仍是 GBK、BOM 保留）；new_string 含原编码无法表示的字符（如 emoji 写进 GBK 文件）时直接报错、文件不改——改用 write 以 UTF-8 保存。默认要求 old_string 在文件中恰好出现一次（多次出现时给出更长的片段或设 replace_all）。只读档被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
 			objSchema(map[string]any{
 				"path":                strProp("文件路径"),
 				"old_string":          strProp("要被替换的原文（需保证唯一）"),
@@ -599,7 +620,12 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content := string(data)
+	// 编码：按探测到的原编码解成文本做匹配，改完再按同一编码编回去——全程只有
+	// 一次转换（Unicode ↔ 原编码），不存在"GBK 当 UTF-8 再转 GBK"的叠加。
+	content, enc := decodeText(data)
+	if enc == EncBinary {
+		return "", fmt.Errorf("%s 是二进制文件，无法按文本编辑", path)
+	}
 	// 行尾等价匹配：read 给模型的内容已把 CRLF 归一为 LF（runReadFile），
 	// 模型按所见写的 old_string/new_string 自然是 LF；若在原始字节上逐字
 	// 匹配，跨行片段会因每个换行差一个 \r 而永远对不上（Windows 项目上
@@ -633,8 +659,14 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 		updated = strings.Replace(norm, oldNorm, newNorm, 1)
 	}
 	updated = restoreLineEndings(updated, detectFileLineEndings(content))
+	// 按原编码编回：GBK 文件写回仍是 GBK（字节稳定），不可表示字符（emoji）
+	// 直接报错、文件不动——绝不用 '?' 静默替换（那是有损且难查的丢字）。
+	outBytes, encErr := encodeText(updated, enc)
+	if encErr != nil {
+		return "", fmt.Errorf("%s：%w（文件未改动）", filepath.ToSlash(path), encErr)
+	}
 	// 带快照写入：改动前内容自动落 checkpoint（上面 envReadFile 读到的即旧内容）
-	readBack, verified, err := t.snapshotWrite(path, grant, []byte(updated))
+	readBack, verified, err := t.snapshotWrite(path, grant, outBytes)
 	if err != nil {
 		return "", err
 	}
@@ -642,8 +674,12 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	// 匹配，盲改不可能通过），故不设 read 前置；落盘后记为已观察，后续
 	// write 覆盖随之放行（对齐 DSH「刚编辑过视为已观察」）。
 	t.markObserved(path)
-	return fmt.Sprintf("已编辑 %s（替换 %d 处）%s", filepath.ToSlash(path), replaced,
-		readBackNote([]byte(updated), readBack, verified, false)), nil
+	keepNote := ""
+	if enc.needsPreserveBytes() {
+		keepNote = fmt.Sprintf("（保持原 %s 编码写回）", enc)
+	}
+	return fmt.Sprintf("已编辑 %s（替换 %d 处）%s%s", filepath.ToSlash(path), replaced, keepNote,
+		readBackNote(outBytes, readBack, verified, false)), nil
 }
 
 // detectFileLineEndings 按多数派判定文件的主导行尾风格：CRLF 行数多于
@@ -949,7 +985,7 @@ func runGrep(t *toolContext, args json.RawMessage) (string, error) {
 
 func runCommandTool() Tool {
 	return Tool{
-		Spec: toolSpec("run_command", "执行一条 shell 命令并返回输出。命令按会话权限模式在 OS 级沙箱内执行：workspace-write 下只能写工作区与私有临时目录（Windows 受限令牌 / Linux Landlock / 远程沙箱 helper），read-only 下不能写任何位置，联网不受限。尝试沙箱可能拒绝的命令是安全且符合预期的：直接运行并读取标记。若命令因沙箱拒绝失败且更宽档位能让它成功，在同一轮内带 sandbox_permissions（够用的最宽档）与一句 justification 重试同一命令一次——该重试会弹审批由用户批准；未经真实拒绝不要请求升级；被拒后该命令终局，停止并说明，不要绕过。sandbox_permissions 只放宽命令沙箱，开不了 browser_*/computer_* 的能力开关。看网页/操作浏览器永远不要用命令行启动浏览器（msedge/chrome/firefox/microsoft-edge: 等一律同下场）：非完全访问档下这类命令会被直接预拦、不会执行，报错会指路——一律改用 browser_* 工具（助手进程直接驱动本机 Edge/Chrome，不经命令沙箱；若「操作浏览器」能力未开启，调用会被拦，可在重试该工具时带 request_capability=true 与 justification 向用户申请开启）。",
+		Spec: toolSpec("run_command", "执行一条 shell 命令并返回输出。命令按会话权限模式在 OS 级沙箱内执行：workspace-write 下只能写工作区与私有临时目录（Windows 受限令牌 / Linux Landlock / 远程沙箱 helper），read-only 下不能写任何位置，联网不受限。尝试沙箱可能拒绝的命令是安全且符合预期的：直接运行并读取标记。若命令因沙箱拒绝失败且更宽档位能让它成功，在同一轮内带 sandbox_permissions（够用的最宽档）与一句 justification 重试同一命令一次——该重试会弹审批由用户批准；未经真实拒绝不要请求升级；被拒后该命令终局，停止并说明，不要绕过。sandbox_permissions 只放宽命令沙箱，开不了 browser_*/computer_* 的能力开关。编码：PS 5.1 路径的引擎已把**输出与读文件**默认都钉在 UTF-8（Get-Content/Select-String/Import-Csv 默认 utf8）；命令里字面出现的文件会先探测编码——全是 GBK 老文件（.bat/.cmd/金蝶导出 CSV）时整条自动切 ANSI(936) 读；输出疑似乱码时只读命令会自动换编码重跑一次（两次都脏会如实说明），写/安装/提交类命令不重跑（重跑=执行两遍）。需要固定某种读法时在命令里显式 -Encoding。看网页/操作浏览器永远不要用命令行启动浏览器（msedge/chrome/firefox/microsoft-edge: 等一律同下场）：非完全访问档下这类命令会被直接预拦、不会执行，报错会指路——一律改用 browser_* 工具（助手进程直接驱动本机 Edge/Chrome，不经命令沙箱；若「操作浏览器」能力未开启，调用会被拦，可在重试该工具时带 request_capability=true 与 justification 向用户申请开启）。",
 			objSchema(map[string]any{
 				"command":             strProp("要执行的命令"),
 				"shell":               strProp("本地执行时的 shell：Windows 默认 powershell（或 cmd），其他平台默认 sh；远程执行忽略"),
@@ -1003,7 +1039,7 @@ func runCommand(t *toolContext, args json.RawMessage) (string, error) {
 		if t.isRemote() {
 			return "", fmt.Errorf("后台作业暂不支持远程工作区会话；请去掉 run_in_background 直接执行")
 		}
-		j, jerr := t.app.startJob(t, p.Command, p.Shell, cwd, policy)
+		j, jerr := t.app.startJob(t, p.Command, p.Shell, cwd, policy, "command", nil)
 		if jerr != nil {
 			return "", sandboxErrHint(jerr)
 		}
@@ -1015,16 +1051,41 @@ func runCommand(t *toolContext, args json.RawMessage) (string, error) {
 		timeout = time.Duration(min(p.TimeoutSec, 600)) * time.Second
 	}
 
-	// 子进程统一入口（child.go）：沙箱分派、环境白名单、超时、输出捕获/截断/解码、
-	// 压窗、沙箱拒绝 marker、运行中程序登记全在那一处。这里只声明「跑什么、在哪跑、
-	// 超时多少」——不再自己拼执行细节（以前各工具各写一套，漏一处就漏一个黑窗）。
-	out, err := t.app.runChild(t.ctx, sandboxRun{
-		Dir: cwd, Command: p.Command, Shell: strings.ToLower(strings.TrimSpace(p.Shell)),
-		Timeout: timeout, Policy: policy, Workspace: t.workspace(),
-		Remote: t.sess, Visible: p.Visible, Label: "run_command", Model: true,
-	})
+	// 读面编码：命令里出现的文件先探测（encoding.go），据此决定这条 PS 5.1
+	// 命令按 UTF-8 还是按 ANSI(936) 读文件。探测不到（程序内部自己读文件的
+	// 情形：python 脚本、findstr 之类）就靠下面的输出乱码检测 + 重跑兜底。
+	encMode, encHint := detectEncodingMode(cwd, p.Command, p.Shell)
+	runOnce := func(mode string) (string, error) {
+		return t.app.runChild(t.ctx, sandboxRun{
+			Dir: cwd, Command: p.Command, Shell: strings.ToLower(strings.TrimSpace(p.Shell)),
+			Timeout: timeout, Policy: policy, Workspace: t.workspace(),
+			Remote: t.sess, Visible: p.Visible, Label: "run_command", Model: true,
+			EncodingMode: mode,
+		})
+	}
+	out, err := runOnce(encMode)
 	if err != nil {
 		return "", sandboxErrHint(err)
+	}
+	// 乱码重跑：只有只读命令才有"执行两次"的豁免（写/安装/提交/启服务重跑
+	// 等于执行两遍，副作用不可接受）；远程 Linux、cmd、后台作业不在 PS 5.1
+	// 注入范围内，直接跳过。最多重跑一次，两次都脏就如实报告。
+	if looksMojibake(out) {
+		if !t.isRemote() && isPS51Shell(p.Shell) && isReadOnlyCommand(p.Command) {
+			alt := alternateEncodingMode(encMode)
+			if out2, err2 := runOnce(alt); err2 == nil {
+				mark := fmt.Sprintf("[编码：首次按 %s 读取出现乱码，已按 %s 重跑一次并采用本次结果]", encMode, alt)
+				if looksMojibake(out2) {
+					mark = fmt.Sprintf("[编码：已按 %s 与 %s 各试一次仍疑似乱码——文件可能既非 UTF-8 也非 GBK，或内容本身异常]", encMode, alt)
+				}
+				out = out2 + "\n" + mark
+			}
+		} else {
+			out += "\n[编码：输出疑似乱码，但该命令不是只读命令（重跑会执行两遍，故未自动重试）；读文件请显式加 -Encoding Default，或改用 read 工具]"
+		}
+	}
+	if encHint != "" {
+		out += "\n[编码：" + encHint + "]"
 	}
 	return out, nil
 }
@@ -1069,7 +1130,7 @@ func runUnconfinedLocal(ctx context.Context, r sandboxRun) (string, error) {
 	case "sh", "bash":
 		cmd = exec.CommandContext(ctx, "sh", "-c", r.Command)
 	case "pwsh", "powershell":
-		exe, command := "powershell", ps51Utf8Prefix+r.Command
+		exe, command := "powershell", ps51Prologue(r.EncodingMode)+r.Command
 		if strings.ToLower(shell) == "pwsh" {
 			exe, command = "pwsh", r.Command
 		} else {
@@ -1156,16 +1217,33 @@ func sandboxEnv(full bool) []string {
 
 // ---------- PowerShell 5.1 编码注入（仅此路径；cmd/pwsh/sh 不注入） ----------
 //
-// Windows PowerShell 5.1 的 $OutputEncoding 默认 ASCII（管道传中文丢字不可逆）、
-// [Console]::OutputEncoding 默认 OEM 代码页（GBK）。给模型命令统一前置一行
-// 设置 + 注入 Python 的 UTF-8 环境变量，中文不再依赖模型记得手动设置。
-// 注入都是单条命令内可覆盖的机制：需要 GBK 老程序时在命令里自行改回
-// （[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)）。
+// PS 5.1 的默认有三个坑：$OutputEncoding 默认 ASCII（PS→原生程序管道传中文
+// 丢字不可逆）、[Console]::OutputEncoding 默认 OEM 代码页、**Get-Content /
+// Select-String / Import-Csv 读文件默认 ANSI(936)**——UTF-8 无 BOM 的文件被
+// 解成乱码，而乱码本身是合法 UTF-8 字符串，输出侧的解码兜底救不回来（这是
+// 2026-11-09 实际踩到的坑）。所以这里一次把输出与读面都钉死到 UTF-8，并在
+// 命令涉及 GBK 文件时（encoding.go detectEncodingMode）整条切成 GBK 模式。
+//
+// 写面（Out-File/Set-Content）故意不设默认值：5.1 的 -Encoding utf8 会写
+// BOM，落到 .bat/.cmd/.ps1 上就是 cmd 解析失败——写文件仍由 write 工具与
+// [IO.File]::WriteAllText 负责。注入都是单条命令内可覆盖的机制：命令里显式
+// -Encoding 优先，模型读 GBK 老文件仍可写 -Encoding Default。
 
-// ps51Utf8Prefix 是给 PS 5.1 命令的前置语句。try/catch 防"没有控制台可设"
-// 的场景把整条命令炸掉；链式赋值让 $OutputEncoding（管出）与
-// [Console]::OutputEncoding（管入）同时成为 UTF-8。
-const ps51Utf8Prefix = `try{$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8}catch{}; `
+// ps51Prologue 返回给 PS 5.1 命令的前置语句。mode=gbk 时输出与读面一起切
+// 936：文件按 ANSI 解、输出成 GBK 字节，正好被 decodeCmdOutput 的 GB18030
+// 兜底接住。try/catch 防"没有控制台可设"的场景把整条命令炸掉。
+func ps51Prologue(mode string) string {
+	if mode == encodingModeGBK {
+		return `try{$e=[Text.Encoding]::GetEncoding(936);$OutputEncoding=$e;[Console]::OutputEncoding=$e;` +
+			`$PSDefaultParameterValues['Get-Content:Encoding']='Default';` +
+			`$PSDefaultParameterValues['Select-String:Encoding']='Default';` +
+			`$PSDefaultParameterValues['Import-Csv:Encoding']='Default'}catch{}; `
+	}
+	return `try{$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8;` +
+		`$PSDefaultParameterValues['Get-Content:Encoding']='utf8';` +
+		`$PSDefaultParameterValues['Select-String:Encoding']='utf8';` +
+		`$PSDefaultParameterValues['Import-Csv:Encoding']='utf8'}catch{}; `
+}
 
 // ps51Utf8Env 是随命令注入的环境变量（Python 3 旧的发行版默认跟随 ANSI 代码页）。
 func ps51Utf8Env() []string {

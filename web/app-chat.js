@@ -77,7 +77,7 @@ function resetEmpty() {
 /* ---------- 会话 ---------- */
 
 async function openAssistant() {
-  // 「跟数字经理对话」入口打开的是**当前版本**——哪一版由服务端记在库里
+  // 「跟长期助理对话」入口打开的是**当前版本**——哪一版由服务端记在库里
   // （/api/assistant/versions，见 assistant_versions.go）。这里绝不能自己从
   // 会话列表里挑：多版本下「按更新时间取第一个」会把用户刚聊过的那一版当成
   // 当前版本，切回老版本聊一句就顶掉新版本。
@@ -141,7 +141,7 @@ async function openSession(id, opts) {
   // （refreshCurrent 等）都以目标为准，旧会话的晚到事件不可能再把界面顶回去
   const brief = (state.sessions || []).find((s) => s.id === id);
   if (brief && (!state.cur || state.cur.id !== id)) optimisticSwitch(mainView, brief);
-  if (brief && brief.mode === 'assistant' && dollState === 'done') setFace('idle'); // 打开数字经理对话＝完成提醒已读：徽章清、小人回待机
+  if (brief && brief.mode === 'assistant' && dollState === 'done') setFace('idle'); // 打开长期助理对话＝完成提醒已读：徽章清、小人回待机
   // 右栏切到目标对话自己的状态（开合/视图/各视图选择；没记忆＝默认收起+空态）。
   // 放在乐观切换之后：各视图的就位逻辑以 state.cur 为准，此刻它已是目标对话
   if (oldSid !== id) rpRestoreSession(id);
@@ -216,7 +216,7 @@ function applySessionChrome(view) {
 }
 
 // 「数字助理主对话」在界面上的显示名：会话标题是创建主对话时写进会话 meta 的
-// 「数字助理主对话」（老会话里存的也是它），界面统一显示「跟数字经理对话」且
+// 「数字助理主对话」（老会话里存的也是它），界面统一显示「跟长期助理对话」且
 // 「经理」两字加粗。这里只做显示层映射——内部标识（mode=assistant）、库里存的标题、
 // 以及所有按 mode/parentId 分流的功能逻辑都不动，所以旧会话不必重开、不用改数据，
 // 打开即显示新名。
@@ -6442,9 +6442,9 @@ function renderCtxTip(view) {
     '<div class="ctx-ops">' +
       (running ? '<span class="ctx-ops-hint">执行中，等这一轮结束再压缩</span>' : '') +
       '<button type="button" class="ctx-compact" data-ctx-compact="1"' + (off ? ' disabled' : '') +
-        ` title="${running ? '会话正在执行，等这一轮结束再压缩' : '压缩当前对话：从最后一轮往上全部压掉（最后一轮本身也在内，会先问一次）'}">` +
+        ` title="${running ? '会话正在执行，等这一轮结束再压缩' : '提前自动压缩：不等阈值到点，立即按设置的保留字数执行一次自动压缩（规则折叠或模型摘要，按当前设置的模式选路）'}">` +
         CTX_COMPACT_ICON +
-        '<span class="cc-t">' + (busy ? '压缩中…' : '压缩') + '</span>' +
+        '<span class="cc-t">' + (busy ? '压缩中…' : '提前自动压缩') + '</span>' +
       '</button>' +
     '</div>' +
     '<div class="ctx-bar" title="已用 ' + pct + '%，灰色为未占用">';
@@ -6525,13 +6525,12 @@ function lastRoundSeq(view) {
   return 0;
 }
 
-// 明细卡顶部的「压缩」：压缩**当前视图这个会话**的上下文。
-// 口径与「最后一轮正文输出下方那个压缩按钮」完全一致（用户 2026-10-25 明确要求）：
-// 把 upTo 所在轮（含）及更早的回合全部压缩——这里 upTo 传最后一轮的 seq，于是从
-// 最后一轮往上、连最后一轮自己在内全压掉；**不是**自动压缩那种「按字数留最近一截」，
-// 所以不带 upTo 的空请求体不用（空体＝自动压缩的保留窗口口径）。
-// · 接口就用现成的 POST /api/sessions/{id}/compact（body.upTo 指定压到哪一轮，语义
-//   由后端确定：规则模式即时折叠、模型模式出摘要，前端不另造规则）；
+// 明细卡顶部的「提前自动压缩」：对**当前视图这个会话**手动点火一次自动压缩
+// 线路（用户 2026-11-09 要求；此前它与「最后一轮正文输出下方那个压缩按钮」同款
+// 走手动全量线路，现已分开——输出下方那个仍是手动全量，这里走自动线路）：
+// · 接口 POST /api/sessions/{id}/autocompact（后端 autoCompactNow：与阈值触发的
+//   自动压缩同一套动作——按设置的保留字数从最新一轮往前数、装得下的整轮保留，
+//   更早的压缩；规则折叠还是模型摘要按当前设置的模式选路，前端不另造规则）；
 // · 先居中确认（用户明确在意误操作：位置放顶部 + 点一次确认，两道都上）；
 // · 执行中不压：正在跑的一轮还在往历史里写，后端也会 409，前端先拦并说人话；
 // · 完成后重拉 /api/sessions/{id}/context（refreshCtxChip）刷新这张卡，再轻提示
@@ -6550,8 +6549,8 @@ async function compactFromCtxPanel(view) {
     await confirmCenter('这个对话还没有可压缩的回合。', true);
     return;
   }
-  const ok = await confirmCenter('压缩当前对话的上下文？\n从最后一轮往上，整个对话都会被压缩（最后一轮本身也在内）；' +
-    '原始消息仍可用历史检索工具查回。');
+  const ok = await confirmCenter('提前执行一次自动压缩？\n按设置的保留字数保留最近几轮原文不动，更早的内容压缩掉' +
+    '（规则折叠或模型摘要，按当前设置的模式选路）；原始消息仍可用历史检索工具查回。');
   if (!ok) return;
   const before = (lastCtx[view.key] && lastCtx[view.key].total) || 0;
   ctxCompactBusy[view.key] = true;
@@ -6559,9 +6558,7 @@ async function compactFromCtxPanel(view) {
   // 收工：按钮回到可用（成功失败都走，成功时卡片已被 refreshCtxChip 重画过一遍也无妨）
   const restore = () => { ctxCompactBusy[view.key] = false; renderCtxTip(view); };
   try {
-    const r = await api('/api/sessions/' + cur.id + '/compact', {
-      method: 'POST', body: JSON.stringify({ upTo }),
-    });
+    const r = await api('/api/sessions/' + cur.id + '/autocompact', { method: 'POST' });
     await refreshCtxChip(view); // 重拉 /context：卡片里的数字与分类条按压缩后的状态重画
     const after = (lastCtx[view.key] && lastCtx[view.key].total) || 0;
     toast(compactResultMsg(r, before, after), 6000);
@@ -6584,7 +6581,7 @@ async function compactFromCtxPanel(view) {
 function compactResultMsg(r, before, after) {
   const what = (r && r.folded)
     ? '已折叠 ' + r.folded + ' 个回合'
-    : '已把整个对话压缩成摘要';
+    : (r && r.scope === 'auto' ? '已把较早历史压缩成摘要' : '已把整个对话压缩成摘要');
   const from = before ? fmtTokens(before) : '—';
   const to = after ? fmtTokens(after) : '—';
   const saved = (before && after && before > after) ? before - after : 0;

@@ -1636,6 +1636,32 @@ func (a *App) maybeAutoCompact(sess *SessionMeta, msgs []Message, ctxWindow int,
 	return false, nil
 }
 
+// autoCompactNow 是自动压缩线路（maybeAutoCompact）的「提前/手动」入口：通道
+// 选择、先后顺序、调用参数与自动触发一字不差——先规则通道（CompactInterval>0
+// 即按保留预算 ruleCompactAuto 折叠），再模型摘要通道（CompactLlmPct>0 即
+// doSummarize(auto) 按保留窗口出摘要）——只是不做「到没到阈值」的判定（间隔
+// 与窗口占比都不看），右键上下文菜单「提前自动压缩」在阈值到点前手动点火用的
+// 就是它。返回 (折叠回合数, 摘要文本)；规则通道折到内容即止（与自动线路同样
+// 提前返回，不再试摘要），两通道都没启用时报错，通道启用但预算内没东西可压的
+// 报错由下层透传（没有可折叠的回合 / 没有可压缩的区间）。
+func (a *App) autoCompactNow(sess *SessionMeta) (int, string, error) {
+	if a.Cfg.CompactInterval > 0 {
+		if folded := a.ruleCompactAuto(sess, -1); folded > 0 {
+			return folded, "", nil
+		}
+		if a.Cfg.CompactLlmPct <= 0 {
+			return 0, "", fmt.Errorf("没有可折叠的回合（保留最近约 %d 字）", a.Cfg.KeepChars)
+		}
+	}
+	if a.Cfg.CompactLlmPct > 0 {
+		summary, err := a.doSummarize(sess, "auto", -1, 0)
+		if err != nil {
+			return 0, "", err
+		}
+		return 0, summary, nil
+	}
+	return 0, "", fmt.Errorf("自动压缩未启用：在 设置 · 对话历史与压缩 里把「规则压缩间隔」或「模型摘要阈值」设为大于 0")
+}
 // windowPctTokens 算「窗口 × 百分比阈值」的 token 数。
 func windowPctTokens(ctxWindow, pct int) int {
 	return int(float64(ctxWindow) * float64(pct) / 100)

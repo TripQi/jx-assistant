@@ -290,7 +290,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.apiRoute(mux, "GET /api/voicetype/history/wav", a.handleVoicetypeHistoryWav, apiMeta{Summary: "第 i 条记录的原始语音（wav，试听）", Params: "i=序号", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/voicetype/history/reidentify", a.handleVoicetypeHistoryReidentify, apiMeta{Summary: "重新识别第 i 条记录", Params: "i=序号；输入法在跑则交它做（走完整分发）", Perm: permReadOnly})
 	a.apiRoute(mux, "GET /api/models", a.handleModels, apiMeta{Summary: "模型清单（全部渠道）", Perm: permReadOnly})
-	// 用户记忆（组件 user-memory，usermemory.go）：设置页与数字经理（call_api
+	// 用户记忆（组件 user-memory，usermemory.go）：设置页与长期助理（call_api
 	// 整文件通道）共用；未启用时 404。
 	a.apiRoute(mux, "GET /api/user-memory", a.handleUserMemoryGet, apiMeta{Summary: "读用户记忆（用户称呼/身份与喜好/AI 名字/AI 身份/对话气泡颜色）", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/user-memory", a.handleUserMemorySet, apiMeta{Summary: "按字段保存用户记忆（未给出的字段保持不变，各字段上限 1000 字自动截断）", Params: "userName、userMemory、aiName、aiIdentity、bubbleColor 均可选", Perm: permWorkspace})
@@ -314,6 +314,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.apiRoute(mux, "POST /api/sessions/{id}/interject", a.handleInterject, apiMeta{Summary: "执行中发消息（插话/排队）", Params: "content、mode=steer|queue", Perm: permWorkspace})
 	a.apiRoute(mux, "POST /api/sessions/{id}/pending", a.handlePending, apiMeta{Summary: "排队坞操作", Params: "action=remove|steer|move|pause|resume", Perm: permWorkspace})
 	a.apiRoute(mux, "POST /api/sessions/{id}/compact", a.handleCompact, apiMeta{Summary: "手动压缩会话历史为摘要", Params: "upTo=压缩到哪条", Perm: permWorkspace})
+	// 右键上下文菜单「提前自动压缩」：对当前会话手动点火一次自动压缩线路
+	//（autoCompactNow），与上面的手动全量压缩是并存的两条线路。
+	a.apiRoute(mux, "POST /api/sessions/{id}/autocompact", a.handleAutoCompact, apiMeta{Summary: "提前自动压缩：不等阈值到点，按设置的保留字数手动点火一次自动压缩线路", Perm: permWorkspace})
 	// 设置 · 对话历史与压缩：数字助理主对话按「版本」管理（见 assistant_versions.go）。
 	// 当前是哪一版由库里的指针决定，前端只照版本清单显示与切换；压缩固定走
 	// 模型摘要；清空只作用于当前这一版（设置页已换成「新建一版」，接口留着）。
@@ -413,7 +416,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mcp/catalog", a.handleMCPCatalog)
 	mux.HandleFunc("POST /api/mcp/catalog/install", a.handleMCPCatalogInstall)
 	// 组件两档（内置 组件/ 与用户 组件/user/）同一套接口：清单、开关（含会话级
-	// 覆盖 ?s= / session）、用户组件卸载。开放给 call_api 让数字经理能查能开关。
+	// 覆盖 ?s= / session）、用户组件卸载。开放给 call_api 让长期助理能查能开关。
 	a.apiRoute(mux, "GET /api/components", a.handleListComponents, apiMeta{
 		Summary: "组件清单（内置组件 + 用户组件，builtin 标记归属）；带 s=会话id 返回该会话的生效视图",
 		Params:  "s 可选（会话id＝会话级生效视图）；rescan=1 可选（先重扫组件目录：平时清单是纯读，重扫只挂在打开设置页）",
@@ -2471,6 +2474,41 @@ func (a *App) handleCompact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": 1, "summary": truncateRunes(summary, 300)})
 }
 
+// handleAutoCompact 右键上下文菜单「提前自动压缩」：对当前会话手动点火一次
+// **自动压缩线路**（autoCompactNow）——按设置的保留字数从最新一轮往前数、
+// 装得下的整轮保留，更早的压缩；规则折叠还是模型摘要按当前配置选路。与
+// 消息操作条上的「压缩」（handleCompact 手动全量：从指定轮往上全压）和设置页
+// 「压缩数字助理主对话」（固定模型摘要）是三个并存、各自明确的入口。
+// 执行中拒绝（409）；PreCompact 插件 hook 与其他压缩入口同一口径（可被阻断）。
+func (a *App) handleAutoCompact(w http.ResponseWriter, r *http.Request) {
+	m := a.sessionFromPath(w, r)
+	if m == nil {
+		return
+	}
+	if a.IsRunning(m.ID) {
+		writeErr(w, 409, "该会话正在执行，稍后再压缩")
+		return
+	}
+	if a.CCPlugins != nil && a.CCPlugins.hasAnyHooks() {
+		if oc := a.ccEmitHookEvent(r.Context(), m, "PreCompact", "", nil, nil); oc.Block {
+			writeErr(w, 403, "压缩被插件 hook 拒绝："+oc.Reason)
+			return
+		}
+	}
+	folded, summary, err := a.autoCompactNow(m)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
+	if summary != "" {
+		writeJSON(w, 200, map[string]any{"ok": 1, "scope": "auto", "summary": truncateRunes(summary, 300)})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": 1, "scope": "auto", "folded": folded})
+}
+
+// 数字助理主对话现在有多个「版本」（设置 · 对话历史与压缩），当前是哪一版
 // 数字助理主对话现在有多个「版本」（设置 · 对话历史与压缩），当前是哪一版
 // 由库里的指针说了算——a.currentAssistant()，见 assistant_versions.go。
 // 以前这里是「会话列表按更新时间倒序取第一个」，多版本下会错位（切回老版本

@@ -407,15 +407,23 @@ type inheritMark struct {
 	Count  int    `json:"count"`
 }
 
+// inheritOutcome 是上下文继承的结果：复制了多少行；一点都没复制到时给出原因，
+// 供调用方在子对话里写一条交代（否则用户只看到一个既没有「来自主对话」折叠行、
+// 也没有任何说明的子对话，会以为继承坏了）。
+type inheritOutcome struct {
+	Rows   int
+	Reason string
+}
+
 // copyInheritedContext 把父会话的完整消息历史复制进子会话，作为子对话继承的上下文。
 // 复制的是**原始行**（含摘要与压缩标记，逐行保序、seq 重排），不是渲染成的一段文本——
 // 这样复制后子会话的「模型可见序列」与父会话此前的请求逐条一致（同一套摘要边界、
 // 同一套规则压缩视图），DeepSeek 的前缀缓存才能命中整段父上下文。
 // 首行写一条 kind=inherit 标记行（前端折叠显示、组装时跳过），返回复制的行数。
-func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
+func (a *App) copyInheritedContext(parentID, childID string) (inheritOutcome, error) {
 	all, err := a.Store.RawMessagesAll(parentID)
 	if err != nil {
-		return 0, err
+		return inheritOutcome{}, err
 	}
 	rows := make([]*StoredMessage, 0, len(all))
 	for _, x := range all {
@@ -434,19 +442,22 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 			}
 		}
 		if last < 0 {
-			return 0, nil // 一条完整答复都还没有，没什么可继承的
+			// 父会话这一轮还在跑、且此前没有一条完整的往返：硬复制会把悬空的
+			// 工具调用带进来（模型请求会不合法），所以宁可不复制——但要给出
+			// 原因，让子对话能明确交代「为什么没有上下文背景」。
+			return inheritOutcome{Reason: "父对话这一轮还没答完，没有可承接的完整往返"}, nil
 		}
 		rows = rows[:last+1]
 	}
 	if len(rows) == 0 {
-		return 0, nil
+		return inheritOutcome{Reason: "父对话还没有任何对话内容"}, nil
 	}
 
 	// 先算好整张新旧 seq 映射再落库：摘要的覆盖边界要按新 seq 重写，
 	// 否则子会话的组装边界会对不上（摘要按旧 seq 覆盖、新行全是新 seq）。
 	last, err := a.Store.LastSeq(childID)
 	if err != nil {
-		return 0, err
+		return inheritOutcome{}, err
 	}
 	newOfOld := make(map[int64]int64, len(rows))
 	seq := last + 1 // 标记行占一个 seq
@@ -474,7 +485,7 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 	if err := a.Store.AppendRow(childID, &StoredMessage{
 		Message: TextMessage("user", string(mark)), Kind: inheritKind, CreatedAt: now(),
 	}); err != nil {
-		return 0, err
+		return inheritOutcome{}, err
 	}
 	for _, x := range rows {
 		cp := &StoredMessage{
@@ -491,7 +502,7 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 			cp.CoversUpTo = remap(x.CoversUpTo)
 		}
 		if err := a.Store.AppendRow(childID, cp); err != nil {
-			return 0, err
+			return inheritOutcome{}, err
 		}
 	}
 	// 上传登记也随上下文继承（uid 原样保留）：继承来的注记里若引用了
@@ -499,7 +510,7 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 	if err := a.Store.CopyUploadsOnBranch(parentID, childID); err != nil {
 		log.Printf("[上传] 继承 %s → %s 复制上传登记失败（子对话交付目标将不可解析）: %v", parentID, childID, err)
 	}
-	return len(rows), nil
+	return inheritOutcome{Rows: len(rows)}, nil
 }
 
 // estimateTokens 粗估一组消息的 token 量（中文为主的启发式）。

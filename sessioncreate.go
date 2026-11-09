@@ -14,6 +14,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -175,10 +176,24 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		(&toolContext{app: a, sess: m}).ensureJxAI()
 	}
 	if p.CopyHistory {
-		if _, err := a.copyInheritedContext(parent.ID, m.ID); err != nil {
+		out, err := a.copyInheritedContext(parent.ID, m.ID)
+		if err != nil {
 			// 上下文没复制成功就退回：留着半截继承的子对话比没有更糟
 			_ = a.Store.Delete(m.ID)
 			return nil, createSessionErr(500, "继承父对话上下文失败: %v", err)
+		}
+		if out.Rows == 0 {
+			// 一点都没继承到（父对话这一轮还没答完 / 父对话还是空的）：写一条
+			// 看得见的交代。否则用户面对的是一个既没有「来自主对话」折叠行、
+			// 也没有任何说明的子对话，只能猜「继承是不是坏了」；模型也会因为
+			// 环境快照里写着「本会话是子对话（父会话 X）」而自己去翻父会话
+			//（真实案例 2026-11-09 23:36：子对话白烧两次模型调用去读父会话）。
+			note := "本次没有继承到父对话上下文：" + out.Reason + "。子对话照常可用；等父对话这一轮答完后在右栏重新新建一个子对话，就会带上它的上下文。"
+			if err := a.Store.AppendRow(m.ID, &StoredMessage{
+				Message: TextMessage("user", note), Kind: kindReport, Origin: "inherit", CreatedAt: now(),
+			}); err != nil {
+				log.Printf("[继承] 会话 %s 写「未继承到上下文」交代失败: %v", m.ID, err)
+			}
 		}
 	}
 	// 首页「先录后聊」的兜底入口：建创建技能会话时工作区若已有演示材料，

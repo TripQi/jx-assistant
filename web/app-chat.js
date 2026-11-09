@@ -5517,7 +5517,13 @@ async function retryRun(view) {
     const res = await fetch(`/api/sessions/${cur.id}/retry`, {
       method: 'POST', signal: view.state.abort.signal,
     });
-    if (!res.ok) throw new Error(res.statusText || '重试失败');
+    if (!res.ok) {
+      // 后端拒绝重试时带着原因（如「这条对话里还没有你发过的消息…」）：
+      // 优先显示它，别让用户只看到 statusText 的 Conflict
+      let msg = res.statusText || '重试失败';
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) { /* 非 JSON：用 statusText */ }
+      throw new Error(msg);
+    }
     await consumeStream(res, view, cur.id);
   } catch (e) {
     if (e.name === 'AbortError') aborted = true;

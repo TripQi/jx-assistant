@@ -126,7 +126,7 @@ func (a *App) purgeLeakedUserSkills(dir string) {
 		}
 	}
 	if len(removed) > 0 {
-		log.Printf("[技能] 已清理曾随旧安装包误分发的内部技能: %s（含密钥的内部技能不随包分发，需要请从市场安装；市场正式安装的不受影响）", strings.Join(removed, "、"))
+		log.Printf("[技能] 已清理曾随旧安装包误分发的内部技能: %s（目录 %s；含密钥的内部技能不随包分发，需要请从市场安装；市场正式安装的不受影响）", strings.Join(removed, "、"), userDir)
 	}
 }
 

@@ -123,6 +123,11 @@ Write-Host ("== stage exe 校验通过：PE AMD64 / {0:N1} MB" -f ($exeItem.Leng
 Write-Host "== 暂存技能目录（含便携 Python 运行时，体积较大）"
 Copy-Item $SkillsSource (Join-Path $stage "技能") -Recurse -Force
 
+# 迁移账本（技能\.migrations.json）是「本机跑过哪些一次性迁移」的记账，绝不能进包：
+# 随包发给客户等于替客户声称全部迁移早已跑过，新装机器会跳过首次运行该跑的任务
+# （典型：释放内置 MCP 连接器 cua / windows-mcp 的任务），功能凭空缺一块。
+Remove-Item (Join-Path $stage "技能\.migrations.json") -Force -ErrorAction SilentlyContinue
+
 # 技能\_runtime 按发行白名单收敛：开发机上跑用户技能时 pip 装进共享运行时的
 # 第三方包（实测 AI 剪视频技能带来 nvidia/ctranslate2/faster-whisper 等 2.5 GB）
 # 绝不能随包发给客户——用户技能的依赖由对方机器装技能时自己装配。

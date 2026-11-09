@@ -78,7 +78,7 @@ func TestMigrationsIdempotentOnMigratedMachines(t *testing.T) {
 	}
 }
 
-// 账本时间可序列化（time.Time ↔ JSON RFC3339），重启读回不丢。
+// TestMigrationRecsRoundTrip 账本时间可序列化（time.Time ↔ JSON RFC3339），重启读回不丢。
 func TestMigrationRecsRoundTrip(t *testing.T) {
 	a := newSkillTestApp(t)
 	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.Local)
@@ -93,5 +93,80 @@ func TestMigrationRecsRoundTrip(t *testing.T) {
 	got, ok := recs["x"]
 	if !ok || got.Format("2006-01-02 15:04") != at.Format("2006-01-02 15:04") {
 		t.Fatalf("账本往返不对: %#v", recs)
+	}
+}
+
+// plantLeakedSkill 在用户技能目录放一个名单内的泄漏技能（清理任务的目标）。
+func plantLeakedSkill(t *testing.T, a *App) string {
+	t.Helper()
+	userDir, err := a.userSkillsDir()
+	if err != nil {
+		t.Fatalf("用户技能目录: %v", err)
+	}
+	target := filepath.Join(userDir, "jxmes-master")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("---\nname: x\ndescription: d\n---\n正文"), 0644)
+	return target
+}
+
+// TestMigrationLedgerScopedToSkillsDir 账本域回归（2026-11-09 事故）：开发版 /
+// 隔离验证实例各有自己的 dataDir，却共用同一个程序目录的技能目录。账本放数据
+// 目录时，每个新实例首跑都会把一次性清理再执行一遍——事故里隔离实例把市场正式
+// 安装（主实例有市场记账豁免）的 4 个技能当泄漏技能删掉了。账本改跟技能目录
+// 同域后，换 dataDir 的实例读到同一份记账，一个都不会再删。
+func TestMigrationLedgerScopedToSkillsDir(t *testing.T) {
+	a := newSkillTestApp(t)
+	target := plantLeakedSkill(t, a)
+	a.runMigrations()
+	if dirExists(target) {
+		t.Fatal("泄漏技能应被清理")
+	}
+	if !exists(filepath.Join(a.Cfg.SkillsDir, migrationsFileName)) {
+		t.Fatal("账本应落在技能目录（程序目录域）")
+	}
+	if exists(a.legacyMigrationsPath()) {
+		t.Fatal("新版本不该再往数据目录写账本")
+	}
+
+	// 另一个实例：独立 dataDir（自己的市场记账与账本），同一个技能目录
+	a2 := &App{Cfg: &Config{DataDir: t.TempDir(), SkillsDir: a.Cfg.SkillsDir}}
+	target2 := plantLeakedSkill(t, a2)
+	a2.runMigrations()
+	if !dirExists(target2) {
+		t.Fatal("换了 dataDir 的实例不该重跑一次性清理（账本应与技能目录同域）")
+	}
+}
+
+// TestMigrationLegacyLedgerHonored 升级路径：老版本账本在数据目录
+// （data/migrations.json，没有点前缀——当年就是这么写的，别拿新账本的文件名去
+// 找它），新版本账本在技能目录。首跑必须认老账本、把老记账搬进本域账本，绝不
+// 能让一次性任务重跑一遍。
+func TestMigrationLegacyLedgerHonored(t *testing.T) {
+	a := newSkillTestApp(t)
+	old := map[string]time.Time{}
+	for _, m := range appMigrations {
+		old[m.id] = time.Now()
+	}
+	out, err := json.MarshalIndent(old, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 按历史真实路径写（不复用 legacyMigrationsPath：那条路径本身就是要测的）
+	legacyPath := filepath.Join(a.Cfg.DataDir, "migrations.json")
+	if err := writeFileAtomic(legacyPath, out); err != nil {
+		t.Fatal(err)
+	}
+	target := plantLeakedSkill(t, a)
+	a.runMigrations()
+	if !dirExists(target) {
+		t.Fatal("老账本记过的迁移不应重跑")
+	}
+	own := a.loadMigrationRecsAt(a.migrationsPath())
+	for _, m := range appMigrations {
+		if _, ok := own[m.id]; !ok {
+			t.Fatalf("老记账 %s 应搬进技能目录账本: %#v", m.id, own)
+		}
 	}
 }

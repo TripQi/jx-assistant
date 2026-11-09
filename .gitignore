@@ -78,6 +78,8 @@ jx.db-shm
 jx.db-wal
 # 技能运行时状态戳与生成物：技能区版本（sk-…）/ 便携运行时版本（py3.…）/ comtypes 动态生成的包
 技能/.skills-version
+# 迁移账本（跟着技能目录走的一次性任务记账，属本机运行时状态；入 git/入包会让别处漏跑迁移）
+技能/.migrations.json
 技能/_runtime/.version
 技能/_runtime/**/comtypes/gen/
 # 技能草稿（会话中改造/试验中的技能副本，绝不入库；2026-10-30 用户明确要求）

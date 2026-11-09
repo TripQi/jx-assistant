@@ -3976,15 +3976,6 @@ func (a *App) handleRetry(w http.ResponseWriter, r *http.Request) {
 	if m == nil {
 		return
 	}
-	// 前提是库里真有一轮「用户提问还没答完」：发送阶段就被拒（比如 content 不能
-	// 为空 400）时一条都没落库，此时开跑只能得到一个没有任何提问的裸回合——模型
-	// 手里只有系统提示词与环境快照（真实案例 2026-11-09 23:36 的子对话：环境里
-	// 写着「本会话是子对话（父会话 X）」，模型只好去 read_session_messages 翻父
-	// 会话，白烧两次调用后被打断，留下一段谁也看不懂的空对话）。
-	if !a.hasOwnTurn(m.ID) {
-		writeErr(w, 409, "这条对话里还没有你发过的消息（上一次发送没成功落库），没有可重试的那一轮；请直接在输入框重新输入并发送")
-		return
-	}
 	lock := a.sessLock(m.ID)
 	lock.Lock()
 	if a.IsRunning(m.ID) {
@@ -4000,41 +3991,6 @@ func (a *App) handleRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	a.clearRunError(m.ID)
 	a.serveRun(w, r, m, run, []Event{{Type: "retry"}})
-}
-
-// hasOwnTurn 判断会话在「继承段之外」是否已有自己的对话行（真人提问 / AI 派发
-// 的任务与回报）。重试的前提是有这么一行——没有就说明上一次发送根本没落库，
-// 开跑只会得到一个没有提问的裸回合。继承段里的行不算（那是父对话的背景资料，
-// 不是这一侧被问的问题）。读库失败时放行：宁可让它原样撞后端的错，也不误锁。
-func (a *App) hasOwnTurn(id string) bool {
-	rows, err := a.Store.RawMessagesAll(id)
-	if err != nil {
-		return true
-	}
-	skip := 0
-	if len(rows) > 0 && rows[0].Kind == inheritKind {
-		var im inheritMark
-		if json.Unmarshal([]byte(rows[0].Text()), &im) == nil {
-			skip = im.Count + 1 // 继承段＝标记行 + count 行
-		}
-	}
-	if skip > len(rows) {
-		skip = len(rows)
-	}
-	for _, x := range rows[skip:] {
-		if x.Kind == kindAiUser {
-			return true
-		}
-		// 系统通知不是「问过的那一轮」：比如建子对话时写的「本次没有继承到
-		// 父对话上下文」交代行（origin=inherit）——它不构成可重试的提问。
-		if x.Kind == kindReport && x.Origin != "inherit" {
-			return true
-		}
-		if (x.Kind == kindChat || x.Kind == "") && x.Role == "user" { // kind 为空＝旧库行
-			return true
-		}
-	}
-	return false
 }
 
 // sseHeaders 切换响应为 SSE。

@@ -957,10 +957,19 @@ func runGrep(t *toolContext, args json.RawMessage) (string, error) {
 			full = path.Join(root, rel)
 		}
 		data, rerr := t.envReadFile(full)
-		if rerr != nil || bytes.IndexByte(data, 0) >= 0 {
+		if rerr != nil {
 			return nil
 		}
-		for i, ln := range strings.Split(string(data), "\n") {
+		// 编码一律走 encoding.go 的探测（全项目唯一真源）：GBK/GB18030/UTF-16
+		// 文件先解成 UTF-8 再匹配，否则这些文件里的中文永远搜不到——read/edit/
+		// run_command 早就这么做了，只有 grep 漏了。顺带把「含 NUL 就当二进制
+		// 跳过」换成「探测结果为二进制才跳过」：UTF-16 文本带 NUL，原来会被
+		// 误当二进制整份跳过。
+		text, enc := decodeText(data)
+		if enc == EncBinary {
+			return nil
+		}
+		for i, ln := range strings.Split(text, "\n") {
 			hit := literal && strings.Contains(ln, p.Pattern)
 			if !literal && re != nil {
 				hit = re.MatchString(ln)

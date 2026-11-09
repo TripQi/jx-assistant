@@ -1004,14 +1004,6 @@ func envBlockPtr(env []string) (*uint16, error) {
 	return &u[0], nil
 }
 
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && strings.ToLower(s[j]) < strings.ToLower(s[j-1]); j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
-}
-
 // tokenLogonSid 从令牌组里提取登录会话 SID（S-1-5-5-x-y）。
 // WinSta0/桌面等每登录对象的 DACL 授的是它；缺了它受限子进程启动即
 // 0xC0000142 崩溃（官方注释同款结论）。

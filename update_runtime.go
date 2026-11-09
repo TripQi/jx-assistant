@@ -348,7 +348,16 @@ func planSkillDirs(root string) ([]string, error) {
 	return names, nil
 }
 
-// （字符串排序直接用 sandbox_windows.go 里既有的 sortStrings，别在这里重复定义）
+// sortStrings 忽略大小写的原地插入排序（短切片足够，刻意不引 sort 包）。
+// 从 sandbox_windows.go 移来：update_runtime 在全平台构建都要用它排序技能
+// 目录名，留在 Windows 专属文件里会让 Linux 构建缺符号。
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && strings.ToLower(s[j]) < strings.ToLower(s[j-1]); j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
 
 // FinalizeRuntimeState 启动时结算运行时状态（幂等，任何失败不阻断启动）：
 //  1. 清掉上次换位留下的 _runtime.old-*（当前进程已不再占用）；

@@ -63,12 +63,14 @@ type jobRun struct {
 	Command   string
 	Cwd       string
 	Policy    string // 本次作业的沙箱档位（job_output 附加拒绝/故障 marker 用）
+	Origin    string // 启动来源：command（run_command）| python:<脚本路径>（run_python 后台）
 	startedAt time.Time
 	buf       *lockedBuffer
 	cancel    context.CancelFunc
 	done      chan struct{}
 	mu        sync.Mutex
 	exitInfo  string // 空=仍在运行；否则 "exit 0" / "exit 3" / "超时" 等
+	onDone    func(j *jobRun) // 收尾回调（startJob 的调用方注入；仅 run_python 后台用于【后台脚本回报】）
 }
 
 func (j *jobRun) Status() string {
@@ -91,7 +93,9 @@ func (j *jobRun) setExit(info string) {
 
 // startJob 启动一个后台命令（权限已由调用方 authorize 并核销凭证）。
 // policy 为 full 时不进沙箱；其余档位走 OS 级沙箱后端（与前台同路径）。
-func (a *App) startJob(t *toolContext, command, shell, cwd, policy string) (*jobRun, error) {
+// origin 标记启动来源（job_list 展示与收尾回报区分用）；onDone 在作业收尾
+// （成功/失败/被终止都算）时回调，可为 nil。
+func (a *App) startJob(t *toolContext, command, shell, cwd, policy, origin string, onDone func(j *jobRun)) (*jobRun, error) {
 	if info, serr := os.Stat(cwd); serr != nil || !info.IsDir() {
 		return nil, fmt.Errorf("工作目录不存在: %s", cwd)
 	}
@@ -109,7 +113,7 @@ func (a *App) startJob(t *toolContext, command, shell, cwd, policy string) (*job
 	}
 	j := &jobRun{
 		ID: "job-" + newID(), SessionID: t.sess.ID, Command: command, Cwd: cwd, Policy: policy,
-		startedAt: time.Now(), buf: &lockedBuffer{}, done: make(chan struct{}),
+		Origin: origin, startedAt: time.Now(), buf: &lockedBuffer{}, done: make(chan struct{}),
 	}
 	a.jobs[j.ID] = j
 	a.jobsMu.Unlock()
@@ -141,6 +145,9 @@ func (a *App) startJob(t *toolContext, command, shell, cwd, policy string) (*job
 		dur := time.Since(j.startedAt).Round(time.Second)
 		j.setExit("exit 0")
 		log.Printf("[作业] %s（%s）正常结束，运行 %s", j.ID, truncateRunes(j.Command, 60), dur)
+		if onDone != nil {
+			onDone(j) // 【后台脚本回报】等收尾动作：此时输出缓冲已齐、exitInfo 已定
+		}
 	}()
 	return j, nil
 }

@@ -33,7 +33,7 @@ func longRunCmd() string {
 func startLongJob(t *testing.T, a *App) *jobRun {
 	t.Helper()
 	tctx := &toolContext{app: a, sess: &SessionMeta{ID: "smoke-sess"}}
-	j, err := a.startJob(tctx, longRunCmd(), "", a.Cfg.Workspace, permFull)
+	j, err := a.startJob(tctx, longRunCmd(), "", a.Cfg.Workspace, permFull, "command", nil)
 	if err != nil {
 		t.Fatalf("startJob 失败: %v", err)
 	}

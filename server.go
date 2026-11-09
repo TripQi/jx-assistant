@@ -3602,6 +3602,11 @@ func (a *App) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 		Always   bool `json:"always"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	// 经理代理（mgrnotify.go）：经理自己经 call_api 代批的请求带调用者会话头，
+	// 先标注来源再登记决定——等待方醒来读到的就是已标注的值。
+	if managerResolveCaller(a, r) {
+		a.markApprovalByManager(r.PathValue("id"))
+	}
 	if err := a.resolveApproval(r.PathValue("id"), body.Approved, body.Always); err != nil {
 		writeErr(w, 404, err.Error())
 		return
@@ -3627,6 +3632,11 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 		a.holdQuestion(r.PathValue("id"))
 		writeJSON(w, 200, map[string]string{"ok": "1"})
 		return
+	}
+	// 经理代理（mgrnotify.go）：经理自己经 call_api 代答的请求带调用者会话头，
+	// 先标注来源再登记决定（口径同审批）。
+	if managerResolveCaller(a, r) {
+		a.markQuestionByManager(r.PathValue("id"))
 	}
 	if err := a.resolveQuestion(r.PathValue("id"), body.Answer); err != nil {
 		writeErr(w, 404, err.Error())

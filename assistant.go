@@ -673,6 +673,9 @@ func runSendToSession(t *toolContext, args json.RawMessage) (string, error) {
 	// 需求正文（【数字助理转达】+ task）由 deliverSub 走统一投递落库：投递一律
 	// 插话——目标执行中就注入它当前这一轮（下一次调用模型前生效），空闲则直接
 	// 落库开跑（两种情况都立即生效，不排队占位）
+	// 经理首次发话即建立「经理关联」标记（mgrnotify.go）：这个会话之后有审批/
+	// 提问卡挂久了没人处理，会自动通知经理代为处理。幂等，重复发话写同值。
+	t.app.markManagerLinked(m)
 	return t.deliverSub(m, "【数字助理转达】\n"+p.Task, note), nil
 }
 

@@ -163,6 +163,12 @@ type Config struct {
 	// 停表）时声光提醒——系统叮一声 + 全屏颜色闪烁 + 语音组件朗读 Text
 	//（组件停用时只叮不读）。Enabled=nil 表示未写过该键＝默认开启。
 	AskAlert AskAlertCfg `json:"askAlert,omitempty"`
+	// 经理代理通知（mgrnotify.go）：经理触达过的会话（dispatch_task 派生 /
+	// send_to_session 发过话）里，审批/提问卡挂出 AfterSec 秒（默认 30）仍
+	// 无人处理时，自动给数字经理主对话投一条通知（含 call_api 代批路径），
+	// 决议随后回告并标注来源。与上面的询问提醒并行，各管各：一个叫醒用户、
+	// 一个叫醒经理。Enabled=nil 表示未写过该键＝默认开启。
+	MgrNotify MgrNotifyCfg `json:"mgrNotify,omitempty"`
 	// 「执行结束后自动续发排队消息」（设置·常规）：本轮回复完成后，排队队列里
 	// 的待发消息——真人消息 / 派发回报 / 派发需求 / 系统注入，**不分来源**——
 	// 自动逐条作为独立一轮发出。nil 表示未写过该键＝默认开启；显式 false 才关闭：
@@ -201,6 +207,35 @@ type AskAlertCfg struct {
 	Enabled  *bool  `json:"enabled,omitempty"`
 	AfterSec int    `json:"afterSec,omitempty"`
 	Text     string `json:"text,omitempty"`
+}
+
+// MgrNotifyCfg 经理代理通知配置段：Enabled=nil＝默认开启（false=关闭）；
+// AfterSec 触发秒数（默认 30，钳 10-600，0 会在加载时归一回默认——想关用
+// Enabled，不留「0=关闭」这第二个开关语义）。
+type MgrNotifyCfg struct {
+	Enabled  *bool `json:"enabled,omitempty"`
+	AfterSec int   `json:"afterSec,omitempty"`
+}
+
+// 经理代理通知的默认触发秒数（用户定调 30 秒：比声光提醒早得多——经理先看
+// 到多半就轮不到打扰用户）。
+const mgrNotifyDefaultSec = 30
+
+// mgrNotifyOn 经理代理通知是否开启（nil 接收器＝关：测试的裸 App 没有 Cfg）。
+func (c *Config) mgrNotifyOn() bool {
+	if c == nil {
+		return false
+	}
+	return c.MgrNotify.Enabled == nil || *c.MgrNotify.Enabled
+}
+
+// mgrNotifyAfterSec 通知触发秒数（解析后的生效值，10-600，默认 30）。
+func (c *Config) mgrNotifyAfterSec() int {
+	v := mgrNotifyDefaultSec
+	if c != nil && c.MgrNotify.AfterSec >= 10 && c.MgrNotify.AfterSec <= 600 {
+		v = c.MgrNotify.AfterSec
+	}
+	return v
 }
 
 // 询问提醒的默认朗读文案与触发秒数（含访问器的兜底，测试里 Cfg 为 nil 也安全）。
@@ -340,6 +375,7 @@ func DefaultConfig() *Config {
 		UpdateURL:   "https://example.com:3000/api/v1/repos/your-org/your-repo/releases/latest",
 		UpdateMode:  "auto",
 		AskAlert:    AskAlertCfg{AfterSec: askAlertDefaultSec, Text: askAlertDefaultText},
+		MgrNotify:   MgrNotifyCfg{AfterSec: mgrNotifyDefaultSec},
 	}
 }
 
@@ -539,6 +575,17 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.AskAlert.Text) == "" {
 		cfg.AskAlert.Text = askAlertDefaultText
+	}
+	// 经理代理通知：老配置没有这一键时补默认 30 秒；越界的拉回范围（口径同
+	// 询问提醒，兜升级前手改配置文件的情况）。
+	if cfg.MgrNotify.AfterSec <= 0 {
+		cfg.MgrNotify.AfterSec = mgrNotifyDefaultSec
+	}
+	if cfg.MgrNotify.AfterSec < 10 {
+		cfg.MgrNotify.AfterSec = 10
+	}
+	if cfg.MgrNotify.AfterSec > 600 {
+		cfg.MgrNotify.AfterSec = 600
 	}
 	// 敏感字段透明解密（dpapi:v1: 密文 → 明文；旧版明文原样）。
 	// 首启迁移：明文照常读入，下一次 Save 自动转密文。

@@ -563,6 +563,10 @@ type Approval struct {
 	expiresAt    time.Time
 	decided      bool
 	ch           chan approvalResult
+	// 经理代理通知（mgrnotify.go）：notified=已通知过数字经理（决议据此回告）；
+	// byManager=决议由经理经 call_api 代选（回告标注来源）。permMu 保护。
+	notified  bool
+	byManager bool
 }
 
 // requestApproval 广播审批请求并阻塞等待用户决定（超时/取消视为拒绝）。
@@ -593,9 +597,20 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 			a.fireAskAlert("", ap.ID, sess.ID, sess.Title, summary, a.Cfg.askAlertText())
 		})
 	}
+	// 经理代理通知（mgrnotify.go）：经理触达过的会话，卡挂了设置时长（默认
+	// 30 秒）仍无人处理就通知数字经理——与上面的用户声光提醒并行，各管各。
+	var mgrNotifyTimer *time.Timer
+	if a.Cfg.mgrNotifyOn() {
+		mgrNotifyTimer = time.AfterFunc(mgrNotifyDelay(a), func() {
+			a.notifyManagerOfApproval(ap.ID)
+		})
+	}
 	defer func() {
 		if alertTimer != nil {
 			alertTimer.Stop()
+		}
+		if mgrNotifyTimer != nil {
+			mgrNotifyTimer.Stop()
 		}
 		a.permMu.Lock()
 		delete(a.approvals, ap.ID)
@@ -606,8 +621,10 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 	defer timer.Stop()
 	select {
 	case r := <-ap.ch:
+		a.reportApprovalOutcome(ap, r.approved, r.always, false)
 		return r.approved, r.always, false
 	case <-timer.C:
+		a.reportApprovalOutcome(ap, false, false, true)
 		return false, false, true
 	case <-ctx.Done():
 		return false, false, false

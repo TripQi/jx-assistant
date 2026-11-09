@@ -190,6 +190,10 @@ func runCallAPI(t *toolContext, args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("请求构造失败：%v", err)
 	}
 	req.RemoteAddr = "127.0.0.1:0"
+	// 调用者身份随请求带上：审批/提问的决议据此标注「经理代选」（mgrnotify.go
+	// 的 managerResolveCaller 读它）。这不是鉴权（call_api 已过下面的三道闸），
+	// 只是来源标注——前端按钮与远程转发都不带这个头，一律算用户。
+	req.Header.Set("X-JX-Caller-Session", t.sess.ID)
 
 	// 闸一：目录（mux 同款匹配含方法校验——方法不对会匹配到 405 的空 pattern）
 	meta, ok := t.app.apiMetaFor(req)

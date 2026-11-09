@@ -7170,7 +7170,10 @@ function modelNameOf(key) {
   return (hit && (hit.modelName || hit.modelId)) || mid;
 }
 
-const THINK_LABELS = { enabled: '思考·开', disabled: '思考·关', low: '思考·低', medium: '思考·中', high: '思考·高', max: '思考·深' };
+// 思考档位中文文案：语义准确、大小阶梯一目了然（低/中/高/最大；max 译
+//「最大」——「深」「最高」都与「高」分不清大小）。厂家特有档位不在表里
+// 的原样显示。
+const THINK_LABELS = { enabled: '思考·开', disabled: '思考·关', low: '思考·低', medium: '思考·中', high: '思考·高', max: '思考·最大' };
 
 // 当前生效的思考档位（会话级 / 首页草稿 / 指定视图的会话）
 function curThinking(view) {

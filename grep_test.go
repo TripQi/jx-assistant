@@ -56,7 +56,10 @@ func TestGrepExclude(t *testing.T) {
 		"data/notes.md",
 		"src/main.go",
 		"src/app.log",
+		"src/data/keep.md",
 		"gen/deep/x.go",
+		"deep/src/testdata/case1.txt",
+		"deep/src/gen/a.go",
 	}
 	for _, rel := range files {
 		full := filepath.Join(ws, filepath.FromSlash(rel))
@@ -103,10 +106,51 @@ func TestGrepExclude(t *testing.T) {
 		t.Fatalf("exclude=gen/deep 应剪掉 gen/deep 子树，实得:\n%s", out)
 	}
 
-	// 5) 多项 + 大小写不敏感
+	// 5) 多项 + 大小写不敏感（名字模式命中任意层级的 data/ 与 gen/）
 	out = search(`,"exclude":"DATA, Gen"`)
-	if strings.Contains(out, "notes.md") || strings.Contains(out, "x.go") || !strings.Contains(out, "main.go") {
-		t.Fatalf("exclude=DATA, Gen 应剪掉两棵目录，实得:\n%s", out)
+	if strings.Contains(out, "notes.md") || strings.Contains(out, "keep.md") ||
+		strings.Contains(out, "x.go") || strings.Contains(out, "a.go") {
+		t.Fatalf("exclude=DATA, Gen 应剪掉两棵名字命中的目录，实得:\n%s", out)
+	}
+	if !strings.Contains(out, "main.go") || !strings.Contains(out, "case1.txt") {
+		t.Fatalf("未被 exclude 命中的文件应照常命中，实得:\n%s", out)
+	}
+
+	// 6) 深层目录名（三级的 testdata）：名字模式深度不限
+	out = search(`,"exclude":"testdata"`)
+	if strings.Contains(out, "case1.txt") {
+		t.Fatalf("exclude=testdata 应剪掉 deep/src/testdata，实得:\n%s", out)
+	}
+
+	// 7) 深层路径模式从任意层级起算：src/gen 应命中 deep/src/gen/a.go，
+	//    但不该误伤 gen/deep/x.go（两者只在末段相同）。
+	out = search(`,"exclude":"src/gen"`)
+	if strings.Contains(out, "a.go") {
+		t.Fatalf("exclude=src/gen 应命中深层的 deep/src/gen，实得:\n%s", out)
+	}
+	if !strings.Contains(out, "x.go") {
+		t.Fatalf("exclude=src/gen 不应误伤 gen/deep/x.go，实得:\n%s", out)
+	}
+
+	// 8) 跨级通配路径 */testdata
+	out = search(`,"exclude":"*/testdata"`)
+	if strings.Contains(out, "case1.txt") || !strings.Contains(out, "notes.md") {
+		t.Fatalf("exclude=*/testdata 应剪掉深层同名目录，实得:\n%s", out)
+	}
+
+	// 9) 前导 / 锚定搜索根：/data 只剪根下的 data/，不剪 src/data/
+	out = search(`,"exclude":"/data"`)
+	if strings.Contains(out, "notes.md") {
+		t.Fatalf("exclude=/data 应剪掉根下 data/，实得:\n%s", out)
+	}
+	if !strings.Contains(out, "keep.md") {
+		t.Fatalf("exclude=/data 不应剪掉 src/data/keep.md，实得:\n%s", out)
+	}
+
+	// 10) 宽容：模型把绝对路径写进 exclude，剥掉搜索根前缀后按相对路径生效
+	out = search(fmt.Sprintf(`,"exclude":%q`, filepath.ToSlash(ws)+"/data"))
+	if strings.Contains(out, "notes.md") || !strings.Contains(out, "keep.md") {
+		t.Fatalf("绝对路径形态的 exclude 应剥成相对路径 data 生效，实得:\n%s", out)
 	}
 }
 

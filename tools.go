@@ -930,11 +930,11 @@ func runGlob(t *toolContext, args json.RawMessage) (string, error) {
 
 func grepTool() Tool {
 	return Tool{
-		Spec: toolSpec("grep", "在目录内的文本文件中搜索内容，pattern 为正则表达式（非法时按字面量匹配）。返回 文件:行号: 内容。可选 exclude 忽略指定的目录/文件（逗号分隔）：纯名字（data、node_modules、*.log）匹配任意层级的目录名或文件名并整棵跳过；含 / 的按相对路径匹配（src/gen 连同子目录）；含通配符按 path.Match 匹配，一律不分大小写。默认不忽略任何业务目录（.git 与 node_modules 本就跳过）。",
+		Spec: toolSpec("grep", "在目录内的文本文件中搜索内容，pattern 为正则表达式（非法时按字面量匹配）。返回 文件:行号: 内容。可选 exclude 忽略目录/文件（逗号分隔），路径一律写**相对 path 这个搜索根**的相对路径，不是绝对路径：纯名字（data、*.log）匹配任意层级的目录名或文件名并整棵跳过；含斜杠的从任意层级起算（src/gen 也会命中 deep/src/gen/x.go），前导 / 只锚定搜索根（/data 不影响 src/data）；支持通配符（*/testdata、src/*/*.tmp），不分大小写。文件与文件夹一视同仁。默认不忽略任何业务目录（.git 与 node_modules 本就跳过）。",
 			objSchema(map[string]any{
 				"pattern": strProp("搜索模式（正则表达式）"),
 				"path":    strProp("起始目录，默认工作区根目录"),
-				"exclude": strProp("可选：忽略的目录/文件模式，逗号分隔，如 data,*.log,dist/generated"),
+				"exclude": strProp("可选：忽略的目录/文件模式（相对 path 搜索根），逗号分隔，如 data,*.log,dist/generated"),
 			}, "pattern")),
 		Run: runGrep,
 	}
@@ -944,7 +944,9 @@ func grepTool() Tool {
 // 反斜杠统一成斜杠、去掉前导 ./ 与结尾 /。默认空 = 不忽略任何东西。
 func splitExcludeList(s string) []string {
 	var out []string
-	f := func(r rune) bool { return r == ',' || r == '，' || r == ';' || r == '；' || r == ' ' || r == '\t' || r == '\r' || r == '\n' }
+	f := func(r rune) bool {
+		return r == ',' || r == '，' || r == ';' || r == '；' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}
 	for _, raw := range strings.FieldsFunc(s, f) {
 		pat := strings.TrimPrefix(strings.TrimSuffix(strings.ReplaceAll(raw, "\\", "/"), "/"), "./")
 		if pat != "" {
@@ -954,9 +956,16 @@ func splitExcludeList(s string) []string {
 	return out
 }
 
-// excludedBy 判断相对路径 rel（及它这一级名字 name）是否被 exclude 模式命中：
-// 纯名字匹配任意层级的目录名/文件名（目录命中即整棵剪枝），含 / 的按相对路径
-// 前缀或通配匹配。一律不分大小写——搜索时大小写不一致几乎总是笔误而非意图。
+// excludedBy 判断相对路径 rel（及它这一级名字 name）是否被 exclude 模式命中。
+// 语义按 gitignore 的习惯（模型最熟的那套），文件与文件夹一视同仁——
+// 命中目录即整棵剪枝，命中文件即略过：
+//   - 无斜杠的名字模式（data、*.log）：匹配**任意层级**的目录名/文件名；
+//   - 含斜杠、无前导 /（src/gen、*/testdata）：从**任意层级**起算，即
+//     src/gen 也会命中 deep/src/gen/x.go；
+//   - 前导 /（/data）：只锚定搜索根，src/data 不受影响。
+//
+// 路径一律相对 path 指定的搜索根；不分大小写——搜索时大小写不一致几乎总是
+// 笔误而非意图。
 func excludedBy(pats []string, rel, name string) bool {
 	if len(pats) == 0 {
 		return false
@@ -964,7 +973,11 @@ func excludedBy(pats []string, rel, name string) bool {
 	lrel, lname := strings.ToLower(rel), strings.ToLower(name)
 	for _, pat := range pats {
 		p := strings.ToLower(pat)
-		if strings.Contains(p, "/") {
+		anchored := strings.HasPrefix(p, "/")
+		if anchored {
+			// 前导 / 锚定搜索根：先于"含不含斜杠"判断，否则剥掉斜杠后会退化成
+			// 名字模式、把 src/data 也一起剪掉。
+			p = strings.TrimPrefix(p, "/")
 			if lrel == p || strings.HasPrefix(lrel, p+"/") {
 				return true
 			}
@@ -973,14 +986,30 @@ func excludedBy(pats []string, rel, name string) bool {
 			}
 			continue
 		}
-		if strings.ContainsAny(p, "*?[") {
-			if ok, _ := path.Match(p, lname); ok {
+		if !strings.Contains(p, "/") {
+			// 名字模式：任意层级的目录名或文件名
+			if strings.ContainsAny(p, "*?[") {
+				if ok, _ := path.Match(p, lname); ok {
+					return true
+				}
+			} else if lname == p {
 				return true
 			}
 			continue
 		}
-		if lname == p {
-			return true
+		// 无前导 / 的路径模式：任意层级起算（深度不限，二级三级照命中）
+		if !strings.ContainsAny(p, "*?[") {
+			if lrel == p || strings.HasPrefix(lrel, p+"/") ||
+				strings.Contains(lrel, "/"+p+"/") || strings.HasSuffix(lrel, "/"+p) {
+				return true
+			}
+			continue
+		}
+		segs := strings.Split(lrel, "/")
+		for i := range segs {
+			if ok, _ := path.Match(p, strings.Join(segs[i:], "/")); ok {
+				return true
+			}
 		}
 	}
 	return false
@@ -1008,6 +1037,19 @@ func runGrep(t *toolContext, args json.RawMessage) (string, error) {
 		return "", err
 	}
 	excl := splitExcludeList(p.Exclude)
+	// 宽容一步：模型偶尔会把绝对路径写进 exclude（约定是相对搜索根），剥掉搜索
+	// 根前缀当相对路径用，免得静默失效；剥不掉的就按原样参与匹配。
+	if len(excl) > 0 {
+		rootSlash := strings.ToLower(filepath.ToSlash(root))
+		for i, e := range excl {
+			le := strings.ToLower(e)
+			if strings.HasPrefix(le, rootSlash+"/") {
+				// 剥成锚定形式：绝对路径本身就是确定位置，不该退化成"任意层级
+				// 同名目录都剪"
+				excl[i] = "/" + e[len(rootSlash)+1:]
+			}
+		}
+	}
 	var skip func(rel, name string, isDir bool) bool
 	if len(excl) > 0 {
 		skip = func(rel, name string, isDir bool) bool { return excludedBy(excl, rel, name) }

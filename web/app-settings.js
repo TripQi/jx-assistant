@@ -116,6 +116,7 @@ function loadProvDraft(c) {
     presetURL: p.presetURL || '',
     name: p.name || '',
     baseURL: p.baseURL || '',
+    protocol: p.protocol || '',       // 渠道协议：''=OpenAI 兼容 / anthropic / responses
     key: '', keyMasked: p.apiKeyMasked || '',
     enabled: p.enabled !== false,   // 手动启停开关（服务商卡片头）
     autoDisabled: !!p.autoDisabled, // 公司通道自动停用（连不上服务端）
@@ -136,6 +137,7 @@ function loadProvDraft(c) {
 function provSig(p) {
   return JSON.stringify({
     id: p.id || '', presetId: p.presetId || '', name: p.name || '', baseURL: p.baseURL || '',
+    protocol: p.protocol || '',
     models: (p.models || []).map((m) => [m.id || '', m.name || '', m.contextWindow || 0, m.maxOutput || 0, !!m.supportsImages]),
   });
 }
@@ -726,11 +728,47 @@ function buildProvCard(p, key) {
     } else {
       p.presetId = sel.value;
       const t = presetOf(sel.value);
-      if (t) { p.name = t.name; p.baseURL = ''; p.presetURL = t.baseURL; }
+      if (t) { p.name = t.name; p.baseURL = ''; p.presetURL = t.baseURL; p.protocol = t.protocol || ''; }
     }
     renderProvCards();
   };
   form.appendChild(sel);
+
+  // 协议类型：决定同一套 agent 走哪种渠道协议（后端 llmproto.go 的三个实现）。
+  // 预置方跟随模板不可改；自定义渠道三选一，默认 OpenAI 兼容。
+  const PROTOCOLS = [
+    ['', 'OpenAI 兼容 · chat/completions（默认）'],
+    ['anthropic', 'Anthropic 原生 · /v1/messages'],
+    ['responses', 'OpenAI Responses · /v1/responses'],
+  ];
+  const protoLabel = (v) => { const hit = PROTOCOLS.find((x) => x[0] === v); return hit ? hit[1] : v; };
+  if (p.presetId) {
+    if (p.protocol) {
+      const lblProto = document.createElement('div');
+      lblProto.className = 'pf-label';
+      lblProto.textContent = '协议类型';
+      form.appendChild(lblProto);
+      const protoFixed = document.createElement('div');
+      protoFixed.className = 'pf-fixed';
+      protoFixed.textContent = protoLabel(p.protocol) + '（预置提供方固定）';
+      form.appendChild(protoFixed);
+    }
+  } else {
+    const lblProto = document.createElement('div');
+    lblProto.className = 'pf-label';
+    lblProto.textContent = '协议类型';
+    form.appendChild(lblProto);
+    const selProto = document.createElement('select');
+    selProto.className = 'pf-input';
+    for (const [v, label] of PROTOCOLS) {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = label;
+      selProto.appendChild(o);
+    }
+    selProto.value = p.protocol || '';
+    selProto.onchange = () => { p.protocol = selProto.value; renderProvCards(); };
+    form.appendChild(selProto);
+  }
 
   // 名称 + API 地址（预置方用系统地址，只展示不可改；备注展示计费方式/Key 获取方式）
   if (p.presetId) {
@@ -761,10 +799,10 @@ function buildProvCard(p, key) {
     inName.oninput = () => { p.name = inName.value; };
     cellName.appendChild(inName);
     const cellUrl = document.createElement('div');
-    cellUrl.innerHTML = '<div class="pf-label">API 地址（OpenAI 兼容）</div>';
+    cellUrl.innerHTML = '<div class="pf-label">API 地址（' + (p.protocol === 'anthropic' ? 'Anthropic，含 /v1' : p.protocol === 'responses' ? 'Responses，含 /v1' : 'OpenAI 兼容') + '）</div>';
     const inUrl = document.createElement('input');
     inUrl.className = 'pf-input';
-    inUrl.placeholder = 'https://…/v1';
+    inUrl.placeholder = p.protocol === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://…/v1';
     inUrl.value = p.baseURL;
     inUrl.oninput = () => { p.baseURL = inUrl.value; };
     cellUrl.appendChild(inUrl);
@@ -984,7 +1022,7 @@ function buildProvCard(p, key) {
     try {
       const d = await api('/api/providers/fetch', {
         method: 'POST',
-        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key }),
+        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key, protocol: p.protocol || '' }),
       });
       const oldMap = new Map(p.models.map((m) => [m.id, m]));
       const merged = [];
@@ -1023,7 +1061,7 @@ function buildProvCard(p, key) {
     try {
       const d = await api('/api/providers/test', {
         method: 'POST',
-        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key, models: ids }),
+        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key, protocol: p.protocol || '', models: ids }),
       });
       provTest[key] = {};
       for (const r of (d.results || [])) provTest[key][r.id] = { state: r.ok ? 'ok' : 'fail', ms: r.ms, err: r.err || '失败' };
@@ -1093,6 +1131,7 @@ async function putProvider(p, key) {
       name: p.name,
       baseURL: p.presetId ? '' : (p.baseURL || '').trim(),
       apiKey: p.key,
+      protocol: p.presetId ? '' : (p.protocol || ''),
       models: p.models,
     }),
   });
@@ -1744,7 +1783,7 @@ document.querySelectorAll('.set-nav-item').forEach((b) => {
 // 模型页：「添加提供方」= 插入一张展开的自定义卡片（已有未保存草稿则直接展开，不覆盖）
 $('prov-add-card').onclick = () => {
   if (!provNew) {
-    provNew = { id: '', presetId: null, presetURL: '', name: '', baseURL: '', key: '', keyMasked: '', models: [] };
+    provNew = { id: '', presetId: null, presetURL: '', name: '', baseURL: '', protocol: '', key: '', keyMasked: '', models: [] };
   }
   provOpenKey = 'new';
   provModelOpen['new'] = -1;

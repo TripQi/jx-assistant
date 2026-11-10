@@ -12,8 +12,10 @@ import (
 )
 
 // 多模型接入：providers 预置清单 + 会话级模型解析。
-// 只支持 OpenAI 兼容协议（chat/completions）；各家（DeepSeek/智谱/Kimi/通义/
-// OpenAI/Ollama 本地）都有兼容端点。Anthropic 原生协议暂不支持。
+// 渠道协议三种（ProviderCfg.Protocol）：空串＝OpenAI 兼容 chat/completions
+//（各家 DeepSeek/智谱/Kimi/通义/OpenAI/Ollama 本地都有兼容端点）、anthropic＝
+// Anthropic 原生 /v1/messages、responses＝OpenAI Responses /v1/responses。
+// 协议实现见 llmproto.go（与 StreamChat 同接口），这里只存类型，调用层零感知。
 
 // ModelCfg 是一个可选模型的定义；ContextWindow 为 0 表示未知，按默认处理。
 type ModelCfg struct {
@@ -32,6 +34,10 @@ type ProviderCfg struct {
 	BaseURL string     `json:"baseURL"`
 	APIKey  string     `json:"apiKey,omitempty"`
 	Models  []ModelCfg `json:"models"`
+	// Protocol 渠道协议类型：空串＝OpenAI 兼容 chat/completions（默认，存量
+	// 配置全是它）、anthropic＝/v1/messages（x-api-key 鉴权）、responses＝
+	// /v1/responses。设置页渠道卡片「协议类型」选择，调用层经 LLMTarget 透传。
+	Protocol string `json:"protocol,omitempty"`
 	// Enabled 手动启停开关：nil＝启用（旧配置没写过这一键），显式 false＝停用
 	//（不参与默认选择与会话解析；卡片置灰）。手动停用不会被自动恢复打开。
 	Enabled *bool `json:"enabled,omitempty"`
@@ -96,6 +102,13 @@ func DefaultProviders() []ProviderCfg {
 		{ID: "modelscope", Name: "魔搭 ModelScope（免费额度）", BaseURL: "https://api-inference.modelscope.cn/v1",
 			Note: "免费推理接口（每日限量、不保证稳定，不建议重要任务依赖）；密钥用魔搭账户的 SDK Token，需绑定阿里云账号"},
 		{ID: "openai", Name: "OpenAI", BaseURL: "https://api.openai.com/v1"},
+		// Anthropic 原生协议预置：x-api-key 鉴权 + /v1/messages（llmproto.go）；
+		// baseURL 约定与 OpenAI 一致（填到 /v1）。模型别名即官方短名。
+		{ID: "anthropic", Name: "Anthropic", BaseURL: "https://api.anthropic.com/v1", Protocol: "anthropic", Models: []ModelCfg{
+			{ID: "claude-opus-4-1", Name: "Claude Opus 4.1", ContextWindow: 200000, MaxOutput: 32768, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
+			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
+		}, Note: "密钥用 Anthropic 控制台的 API Key（sk-ant- 开头）；兼容 new-api 等中转站时地址填中转站地址"},
 		{ID: "ollama", Name: "Ollama 本地", BaseURL: "http://127.0.0.1:11434/v1"},
 	}
 }
@@ -107,6 +120,12 @@ type LLMTarget struct {
 	Model          string
 	ContextWindow  int
 	SupportsImages bool // 该模型是否声明支持图片输入（决定 read_image 是否内联视觉内容）
+	// Protocol 渠道协议（ProviderCfg.Protocol 透传）：空串＝OpenAI 兼容、
+	// anthropic＝/v1/messages、responses＝/v1/responses，StreamChat 按它分发。
+	Protocol string
+	// MaxOutput 模型目录声明的最大输出 tokens：Anthropic 必填 max_tokens、
+	// Responses 的 max_output_tokens 都以它为上限来源（未声明则协议层默认）。
+	MaxOutput int
 	// ProviderID 目标所属提供方 id（""=旧单模型配置）：调用层用它把连接类失败
 	// 归因到提供方（公司通道不可达时自动停用，见 sync.go noteProviderConnFail）。
 	ProviderID string
@@ -181,7 +200,7 @@ func (a *App) resolveTarget(sess *SessionMeta) LLMTarget {
 
 func (a *App) targetOf(p *ProviderCfg, _, modelID string) LLMTarget {
 	t := LLMTarget{BaseURL: p.BaseURL, APIKey: p.APIKey, ContextWindow: DefaultContextWindow,
-		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL}
+		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL, Protocol: p.Protocol}
 	t.Model = modelID
 	if t.Model == "" && len(p.Models) > 0 {
 		t.Model = p.Models[0].ID
@@ -192,6 +211,7 @@ func (a *App) targetOf(p *ProviderCfg, _, modelID string) LLMTarget {
 				t.ContextWindow = m.ContextWindow
 			}
 			t.SupportsImages = m.SupportsImages
+			t.MaxOutput = m.MaxOutput
 			break
 		}
 	}
@@ -292,6 +312,8 @@ func guessReasoningLevels(id string) []string {
 		return false
 	}
 	switch {
+	case has("claude"):
+		return []string{"enabled", "disabled", "low", "medium", "high"} // 思考预算档（llmproto 映射 budget_tokens）
 	case has("o1"), has("o3"), has("o4"), has("gpt-5"):
 		return []string{"low", "medium", "high"} // OpenAI effort 档
 	case has("deepseek-reasoner"), has("-r1"):
@@ -385,23 +407,53 @@ func TestProviderModels(p *ProviderCfg, ids []string) []ModelTestResult {
 	return results
 }
 
-// pingModel 发一次最小化的 chat/completions 请求，能通即可。
+// pingModel 发一次最小化的协议请求，能通即可（按渠道协议选端点与鉴权头）。
 func pingModel(p *ProviderCfg, model string) error {
-	url := strings.TrimRight(p.BaseURL, "/") + "/chat/completions"
-	payload, _ := json.Marshal(map[string]any{
+	base := strings.TrimRight(p.BaseURL, "/")
+	url := base + "/chat/completions"
+	payload := map[string]any{
 		"model":      model,
 		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 		"max_tokens": 1,
 		"stream":     false,
-	})
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	}
+	setAuth := func(req *http.Request) {
+		if p.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		}
+	}
+	switch p.Protocol {
+	case "anthropic":
+		url = base + "/messages"
+		payload = map[string]any{
+			"model":      model,
+			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+			"max_tokens": 1,
+			"stream":     false,
+		}
+		setAuth = func(req *http.Request) {
+			req.Header.Set("anthropic-version", anthropicVersionHeader)
+			if p.APIKey != "" {
+				req.Header.Set("x-api-key", p.APIKey)
+			}
+		}
+	case "responses":
+		url = base + "/responses"
+		// Responses 的输出下限是 16（低于会 400）
+		payload = map[string]any{
+			"model":             model,
+			"input":             "ping",
+			"max_output_tokens": 16,
+			"stream":            false,
+		}
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if p.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
-	}
+	setAuth(req)
 	client := newCompanyHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -430,6 +482,13 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 	if p.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	}
+	if p.Protocol == "anthropic" {
+		// Anthropic 的 /v1/models 用 x-api-key + anthropic-version 鉴权
+		req.Header.Set("anthropic-version", anthropicVersionHeader)
+		if p.APIKey != "" {
+			req.Header.Set("x-api-key", p.APIKey)
+		}
+	}
 	client := newCompanyHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -444,6 +503,7 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 		Data []struct {
 			ID              string   `json:"id"`
 			Name            string   `json:"name"`
+			DisplayName     string   `json:"display_name"` // Anthropic /v1/models 的同义字段
 			ContextWindow   int      `json:"context_window"`
 			ContextLength   int      `json:"context_length"` // 部分端点的同义字段
 			MaxOutputTokens int      `json:"max_output_tokens"`
@@ -463,6 +523,10 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 			continue
 		}
 		ctx, img := guessModelMeta(m.ID)
+		// Anthropic 的显示名在 display_name（Name 为空时取它）
+		if m.Name == "" {
+			m.Name = m.DisplayName
+		}
 		// 真实字段优先：上下文长度绝不取自输出上限
 		if m.ContextWindow > 0 {
 			ctx = m.ContextWindow

@@ -1056,18 +1056,24 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveProviderDraft 把请求里的 id/baseURL/apiKey 折算成一个可用的提供方：
-// 没存过的 id（或新增卡片）直接用请求里带来的地址与密钥，便于未保存先拉取/测试。
-func (a *App) resolveProviderDraft(id, baseURL, apiKey string) (*ProviderCfg, error) {
+// resolveProviderDraft 把请求里的 id/baseURL/apiKey/protocol 折算成一个可用的
+// 提供方：没存过的 id（或新增卡片）直接用请求里带来的地址与密钥，便于未保存
+// 先拉取/测试；预置模板的协议（如 Anthropic）在 id 命中预置时自动带上。
+func (a *App) resolveProviderDraft(id, baseURL, apiKey, protocol string) (*ProviderCfg, error) {
 	eff := &ProviderCfg{}
 	if p := a.providerByID(strings.TrimSpace(id)); p != nil {
 		*eff = *p
+	} else if preset, ok := PresetByID(strings.TrimSpace(id)); ok {
+		*eff = preset
 	}
 	if u := strings.TrimSpace(baseURL); u != "" {
 		eff.BaseURL = u
 	}
 	if k := strings.TrimSpace(apiKey); k != "" {
 		eff.APIKey = k
+	}
+	if v := strings.TrimSpace(protocol); v != "" {
+		eff.Protocol = v
 	}
 	if strings.TrimSpace(eff.BaseURL) == "" {
 		return nil, fmt.Errorf("缺少 API 地址")
@@ -1078,15 +1084,16 @@ func (a *App) resolveProviderDraft(id, baseURL, apiKey string) (*ProviderCfg, er
 // handleFetchModels 从提供方服务拉取可用模型清单（服务端代理，避开浏览器跨域）。
 func (a *App) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID      string `json:"id"`
-		BaseURL string `json:"baseURL"`
-		APIKey  string `json:"apiKey"`
+		ID       string `json:"id"`
+		BaseURL  string `json:"baseURL"`
+		APIKey   string `json:"apiKey"`
+		Protocol string `json:"protocol"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	p, err := a.resolveProviderDraft(body.ID, body.BaseURL, body.APIKey)
+	p, err := a.resolveProviderDraft(body.ID, body.BaseURL, body.APIKey, body.Protocol)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -1102,11 +1109,12 @@ func (a *App) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 // handleUpsertProvider 新增或更新单个提供方（模型页卡片「保存」）。
 func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID      string     `json:"id"`
-		Name    string     `json:"name"`
-		BaseURL string     `json:"baseURL"`
-		APIKey  string     `json:"apiKey"` // 空串 = 沿用已保存的 key
-		Models  []ModelCfg `json:"models"`
+		ID       string     `json:"id"`
+		Name     string     `json:"name"`
+		BaseURL  string     `json:"baseURL"`
+		APIKey   string     `json:"apiKey"` // 空串 = 沿用已保存的 key
+		Protocol string     `json:"protocol"`
+		Models   []ModelCfg `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
@@ -1114,6 +1122,17 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimSpace(in.ID)
 	preset, isPreset := PresetByID(id)
+	// 协议类型校验：空串＝OpenAI 兼容（默认），预置方跟随模板（如 Anthropic）
+	protocol := strings.TrimSpace(in.Protocol)
+	switch protocol {
+	case "", "anthropic", "responses":
+	default:
+		writeErr(w, 400, "未知的渠道协议类型："+protocol)
+		return
+	}
+	if protocol == "" && isPreset {
+		protocol = preset.Protocol
+	}
 	baseURL := strings.TrimSpace(in.BaseURL)
 	if baseURL == "" {
 		if !isPreset {
@@ -1154,7 +1173,7 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 	if isPreset && len(models) == 0 && len(preset.Models) > 0 {
 		models = append(models, preset.Models...)
 	}
-	pc := ProviderCfg{ID: id, Name: name, BaseURL: baseURL, Models: models}
+	pc := ProviderCfg{ID: id, Name: name, BaseURL: baseURL, Protocol: protocol, Models: models}
 	if key := strings.TrimSpace(in.APIKey); key != "" {
 		pc.APIKey = key
 	} else if old := a.providerByID(id); old != nil {
@@ -1243,16 +1262,17 @@ func (a *App) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 // handleTestProvider 对提供方目录里的所有模型做连通性测试（极小请求，限并发）。
 func (a *App) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID      string   `json:"id"`
-		BaseURL string   `json:"baseURL"`
-		APIKey  string   `json:"apiKey"`
-		Models  []string `json:"models"`
+		ID       string   `json:"id"`
+		BaseURL  string   `json:"baseURL"`
+		APIKey   string   `json:"apiKey"`
+		Protocol string   `json:"protocol"`
+		Models   []string `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	p, err := a.resolveProviderDraft(in.ID, in.BaseURL, in.APIKey)
+	p, err := a.resolveProviderDraft(in.ID, in.BaseURL, in.APIKey, in.Protocol)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -1265,6 +1285,7 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		ID            string     `json:"id"`
 		Name          string     `json:"name"`
 		BaseURL       string     `json:"baseURL"`
+		Protocol      string     `json:"protocol,omitempty"` // 渠道协议：空＝OpenAI 兼容、anthropic、responses
 		APIKeyMasked  string     `json:"apiKeyMasked"`
 		Preset        bool       `json:"preset"`
 		PresetURL     string     `json:"presetURL,omitempty"`
@@ -1280,7 +1301,7 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	providers := []providerView{}
 	for _, p := range a.Cfg.Providers {
 		pv := providerView{
-			ID: p.ID, Name: p.Name, BaseURL: p.BaseURL,
+			ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Protocol: p.Protocol,
 			APIKeyMasked: maskKey(p.APIKey), Models: p.Models,
 			Enabled: p.Enabled == nil || *p.Enabled, AutoDisabled: p.AutoDisabled,
 			Company: p.ID == wizardProviderID, PublicBaseURL: p.PublicBaseURL,
@@ -1302,14 +1323,15 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		providers = append(providers, pv)
 	}
 	type presetView struct {
-		ID      string `json:"id"`
-		Name    string `json:"name"`
-		BaseURL string `json:"baseURL"`
-		Note    string `json:"note,omitempty"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		BaseURL  string `json:"baseURL"`
+		Protocol string `json:"protocol,omitempty"`
+		Note     string `json:"note,omitempty"`
 	}
 	presets := []presetView{}
 	for _, p := range DefaultProviders() {
-		presets = append(presets, presetView{ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Note: p.Note})
+		presets = append(presets, presetView{ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Protocol: p.Protocol, Note: p.Note})
 	}
 	t := a.DefaultTarget()
 	// 搜索服务的「当前生效地址」：交给前端原样显示（空/报错即「还打不出去」）

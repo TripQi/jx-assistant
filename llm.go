@@ -81,6 +81,12 @@ type ChatRequest struct {
 	// 思考控制：DeepSeek/智谱等用 thinking{type}，OpenAI o/gpt-5 系用 reasoning_effort
 	Thinking        *ThinkingCfg `json:"thinking,omitempty"`
 	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	// 以下三个参数主循环不设置（服务端默认），供协议转换与测试用：
+	// Anthropic 必填 max_tokens（协议层会兜底默认值）；temperature 三协议都
+	// 透传；tool_choice 按 OpenAI 语义（auto/none/required/具名工具）。
+	MaxTokens   int      `json:"max_tokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	ToolChoice  string   `json:"tool_choice,omitempty"`
 }
 
 type StreamOptionsCfg struct {
@@ -155,6 +161,9 @@ type Usage struct {
 	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
 	// Anthropic 兼容层形态：usage 里的缓存读取量
 	CacheReadTokens int `json:"cache_read_input_tokens,omitempty"`
+	// Anthropic 原生协议：本次调用**写入**前缀缓存的 token 量（prompt cache
+	// creation，与读取命中是两回事——CacheHit 只认读取，不计入）
+	CacheCreationTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // PromptTokensDetails 是 OpenAI 标准 usage 明细块（cached_tokens=命中前缀量）。
@@ -178,7 +187,7 @@ func (u Usage) CacheHit() int {
 // 「没命中」与「没统计」（前者由 CacheMiss 推出未命中量，后者两者皆 0）。
 func (u Usage) ReportsCache() bool {
 	return u.PromptCacheHit > 0 || u.PromptCacheMiss > 0 ||
-		u.PromptTokensDetails != nil || u.CacheReadTokens > 0
+		u.PromptTokensDetails != nil || u.CacheReadTokens > 0 || u.CacheCreationTokens > 0
 }
 
 // CacheMiss 取未命中部分：端点明报 miss 就照用；只报命中量的端点（OpenAI
@@ -230,17 +239,16 @@ var altPreferred sync.Map // providerID → bool（true=优先外网）
 
 // StreamChat 向解析后的 LLM 目标发起一轮流式对话。
 // target.BaseURL 配为 "mock" 时走内置演示模型，便于离线验证整条链路。
-// 配了外网备用地址（AltBaseURL，公司通道由公告下发）且主地址连接失败时，自动
-// 改走备用地址重试一次，成功后粘住备用地址直到它再失败。
+// target.Protocol 选渠道协议（""＝OpenAI 兼容 chat/completions、anthropic、
+// responses，实现见 llmproto.go）；配了外网备用地址（AltBaseURL，公司通道由
+// 公告下发）且主地址连接失败时，自动改走备用地址重试一次，成功后粘住备用
+// 地址直到它再失败——故障转移对三种协议一视同仁。
 func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb StreamCallbacks) error {
 	if target.BaseURL == "mock" {
 		return mockStream(req, cb)
 	}
-	req.Model = target.Model
-	req.Stream = true
-	req.StreamOptions = &StreamOptionsCfg{IncludeUsage: true}
-	fillReasoningStub(&req)
-	body, err := json.Marshal(req)
+	proto := protocolOf(target.Protocol)
+	body, err := proto.marshal(target, req)
 	if err != nil {
 		return err
 	}
@@ -256,7 +264,7 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 	if altFirst {
 		first, second = alt, primary
 	}
-	err = streamChatOnce(ctx, first, target.APIKey, body, cb)
+	err = streamProtoOnce(ctx, first, target.APIKey, body, proto, cb)
 	if err == nil {
 		markAltPreferred(target, first == alt && alt != "")
 		return nil
@@ -265,7 +273,7 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 		return err
 	}
 	log.Printf("[模型] %s 连接失败，改走备用地址 %s", first, second)
-	err2 := streamChatOnce(ctx, second, target.APIKey, body, cb)
+	err2 := streamProtoOnce(ctx, second, target.APIKey, body, proto, cb)
 	if err2 == nil {
 		markAltPreferred(target, second == alt && alt != "")
 		return nil
@@ -329,9 +337,10 @@ func markAltPreferred(target LLMTarget, preferAlt bool) {
 	setAltPreferred(target.ProviderID, preferAlt)
 }
 
-// streamChatOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体）。
-func streamChatOnce(ctx context.Context, baseURL, apiKey string, body []byte, cb StreamCallbacks) error {
-	url := baseURL + "/chat/completions"
+// streamProtoOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体，
+// 三种协议共用：端点路径、鉴权头与流解析都来自 proto）。
+func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
+	url := baseURL + proto.path
 	if cb.OnRequest != nil {
 		cb.OnRequest(url, body)
 	}
@@ -340,9 +349,7 @@ func streamChatOnce(ctx context.Context, baseURL, apiKey string, body []byte, cb
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	proto.setAuth(apiKey, httpReq.Header)
 	resp, err := streamHTTP.Do(httpReq)
 	if err != nil {
 		if resp != nil {
@@ -365,7 +372,7 @@ func streamChatOnce(ctx context.Context, baseURL, apiKey string, body []byte, cb
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return errors.New(upstreamErrText(resp.StatusCode, snippet))
 	}
-	return parseSSE(resp.Body, cb)
+	return proto.parse(resp.Body, cb)
 }
 
 // upstreamErrText 把网关返回的错误整理成用户看得懂的一行：优先取 JSON 里的

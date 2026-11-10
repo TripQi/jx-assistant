@@ -18,7 +18,8 @@ go test -run TestXxx .             # 单测（只跑自己改动相关的，别�
 ```
 
 首次使用：左下角「设置」中填入 API Key；`baseURL` 兼容 OpenAI chat-completions
-接口。`baseURL` 填 `mock` 可进入**离线演示模式**，无需 Key 即可体验完整链路。
+接口（渠道协议可选 Anthropic 原生 / OpenAI Responses，见「渠道协议」节）。
+`baseURL` 填 `mock` 可进入**离线演示模式**，无需 Key 即可体验完整链路。
 
 ## 开发规矩（AI 开发前必读）
 
@@ -1895,8 +1896,9 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 |---|---|
 | `main.go` | 启动入口：配置、HTTP 服务、自动开浏览器、-webdir 开发模式 |
 | `config.go` | 运行配置（含 providers 与压缩设置）的加载/保存/兼容折算 |
-| `models.go` | 多 provider 模型清单、调用目标解析、模型列表拉取 |
-| `config.go` 的 `companyQuota` | **公司通道额度快照**（服务端随 `/announce`、`/provision` 的 `quota` 字段下发，客户端只存不算）：`sync.go` 的 `applyAnnounce` 与 `wizard.go` 的 `applyProvisionPayload` 写进 `Cfg.CompanyQuota`（`quotaEqual` 判变化才落盘）；`/api/models` 带 `companyQuota`（模型菜单里**公司通道那个分组头**上显示「剩余 N 积分」，悬停看明细）、`/api/config` 的公司通道带 `quota`（设置页公司通道**卡片头**的额度 chip + 展开后的明细与「刷新额度」）；设置页「刷新额度」走 `POST /api/company-sync`——复用 `companySyncOnce` 重拉一轮公告，**不为额度另开查询接口**（new-api 的 AI 接口没有余额端点，额度只能由服务端代读并随公告下发） || `llm.go` | OpenAI 兼容流式客户端（SSE 解析、工具调用增量聚合）+ mock 演示模型 |
+| `models.go` | 多 provider 模型清单、调用目标解析、模型列表拉取（按渠道协议适配端点与鉴权头） |
+| `config.go` 的 `companyQuota` | **公司通道额度快照**（服务端随 `/announce`、`/provision` 的 `quota` 字段下发，客户端只存不算）：`sync.go` 的 `applyAnnounce` 与 `wizard.go` 的 `applyProvisionPayload` 写进 `Cfg.CompanyQuota`（`quotaEqual` 判变化才落盘）；`/api/models` 带 `companyQuota`（模型菜单里**公司通道那个分组头**上显示「剩余 N 积分」，悬停看明细）、`/api/config` 的公司通道带 `quota`（设置页公司通道**卡片头**的额度 chip + 展开后的明细与「刷新额度」）；设置页「刷新额度」走 `POST /api/company-sync`——复用 `companySyncOnce` 重拉一轮公告，**不为额度另开查询接口**（new-api 的 AI 接口没有余额端点，额度只能由服务端代读并随公告下发） || `llm.go` | OpenAI 兼容流式客户端（SSE 解析、工具调用增量聚合）+ mock 演示模型；`StreamChat` 是全部协议的统一入口（按 `LLMTarget.Protocol` 分发，主备地址故障转移/断开器登记/错误整理三协议共用） |
+| `llmproto.go` | **渠道协议扩展**：`llmProtocol`（端点路径+鉴权头+请求转换+SSE 解析）三个实现——OpenAI 兼容 chat/completions（原行为原样）、Anthropic 原生 /v1/messages、OpenAI Responses /v1/responses。统一 Message/ToolCall 与协议格式互转（system 提取、tool_use/tool_result、function_call/function_call_output、图片 data URL）、思考档位映射（Anthropic budget_tokens：low 2k/enabled·medium 6k/high 12k/max 24k，max_tokens 不足自动抬升；Responses effort：low/medium 原样、high·max→high、enabled/disabled 不干预）、usage 归一（Anthropic 的 cache_read/cache_creation 映入 Usage 缓存字段）。看护测试 llmproto_test.go（转换/SSE/工具往返/mock 网关端到端/既有渠道报文回归） |
 | `contextengine.go` | 上下文引擎：请求材料的唯一组装者 + 上下文事件总线。系统提示词（可被 `data/prompts/<mode>.md` 引用文件覆盖，引用文件附内容 hash 标记来源；版本号不进提示词——随发版变化会白白打断前缀缓存）、环境快照、工具目录、历史视图、视觉内联经 `Assemble` 成包（确定性：同一状态逐字节一致——前缀缓存命中的根基，有测试看护），token 估算与前缀指纹随包产出；每轮开轮的 prompt 展示快照行经 `OpenRound` 落库；需把上下文发给模型的侧路调用（模型摘要）由 `CallSummarizer` 拼装并发送（留痕 audit scope=summarize，不进请求环形缓存）；权限/模型/思考档位/计划目标/工作区/远程挂载等配置变更经 `Notify` 落时间线（audit type=ctx，含前后值）；技能增减由环境快照 diff 在尾部留痕，同一事实不重复记账 |
 | `agent.go` | 主循环：每步经上下文引擎取包 → 流式请求 → 执行工具 → 回填（只做编排，不亲手拼装——发给模型的内容一律来自引擎 Assembly）；`envPrompt` 生成运行环境快照（不含时间——时间走 context.go 的 timeAfter 派生通道） |
 | `perm.go` | 权限引擎：三档模式、授权凭证（签发/核销）、审批队列、受保护路径、危险命令拦截、沙箱内浏览器预拦（browserLaunchHit：非 full 档启动浏览器的命令执行前拦下并指路 browser_*，确定性失败路径的快速失败，不做组件开关） |
@@ -1940,6 +1942,38 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `server.go` | 路由、聊天 SSE、全局事件流、压缩接口、插件注入、内嵌前端 |
 | `web/` | 前端：工作区分组侧栏、子对话抽屉、子任务卡片、模型选择器、设置页、市场页（`app-market.js`：左侧栏底部入口、主区整页视图 body.market-mode、三 tab+搜索+一键装卸；组件装卸后 `CX.refresh()` 热生效） |
 > **服务端已独立成仓库**（`D:\智能体工作区\jxaiserver`，module jxai-server）：远程访问中继 + 技能/组件/插件市场（含 /admin 管理页）+ 更新分发（日期+V序号版本体系）+ 公司接入（登记/UDP 发现/按人发 new-api 令牌/每月额度）。本仓库只保留客户端半边（market.go 市场客户端、wizard.go 接入向导、update.go 更新检查——与服务端的协议契约见各自文件头注释）；其部署与用法见该仓库 README/部署。开发完全分开，两边接口变更需双侧同步。
+
+## 渠道协议（provider protocol）
+
+同一套 agent（主循环/上下文/工具）支持三种渠道协议，按**渠道类型**而非全局选择：
+
+- **选型入口**：设置 → 模型 → 渠道卡片 →「协议类型」下拉。三选一：
+  `OpenAI 兼容 · chat/completions`（默认，存量配置不受影响）、
+  `Anthropic 原生 · /v1/messages`、`OpenAI Responses · /v1/responses`。
+  预置的「Anthropic」提供方固定走原生协议；自定义渠道自由切换。
+- **实现**：`ProviderCfg.Protocol`（空串=OpenAI 兼容）→ `LLMTarget.Protocol` →
+  `StreamChat` 按 `llmProtocol`（llmproto.go）分发；mock 演示、主备地址故障
+  转移、停止断开器、错误整理三协议共用；agent/上下文/工具循环零感知，
+  消息仍是统一 Message/ToolCall 形态，转换只在发出前最后一步。
+- **baseURL 约定**：三种协议一致——填到版本前缀（如
+  `https://api.anthropic.com/v1`），端点路径由协议实现拼
+  （/chat/completions、/messages、/responses）；「拉取模型」「测试连通」
+  也按协议选端点与鉴权头（Anthropic 用 x-api-key + anthropic-version，
+  其余 Bearer）。
+- **思考档位映射**：Anthropic → `thinking{type:enabled,budget_tokens}`
+  （low=2048 / enabled=medium=6144 / high=12288 / max=24576；disabled 与
+  空串省略即不思考；max_tokens 必须大于预算，不足自动抬升，且思考时
+  不发 temperature）；Responses → `reasoning.effort`（low/medium 原样、
+  high/max→high；enabled/disabled/空串省略，Responses 没有 disabled 档）。
+- **usage 归一**：Anthropic 的 `cache_read_input_tokens` /
+  `cache_creation_input_tokens` 映入 Usage 的 CacheReadTokens /
+  CacheCreationTokens（写入量不计入命中）；Responses 的
+  `input_tokens_details.cached_tokens` 走 OpenAI 标准口径。取数一律走
+  `CacheHit()/CacheMiss()/ReportsCache()`。
+- **工具往返**：Anthropic 用 tool_use/tool_result block（连续 tool 消息
+  合并进同一条 user 消息；assistant 的 reasoning_content 不回传）；Responses
+  用 function_call/function_call_output 顶层 item；OpenAI 兼容照旧
+  tool_calls/tool_call_id。三协议对上层暴露完全相同的 ToolCall。
 
 ## 前后端接口
 

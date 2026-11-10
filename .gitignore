@@ -88,6 +88,11 @@ jx.db-wal
 政策申报/
 品牌素材/
 
+# Linux 发行包：源文件（install.sh/README/unit/打包脚本）入库，产物不入库
+打包/linux/*.tar.gz
+打包/linux/stage-linux/
+打包/linux/jx-assistant-linux-amd64
+
 # 语音输入法联动文件（运行期状态：热键/主题色，由主程序按当前设置生成）
 voicetype.json
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=jx-assistant (坚祥数字助理 本地服务)
+Documentation=https://example.com:2227
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jx-assistant
+ExecStart=/opt/jx-assistant/jx-assistant -noopen
+Restart=on-failure
+RestartSec=3
+# 数据（config.json/data/技能/工作区）都在安装目录内，升级只换二进制；
+# 需要降权运行时自建用户并在下面加 User=jx / Group=jx，同时 chown 安装目录。
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

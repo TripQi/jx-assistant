@@ -10,3 +10,8 @@
 # 批处理必须 CRLF：cmd 按 CRLF 语义解析行，裸 LF 会把命令拆行错乱
 # （powershell 拆出 'rshell'、'[失败]' 当命令执行）。检出时强制 CRLF。
 *.bat text eol=crlf
+# Linux 发行物必须 LF：install.sh 是 POSIX sh（CRLF 会让 dash/bash 直接语法错）、
+# systemd unit 与 README 同理按 LF 检出，避免 Windows autocrlf 污染。
+打包/linux/install.sh text eol=lf
+打包/linux/jx-assistant.service text eol=lf
+打包/linux/README-Linux.md text eol=lf

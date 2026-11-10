@@ -351,6 +351,23 @@ android/other/无后缀文件），构建脚本零改动。拆包（建 android/
   注意 git 推送凭据（凭据管理器的 OAuth）**不能**调 API——两套体系，别再
   临时登服务器开令牌。
 
+  **Linux 版发行与发版**（`打包/linux/`，2026-11-10 首版）：源文件入库的是
+  `install.sh`（POSIX sh，dash 兼容）、`README-Linux.md`、`jx-assistant.service`、
+  `打包-linux.ps1`；tar.gz 产物已 gitignore。出包在仓库根跑
+  `powershell -File 打包\linux\打包-linux.ps1`（交叉编译 linux/amd64 → 平铺打包
+  二进制+README+unit → 打印 sha256），产物 `jx-assistant-linux-amd64.tar.gz`
+  （约 18.6 MB）。**发版时必须把该 tar.gz 作为 Release 附件一并上传**——更新源是
+  jxai-server 的 `/updates/latest`（不是 Gitea：Gitea 仓库匿名不可见），附件经
+  `publish-update` 登记；⚠️ 当前 jxai-server 的 publish-update 只有
+  -engine/-component/-runtime/-skills/-installer 通道，**尚无通用附件参数**，
+  需在 jxaiserver 补 `-extra <文件>`（平铺进 files/ 并入 assets，不参与 blocks
+  快照语义）并部署后，发版命令才能带上 Linux 包。补齐前 Linux 用户用
+  `install.sh --file jx-assistant-linux-amd64.tar.gz` 离线装（脚本两条路都实测过）。
+  install.sh 从 `/updates/latest` 的 assets 里按文件名找 `jx-assistant-linux-amd64.tar.gz`，
+  服务端通道一补即自动可用，脚本无需改。Linux 版功能边界（无桌面壳/托盘/语音
+  输入法/DPAPI/静默自更新，升级=重跑 install.sh）见 `打包/linux/README-Linux.md`；
+  WSL 验证记录在同目录 `验证记录-*.md`。
+
   **安装期清理（防旧文件残留出错）**：升级安装对「随包分发」的目录**整目录
   先删后装**（`[InstallDelete]`）：`技能\_runtime`、内置技能、内置组件、
   `md-viewer`——清理清单由 `打包安装包.ps1` 按 stage 现货自动生成

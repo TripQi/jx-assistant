@@ -70,19 +70,9 @@ go test -run TestXxx .             # 单测（只跑自己改动相关的，别�
 指编译 + 实际效果，不要求自动化测试全过；只提交自己本次的文件，一次提交
 对应一件事。
 
-### 写代码前的 7 个问题
+### 写代码前的 7 个问题（在项目里的落法）
 
-思考一个新功能时，先问自己这 7 个问题，非常重要：
-
-1. Does this need to exist? → no: skip it (YAGNI)
-2. Already in this codebase? → reuse it, don't rewrite
-3. Stdlib does it? → use it
-4. Native platform feature? → use it
-5. Installed dependency? → use it
-6. One line? → one line
-7. Only then: the minimum that works
-
-放到本项目的语境里：
+7 个问题的中英对照见上文「核心工作原理」，此处不重复——直接落到本项目：
 
 - 动手新写之前，先搜一遍代码库：工具实现看 `tools.go` / `historytools.go`，
   上下文处理看 `context.go` / `contextengine.go`，扩展机制看 `components.go` /
@@ -94,6 +84,22 @@ go test -run TestXxx .             # 单测（只跑自己改动相关的，别�
   先自问前 3 条问不问得过去。
 - 前端是原生 JS、无框架、无构建链，这是有意的架构决策（软著全自主实现 +
   单文件交付）。"引入框架/打包器让代码好写一点"在本项目里默认是错误答案。
+
+### 运行时与依赖归属
+
+Python 依赖按「谁用谁带走」归位，禁止混装：
+
+1. **内置技能 / 内置组件依赖 → 共享运行时基线**（`技能/_runtime/python`，
+   随仓库分发）：pdf / ocr / office / com / 微信 / 语音组件等内置能力的依赖
+   （pdfplumber、rapidocr 全家、docx/pptx/openpyxl、pywin32/comtypes、
+   sherpa-onnx 等）。要加包走技能管理器（技能 manifest 声明）。
+2. **任务域专用依赖 → 该域自己的工具目录**：视频语音域在
+   `D:\智能体工作区\工作目录\video_tools\`（视频语音任务域专用工具目录，
+   ffmpeg / 模型 / venv311 自包含，faster-whisper、ctranslate2 与 GPU 的
+   CUDA 库全在此）。
+3. **用户技能依赖 → 跟技能自身走**（技能私有 deps），删技能连依赖一起删。
+4. **禁止直接往共享运行时 pip 装东西**——它服务全部内置技能，装错难回退；
+   任务域需求建独立工具目录 / venv。
 
 ### 开发流程：调研规划 → 执行 → 验证 → 提交
 

@@ -1,7 +1,7 @@
-# 全量行尾策略：入库统一规范化为 LF，检出按各条特例（.bat 强制 CRLF、
-# Linux 发行物 LF、二进制组件原样）。配合仓库本地 core.autocrlf=false，
-# 检出即 LF——gofmt / 多行编辑 / 文本工具不再被 CRLF 检出干扰。
-* text=auto
+# 全量行尾策略：入库规范化为 LF，检出也统一 LF（eol=lf，不依赖各机器
+# core.autocrlf 配置）；仅 .bat 强制 CRLF、Linux 发行物 LF、二进制组件原样。
+# gofmt / 多行编辑 / 文本工具不再被 CRLF 检出干扰。
+* text=auto eol=lf
 # 第三方 Python 包（内置组件/wmcppkg）保持安装原样（LF），不做行尾转换。
 # 不加这条：git 会把成千上万个 .py 全部转成 CRLF，产生海量警告、仓库变大，
 # 且每次 pip 重装都会出现整库虚假 diff。二进制（Cua 驱动）同理按原样存。

@@ -59,7 +59,6 @@
 | et_xmlfile | 2.0.0 | MIT | Copyright (c) 2011 openpyxl | https://pypi.org/project/et_xmlfile/ |
 | flatbuffers | 25.12.19 | Apache 2.0 | Copyright (c) 2014-2025 Google Inc. (Apache-2.0) | https://pypi.org/project/flatbuffers/ |
 | idna | 3.20 | BSD-3-Clause | Copyright (c) 2013-2025 Kim Davies | https://github.com/kjd/idna |
-| invoke | 3.0.3 | BSD-2-Clause | Copyright (c) 2012-2025 Jeff Forcier (BSD-2) | https://github.com/pyinvoke/invoke |
 | lxml | 6.1.3 | BSD-3-Clause | Copyright (c) 2004 Infrae; ElementTree (c) 1999-2004 Fredrik Lundh | https://pypi.org/project/lxml/ |
 | numpy | 2.5.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | Copyright (c) 2005-2025, NumPy Developers | https://pypi.org/project/numpy/ |
 | onnxruntime | 1.31.0 | MIT License | Copyright (c) Microsoft Corporation | https://pypi.org/project/onnxruntime/ |
@@ -88,7 +87,6 @@
 | sherpa-onnx-core | 1.13.8 | Apache-2.0 | : https://github.com/k2-fsa/sherpa-onnx | https://pypi.org/project/sherpa-onnx-core/ |
 | sherpa-onnx | 1.13.8 | Apache licensed, as found in the LICENSE file | Copyright (c) 2022-2025 k2-fsa contributors | https://pypi.org/project/sherpa-onnx/ |
 | six | 1.17.0 | MIT | Copyright (c) 2010-2024 Benjamin Peterson | https://pypi.org/project/six/ |
-| tqdm | 4.70.1 | MPL-2.0 AND MIT **[MPL]** | Copyright (c) 2015-2025 tqdm developers (MPL-2.0) / noamraph (MIT) | https://pypi.org/project/tqdm/ |
 | typing_extensions | 4.16.0 | PSF-2.0 | Copyright (c) The Python Software Foundation | https://github.com/python/typing_extensions |
 | urllib3 | 2.8.0 | MIT | Copyright (c) 2008-2025 Andrey Petrov and contributors | https://pypi.org/project/urllib3/ |
 | websocket-client | 1.9.2 | Apache-2.0 | : https://github.com/websocket-client/websocket-client | https://pypi.org/project/websocket-client/ |
@@ -101,7 +99,6 @@
 |---|---|---|---|---|
 | aiofile | 3.12.3 | Apache-2.0 | Copyright (c) 2019 Dmitry Orlov | https://github.com/mosquito/aiofile |
 | annotated-types | 0.8.0 | MIT | https://github.com/annotated-types/annotated-types | https://github.com/annotated-types/annotated-types |
-| anyio | 4.16.0 | MIT | Copyright (c) 2021-2025 Alex Grönholm | https://pypi.org/project/anyio/ |
 | attrs | 26.1.0 | MIT | Copyright (c) 2015-2025 Hynek Schlawack | https://pypi.org/project/attrs/ |
 | Authlib | 1.9.2 | BSD-3-Clause | https://github.com/authlib/authlib | https://github.com/authlib/authlib |
 | backoff | 2.2.1 | MIT | Copyright (c) 2014 litl, LLC. | https://pypi.org/project/backoff/ |
@@ -109,7 +106,6 @@
 | beautifulsoup4 | 4.15.0 | MIT License | Copyright (c) 2004-2025 Leonard Richardson | https://www.crummy.com/software/BeautifulSoup/bs4/ |
 | cachetools | 7.2.8 | MIT | Copyright (c) 2014-2025 Thomas Kemmer | https://github.com/tkem/cachetools/ |
 | caio | 0.12.10 | Apache-2.0 | Copyright (c) 2020 Dmitry Orlov | https://pypi.org/project/caio/ |
-| click | 8.5.0 | BSD-3-Clause | Copyright (c) 2014-2025 Pallets | https://github.com/pallets/click/ |
 | cyclopts | 5.3.3 | Apache-2.0 | Copyright (c) 2023-2025 Brian Pugh | https://github.com/BrianPugh/cyclopts |
 | distro | 1.9.0 | Apache License, Version 2.0 | Copyright (c) 2015-2025 Nir Cohen; 2020-2025 distro maintainers | https://pypi.org/project/distro/ |
 | dnspython | 2.9.1 | ISC | Copyright (c) 2003-2025 Bob Halley | https://pypi.org/project/dnspython/ |
@@ -120,9 +116,6 @@
 | fastmcp | 4.1.5 | Apache-2.0 | Copyright (c) 2024-2025 Jeremiah Lowin | https://gofastmcp.com |
 | fastmcp-slim | 4.1.5 | Apache-2.0 | https://gofastmcp.com | https://gofastmcp.com |
 | griffe | 2.4.1 | ISC | Copyright (c) 2021-2025 Timothée Mazzucotelli | https://mkdocstrings.github.io/griffe |
-| h11 | 0.16.0 | MIT | Copyright (c) 2016-2025 Nathaniel J. Smith | https://pypi.org/project/h11/ |
-| httpcore2 (pydantic httpcore fork) | 2.16.0 | BSD-3-Clause | Copyright (c) 2016-2025 Encode Labs Ltd | https://github.com/pydantic/httpx2 |
-| httpx2 (pydantic httpx fork) | 2.16.0 | BSD-3-Clause | Copyright (c) 2016-2025 Encode Labs Ltd | https://github.com/pydantic/httpx2 |
 | joserfc | 1.7.7 | BSD-3-Clause | Copyright (c) 2023-2025 Hsiaoming Yang | https://github.com/authlib/joserfc |
 | jsonref | 1.1.0 | MIT | Copyright (c) 2021-2025 Chase Sterling | https://pypi.org/project/jsonref/ |
 | jsonschema | 4.26.0 | MIT | Copyright (c) 2013-2025 Julian Berman | https://github.com/python-jsonschema/jsonschema |
@@ -158,7 +151,6 @@
 | starlette | 1.10.0 | BSD-3-Clause | Copyright (c) 2018-2025 Tom Christie | https://github.com/Kludex/starlette |
 | tabulate | 0.10.0 | MIT | Copyright (c) 2011-2025 Asterios Dimitriou | https://github.com/astanin/python-tabulate |
 | thefuzz | 0.22.1 | MIT | Copyright (c) 2014 SeatGeek | https://pypi.org/project/thefuzz/ |
-| truststore | 0.10.5 | MIT | Copyright (c) 2022-2025 Seth Michael Larson | https://github.com/sethmlarson/truststore |
 | typing-inspection | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection | https://github.com/pydantic/typing-inspection |
 | uncalled-for | 0.4.1 | MIT | https://github.com/chrisguidry/uncalled-for | https://github.com/chrisguidry/uncalled-for |
 | uuid7 | 0.1.0 | MIT license | Copyright (c) 2021 Stephen Simmons | https://pypi.org/project/uuid7/ |
@@ -239,10 +231,10 @@ https://www.gnu.org/licenses/gpl-3.0.html 。
 逆向调试与替换该库。库源码：https://github.com/paramiko/paramiko （tag 对应
 版本）。LGPL-2.1 全文：https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
 
-### 8.4 MPL-2.0（certifi、tqdm）
+### 8.4 MPL-2.0（certifi）
 
 原样分发未修改，MPL 文件级条款随 wheel 内许可头满足；源码：
-https://github.com/certifi/python-certifi 、https://github.com/tqdm/tqdm 。
+https://github.com/certifi/python-certifi 。
 MPL-2.0 全文：https://mozilla.org/MPL/2.0/
 
 ---

@@ -10,6 +10,10 @@ config.json
 # 与软著版同口径——Python 本体与 site-packages 一起入库，克隆后跑「编译并启动」即可用，
 # 不再依赖 python.org/华为镜像 + PyPI 清华源那一路联网装配。
 !技能/_runtime/**
+# 共享运行时只放基线（内置技能/组件依赖），任务域依赖放各自工具目录——
+# 归属规范见 AGENT.md「运行时与依赖归属」。装错地方会直接出现在 git status，不做忽略遮丑。
+# bridge.go 运行期幂等维护的 run_python 工具桥（删了自动重建，属运行时状态非基线）
+技能/_runtime/**/site-packages/sitecustomize.py
 技能/_runtime/**/__pycache__/
 技能/_runtime/**/*.pyc
 技能/_runtime/**/~*/

@@ -1,15 +1,17 @@
 package main
 
 // 右键上下文菜单「提前自动压缩」（POST /api/sessions/{id}/autocompact）的测试：
-// 它走的是自动压缩线路（autoCompactNow）——按设置的保留字数划界（KeepChars 变了
+// 它走的是自动压缩线路（autoCompactKick）——按设置的保留字数划界（KeepChars 变了
 // 边界跟着变）、规则折叠/模型摘要按当前配置选路（摘要 origin=auto，与手动全量
-// 压缩的 manual 区分开）、两个通道都没启用时报错且不动历史。设置页
-// 「压缩数字助理主对话」固定模型摘要的行为不回归（见 assistant_ops_test.go）。
+// 压缩的 manual 区分开；模型摘要后台执行，202 立即返回）、两个通道都没启用时
+// 报错且不动历史。设置页「压缩数字助理主对话」固定模型摘要的行为不回归
+//（见 assistant_ops_test.go）。
 
 import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // postAutoCompact 直接调处理器（路由变量手动注入，不经 mux 匹配）。
@@ -112,7 +114,8 @@ func TestAutoCompactKeepCharsChangeMovesBoundary(t *testing.T) {
 }
 
 // 按当前配置选路：规则通道关闭、只开模型摘要时，按钮走 doSummarize(auto)——
-// 摘要行 origin=auto（自动线路），不是手动全量的 manual。
+// 摘要放后台（202 async，立即返回），轮询等摘要行落库：origin=auto（自动
+// 线路），不是手动全量的 manual。
 func TestAutoCompactLlmChannelAutoOrigin(t *testing.T) {
 	a := newCompactTestApp(t)
 	a.initRuntime()
@@ -126,24 +129,32 @@ func TestAutoCompactLlmChannelAutoOrigin(t *testing.T) {
 	seedAutoSession(t, a, "autollm")
 
 	w := postAutoCompact(t, a, "autollm")
-	if w.Code != 200 {
-		t.Fatalf("应 200, got %d %s", w.Code, w.Body.String())
+	if w.Code != 202 {
+		t.Fatalf("模型摘要通路应 202（后台执行）, got %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"scope":"auto"`) || !strings.Contains(w.Body.String(), `"summary"`) {
-		t.Fatalf("摘要通路的响应应带 scope=auto 与 summary, got %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"async":true`) || !strings.Contains(w.Body.String(), `"scope":"auto"`) {
+		t.Fatalf("响应应带 scope=auto 与 async=true, got %s", w.Body.String())
 	}
-	all, _ := a.Store.RawMessagesAll("autollm")
+	// 后台 goroutine 落摘要行（mock 摘要即时返回，短暂轮询即到）
 	auto, manual := 0, 0
-	for _, m := range all {
-		if m.Kind != kindSummary {
-			continue
+	for i := 0; i < 100; i++ {
+		auto, manual = 0, 0
+		all, _ := a.Store.RawMessagesAll("autollm")
+		for _, m := range all {
+			if m.Kind != kindSummary {
+				continue
+			}
+			if m.Origin == "auto" {
+				auto++
+			}
+			if m.Origin == "manual" {
+				manual++
+			}
 		}
-		if m.Origin == "auto" {
-			auto++
+		if auto > 0 {
+			break
 		}
-		if m.Origin == "manual" {
-			manual++
-		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if auto != 1 || manual != 0 {
 		t.Fatalf("应落 1 条 origin=auto 的摘要行（自动线路）, got auto=%d manual=%d", auto, manual)

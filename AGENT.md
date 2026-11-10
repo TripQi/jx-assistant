@@ -1208,8 +1208,13 @@ report_ready / done / stopped），前端常驻订阅：父对话里的子任务
   模型最终输出，仅在压缩范围内已没有新轮可折时才升级（手动重复点同一位置
   即二级；一级压得动绝不跳二级）。
 - **模型摘要压缩**：估算 token 达模型阈值（CompactLlmPct）自动触发；也可在
-  任意助手消息上点「压缩」手动触发（按设置的默认行为选路）。手动摘要独立
-  叠加、永不重压；自动摘要按 DSH 式合并为单一检查点，摘要区间与规则压缩同一
+  任意助手消息上点「压缩」手动触发（按设置的默认行为选路）。**手动/提前自动
+  压缩的模型摘要在后台 goroutine 执行**（HTTP 立即 202 返回，完成与失败经
+  session_updated 广播 reason=compact / compact_failed；会话级互斥拦重复点火，
+  compactRunning）——绝不把一两分钟的摘要调用挂在请求上。手动摘要独立
+  叠加、永不重压（重复点同一位置被 summarizePlan 预检同步拦下；摘要/审计等
+  元数据行会把轮尾撑大一号，区间内只剩元数据行同样按「已压过」报错，不落
+  空摘要）；自动摘要按 DSH 式合并为单一检查点，摘要区间与规则压缩同一
   保留窗口口径。
 - **压缩后环境快照完整重发**（`resendEnvAfterCompact`）：环境快照对模型是
   差分机制（首条整份、后续只发变化行），而折叠/摘要会把差分所依附的完整
@@ -1993,7 +1998,8 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `POST /api/sessions/{id}/retry` | 失败后重试：不重复落库用户消息，带着当前上下文再跑一轮（SSE 流式返回，同 /chat） |
 | `POST /api/sessions/{id}/interject` | 执行中发消息：`{content, mode}`，`steer`=插话（模型调用中立即打断当前流、下一步带着插话重调；工具执行中等下一步调用模型前注入）、`queue`=排队（本轮结束后作为独立一轮发送）；未在执行时按排队处理并顺手拉起执行 |
 | `POST /api/sessions/{id}/pending` | 排队坞操作：`{id, action:'remove'\|'steer'}`（移出队列 / 提前为插话）、`{id, action:'move', before:锚点id\|空=队尾}`（拖拽排序，只动排队队列顺序）、`{action:'pause'\|'resume'}`（队列级暂停/继续，不需要 id；恢复时空闲且有排队消息顺手拉起执行）；前端「编辑排队/插话消息」＝ `remove` 后把原文回填输入框草稿，复用 remove，无新 action |
-| `POST /api/sessions/{id}/compact` | 手动压缩为一条摘要 |
+| `POST /api/sessions/{id}/compact` | 手动压缩：rule 模式同步折叠即回；llm 模式同步预检后转后台摘要（202 `{async:true}`，完成/失败经 session_updated 广播，重复点火 409） |
+| `POST /api/sessions/{id}/autocompact` | 提前自动压缩：通道选路同阈值触发（rule 同步折叠 / llm 后台摘要，同上） |
 | `GET /api/assistant/versions` | 长期助理主对话的版本清单（`{current, versions:[{sessionId,version,messages,updatedAt,running,current}]}`；当前版本指针存库，前端入口与设置页都按它走，见 assistant_versions.go） |
 | `POST /api/assistant/versions/new` | 新建一版数字助理主对话（从零开始聊，沿用当前版本的工作目录/权限/模型等设置；老版本历史、快照、交付原样保留） |
 | `POST /api/assistant/versions/switch` | 切换当前版本（`{sessionId}`）：只动指针，两边数据都不碰；切完主对话区显示那一版的历史 |

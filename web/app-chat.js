@@ -1390,6 +1390,21 @@ function userBubble(m, view) {
   return wrap;
 }
 
+// 后台模型摘要压缩进行中的会话（与后端 compactRunning 同源，经 SSE 维护）：
+// 渲染消息操作条时据此还原「后台压缩中…」按钮态——切走对话再切回来，
+// DOM 重建后状态不丢；压缩完成/失败事件到达时移除并刷新
+const compactingSess = new Set();
+
+// 压缩完成后按会话所在视图刷新（主视图或右栏子面板），不切换视图
+function refreshAfterCompact(sid) {
+  if (mainView.state.cur && mainView.state.cur.id === sid) {
+    openSession(sid);
+  } else if (typeof subState !== 'undefined' && subState.cur && subState.cur.id === sid) {
+    refreshDrawer();
+    openSubSession(sid);
+  }
+}
+
 // 悬停操作（仅回合最终输出）：复制原文 / 手动压缩 / 分支 / 插件扩展位
 function msgActions(m, opts) {
   opts = opts || {};
@@ -1409,26 +1424,30 @@ function msgActions(m, opts) {
   const cb = document.createElement('button');
   cb.className = 'act-copy act-compact';
   const cbOrig = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v5"/><path d="m9.5 5.5 2.5 2.5 2.5-2.5"/><path d="M12 21v-5"/><path d="m9.5 18.5 2.5-2.5 2.5 2.5"/><path d="M4 12h16"/></svg>压缩';
+  const cbBusy = () => compactingSess.has(m.sessionId || (state.cur && state.cur.id));
   cb.innerHTML = cbOrig;
   cb.title = '折叠这一轮及更早的对话（这一轮本身也在内）：保留用户输入与正文、工具调用名与参数，去掉思考过程与工具结果。这一段都已折叠过时再点一次，才进一步只留用户输入与结论。原文可随时用历史查询工具搜回';
+  // 后台压缩进行中（本窗口点的或别处点的）：渲染恢复时还原按钮态
+  if (cbBusy()) { cb.textContent = '后台压缩中…'; cb.disabled = true; }
   cb.onclick = async () => {
-    if (!state.cur || state.streaming) return;
+    if (!state.cur || state.streaming) { toast('对话正在执行，等这一轮结束再压缩'); return; }
     const sid = m.sessionId || state.cur.id;
-    cb.textContent = '压缩中…';
+    cb.textContent = '后台压缩中…';
     cb.disabled = true;
     try {
-      await api('/api/sessions/' + sid + '/compact', { method: 'POST', body: JSON.stringify({ upTo: m.seq }) });
-      cb.textContent = '已压缩';
-      // 会话可能不在主视图（子面板消息的按钮）：各自刷新，不切换视图
-      if (mainView.state.cur && mainView.state.cur.id === sid) {
-        openSession(sid);
-      } else if (typeof subState !== 'undefined' && subState.cur && subState.cur.id === sid) {
-        refreshDrawer();
-        openSubSession(sid);
+      const r = await api('/api/sessions/' + sid + '/compact', { method: 'POST', body: JSON.stringify({ upTo: m.seq }) });
+      if (r && r.async) {
+        // 模型摘要已放后台（202 即回，大历史摘要要一两分钟）：不等它——登记
+        // 状态后即可切走干别的，完成/失败由 SSE session_updated 驱动刷新
+        compactingSess.add(sid);
+      } else {
+        // 规则折叠零模型调用、同步已完成：立即刷新
+        cb.textContent = '已压缩';
+        refreshAfterCompact(sid);
+        setTimeout(() => { cb.innerHTML = cbOrig; cb.disabled = false; }, 1500);
       }
-      setTimeout(() => { cb.innerHTML = cbOrig; cb.disabled = false; }, 1500);
     } catch (e) {
-      alert('压缩失败：' + e.message);
+      toast('压缩失败：' + e.message, 6000);
       cb.innerHTML = cbOrig;
       cb.disabled = false;
     }
@@ -3443,15 +3462,28 @@ function handleGlobalEvent(ev) {
         loadSessions().then(() => applySessionPermFromList(ev.sessionId));
       }
       refreshDrawer();
+      // 后台模型摘要压缩的状态机（手动/提前自动压缩 202 即回、goroutine 悄悄跑）：
+      // started 登记并翻新出「后台压缩中…」按钮态；完成（reason=compact）或失败
+      // 移除登记——多窗口/切走对话再切回都靠这张表还原状态
+      const creason = ev.data && ev.data.reason;
+      if (creason === 'compact_started') {
+        compactingSess.add(ev.sessionId);
+      } else if (creason === 'compact' || creason === 'compact_failed') {
+        compactingSess.delete(ev.sessionId);
+      }
+      if (creason === 'compact_failed') {
+        toast('后台压缩失败：' + ((ev.data && ev.data.error) || '未知原因'), 8000);
+      }
       // 压缩改写了历史（reason=compact：compact 标记 UPDATE、摘要行落库，均不
       // 改变消息条数与末条 seq）——前缀缓存主动作废，否则前缀复用判定永远命中，
       // 边界处的「已折叠」行与压缩卡片在流式期间与就地翻新中出不来（要等切换
       // 会话/刷新页面才全量重建）。作废后：非流式由下方 refreshCurrentSoon 立即
       // 重建；流式中等下一条 message 事件或 done 后的翻新落地
-      if (ev.data && ev.data.reason === 'compact') {
+      if (creason === 'compact') {
         if (viewing) mainView.state._pfxSid = null;
         if (subViewing) subView.state._pfxSid = null;
       }
+      if ((creason === 'compact_started' || creason === 'compact_failed') && subViewing && !subState.streaming) refreshCurrentSub();
       if (viewing && !state.streaming) refreshCurrentSoon();
       break;
     case 'title':
@@ -6537,9 +6569,11 @@ function lastRoundSeq(view) {
 // 明细卡顶部的「提前自动压缩」：对**当前视图这个会话**手动点火一次自动压缩
 // 线路（用户 2026-11-09 要求；此前它与「最后一轮正文输出下方那个压缩按钮」同款
 // 走手动全量线路，现已分开——输出下方那个仍是手动全量，这里走自动线路）：
-// · 接口 POST /api/sessions/{id}/autocompact（后端 autoCompactNow：与阈值触发的
+// · 接口 POST /api/sessions/{id}/autocompact（后端 autoCompactKick：与阈值触发的
 //   自动压缩同一套动作——按设置的保留字数从最新一轮往前数、装得下的整轮保留，
-//   更早的压缩；规则折叠还是模型摘要按当前设置的模式选路，前端不另造规则）；
+//   更早的压缩；规则折叠还是模型摘要按当前设置的模式选路，前端不另造规则。
+//   规则折叠同步完成；模型摘要 202 转后台执行，完成/失败经 session_updated 事件
+//   驱动刷新，这里不等待）；
 // · 先居中确认（用户明确在意误操作：位置放顶部 + 点一次确认，两道都上）；
 // · 执行中不压：正在跑的一轮还在往历史里写，后端也会 409，前端先拦并说人话；
 // · 完成后重拉 /api/sessions/{id}/context（refreshCtxChip）刷新这张卡，再轻提示
@@ -6568,6 +6602,13 @@ async function compactFromCtxPanel(view) {
   const restore = () => { ctxCompactBusy[view.key] = false; renderCtxTip(view); };
   try {
     const r = await api('/api/sessions/' + cur.id + '/autocompact', { method: 'POST' });
+    if (r && r.async) {
+      // 模型摘要已转后台（202 即回，大历史摘要要一两分钟）：不在这里等结果，
+      // 登记状态后即可去干别的，完成/失败由 SSE 驱动对话区翻新
+      compactingSess.add(cur.id);
+      toast('已转入后台压缩，完成后对话区自动刷新', 5000);
+      return; // finally 恢复按钮
+    }
     await refreshCtxChip(view); // 重拉 /context：卡片里的数字与分类条按压缩后的状态重画
     const after = (lastCtx[view.key] && lastCtx[view.key].total) || 0;
     toast(compactResultMsg(r, before, after), 6000);

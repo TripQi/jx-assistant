@@ -30,21 +30,21 @@ const argKeepLimit = 500
 // 每处裁剪都标注「（中间已裁 N 字 · 全文取 seq N）」——模型既能判断
 // 要不要回查，也知道回查入口。
 const (
-	argKeepLong  = 2000 // edit/write 参数原样保留上限（rune），超过才头尾保留
-	argKeepHead  = 1600 // 超限时的头部保留量
-	argKeepTail  = 400  // 超限时的尾部保留量
-	cmdKeepLimit = 500  // run_command 命令文本原样保留上限
-	cmdKeepHead  = 200  // 命令超限时的头部保留量
-	cmdKeepTail  = 100  // 命令超限时的尾部保留量
-	outHeadLines = 2    // 命令/脚本输出的头部保留行数
-	outTailLines = 6    // 尾部保留行数（成功）
-	outTailFail  = 10   // 尾部保留行数（失败——错误堆栈在尾部）
-	digestLimit  = 60   // 动作行「目标」字段的截断上限
-	intentLimit  = 40   // 动作行「意图」字段的截断上限
-	resLineLimit = 80   // 一行结论类结果的截断上限
-	lineKeepLimit = 300 // 输出单行的原样保留上限（无换行巨块/压缩 JSON 行）
-	lineKeepHead  = 150 // 行内超长时的首部保留量
-	lineKeepTail  = 50  // 行内超长时的尾部保留量
+	argKeepLong   = 2000 // edit/write 参数原样保留上限（rune），超过才头尾保留
+	argKeepHead   = 1600 // 超限时的头部保留量
+	argKeepTail   = 400  // 超限时的尾部保留量
+	cmdKeepLimit  = 500  // run_command 命令文本原样保留上限
+	cmdKeepHead   = 200  // 命令超限时的头部保留量
+	cmdKeepTail   = 100  // 命令超限时的尾部保留量
+	outHeadLines  = 2    // 命令/脚本输出的头部保留行数
+	outTailLines  = 6    // 尾部保留行数（成功）
+	outTailFail   = 10   // 尾部保留行数（失败——错误堆栈在尾部）
+	digestLimit   = 60   // 动作行「目标」字段的截断上限
+	intentLimit   = 40   // 动作行「意图」字段的截断上限
+	resLineLimit  = 80   // 一行结论类结果的截断上限
+	lineKeepLimit = 300  // 输出单行的原样保留上限（无换行巨块/压缩 JSON 行）
+	lineKeepHead  = 150  // 行内超长时的首部保留量
+	lineKeepTail  = 50   // 行内超长时的尾部保留量
 )
 
 // foldBoundaryNote 是折叠边界的提示标签：组装时注入在「已折叠区 → 原文区」
@@ -158,8 +158,8 @@ func (a *App) buildContext(sess *SessionMeta, sys string) []Message {
 	for _, s := range summaries {
 		out = append(out, TextMessage("user", s.Text()))
 	}
-	prevEnv := ""    // 上一条可见快照；空 = 下一条整份呈现（首轮，或摘要折叠后的首条）
-	envUpdates := 0  // 自上一条整份/全量快照以来的连续差分数（自愈全量的计数）
+	prevEnv := ""     // 上一条可见快照；空 = 下一条整份呈现（首轮，或摘要折叠后的首条）
+	envUpdates := 0   // 自上一条整份/全量快照以来的连续差分数（自愈全量的计数）
 	foldSeen := false // 已见过折叠行：遇到首条未折叠可见行时在交界注入提示标签
 	for _, m := range raw {
 		if m.Seq <= boundary || m.Kind == "summary" || m.Kind == "prompt" || m.Kind == "inherit" || m.Kind == "request" || m.Kind == "audit" {
@@ -250,6 +250,7 @@ func (a *App) timeAfter(m *StoredMessage) []Message {
 //   - 无响应的 tool_call 从 assistant 上剔除；清空后若有正文保留为普通消息，
 //     纯调用且无正文则整条剔除；
 //   - 孤儿 tool 响应（无对应调用或缺少 id）整条丢弃。
+//
 // 不改落库数据，未配对的原文仍可经历史查询工具读到。
 func repairToolPairing(msgs []Message) []Message {
 	replies := map[string]Message{} // 调用 id → 响应（有响应才进表）
@@ -615,8 +616,8 @@ func (a *App) contextStats(sess *SessionMeta) ctxStats {
 		for _, s := range summaries {
 			add("摘要", TextMessage("user", s.Text()))
 		}
-		prevEnv := ""   // 与 buildContext 同一套环境快照渲染口径（首条整份、后续差分）
-		envUpdates := 0 // 与 buildContext 同一差分计数口径（自愈全量）
+		prevEnv := ""     // 与 buildContext 同一套环境快照渲染口径（首条整份、后续差分）
+		envUpdates := 0   // 与 buildContext 同一差分计数口径（自愈全量）
 		foldSeen := false // 与 buildContext 同一折叠边界口径：交界处注入提示标签
 		for _, m := range raw {
 			if m.Seq <= boundary || m.Kind == "summary" || m.Kind == "prompt" || m.Kind == inheritKind || m.Kind == "request" || m.Kind == "audit" {
@@ -714,7 +715,7 @@ func (a *App) contextStats(sess *SessionMeta) ctxStats {
 
 // 规则压缩不随轮次自动跑（每轮改写历史前缀会持续打断 KV 缓存），只在两种
 // 时机执行：上下文估算达到阈值时（maybeAutoCompact）与手动压缩时
-//（handleCompact 的 upTo）。折叠语义分两级（见 compactRound）：一级保留用户
+// （handleCompact 的 upTo）。折叠语义分两级（见 compactRound）：一级保留用户
 // 输入与正文、调用名+参数（write/edit 写入类参数全文保留不截断，见
 // compactKeepArgs），丢弃思考/工具结果/环境快照，可反复叠加（每次只折
 // 新轮）；二级只留用户输入与模型最终输出，仅在压缩范围内已没有新轮可折时才
@@ -744,7 +745,7 @@ func visibleSize(m *StoredMessage) int {
 // 累计模型可见字数，预算耗尽处（命中点）所在的轮**整轮保留**——起点扩到该轮
 // 的起始行，压缩边界永远落在轮与轮之间，绝不从一轮中间切（用户口径：命中点
 // 所在的那一整轮不进行压缩）。轮首不必是用户亲发的消息：数字助理转发消息
-//（report/aiuser）同权开轮（见 splitRounds），主对话里大部分回合由转发消息
+// （report/aiuser）同权开轮（见 splitRounds），主对话里大部分回合由转发消息
 // 开启——早年轮次不认派发消息，几十个回合被算成一个超长轮，才有过「巨轮回退
 // 行级窗口」的例外；那个例外已砍掉（它会把一轮切成两半，压缩边界落在轮中间，
 // 实测普通任务轮也被判成巨轮）。正常任务轮不会超长；真遇到按预算压不动的
@@ -778,7 +779,7 @@ func (a *App) keepStartSeq(raw []*StoredMessage) int64 {
 
 // roundStartOf 返回 seq 所在轮（见 splitRounds）的起始 seq。整轮保留是硬口径：
 // 压缩边界只在轮与轮之间，与这一轮多大无关。找不到所属轮时返回该行自身
-//（防御：正常不会走到——每行都归属于某个轮）。
+// （防御：正常不会走到——每行都归属于某个轮）。
 func (a *App) roundStartOf(raw []*StoredMessage, seq int64) int64 {
 	for _, r := range splitRounds(raw) {
 		if seq >= r.startSeq && seq <= r.endSeq {
@@ -790,7 +791,7 @@ func (a *App) roundStartOf(raw []*StoredMessage, seq int64) int64 {
 
 // ruleCompactAuto 阈值触发/溢出兜底的自动入口：把保留窗口之外、尚未折叠的
 // 行折叠掉。keep<0 表示自动触发——按 KeepChars 字数预算保留最近的完整轮
-//（命中轮整轮保留、边界只在轮之间，见 keepStartSeq）；keep=0 表示全部
+// （命中轮整轮保留、边界只在轮之间，见 keepStartSeq）；keep=0 表示全部
 // 折叠（溢出兜底）；keep>0 表示只留最近 keep 轮（溢出兜底的两级：先只留 1 轮，
 // 再全部折叠）。返回折叠的行数（0 = 没有可折叠的）。
 func (a *App) ruleCompactAuto(sess *SessionMeta, keep int) int {
@@ -936,7 +937,7 @@ func (a *App) foldRounds(sess *SessionMeta, raw []*StoredMessage, rounds []round
 // 折的就是整轮整轮的历史，绝不从一轮中间切（命中轮整轮保留）。行级只是折叠
 // 的实施粒度（逐行 compactOne），不是边界口径。
 // 与 foldRounds 的差别只在粒度：行级更细，所以这里不做轮级那套「二级升级」
-//（也避免每次自动压缩改写旧折叠行、持续打断 KV 缓存）；反复触发仍压不动时由
+// （也避免每次自动压缩改写旧折叠行、持续打断 KV 缓存）；反复触发仍压不动时由
 // overflowCompact 的按轮全折兜底。
 // 返回新折叠的行数（0 = 没有可折叠的）。
 func (a *App) foldUpTo(sess *SessionMeta, raw []*StoredMessage, endSeq int64) int {
@@ -1141,7 +1142,7 @@ func outFail(s string) bool {
 
 // clipOutLines 输出三段式：先逐行做超长兜底（单行巨块如无换明输出/minified
 // JSON：行内 >300 字裁为首 150 + 标注 + 尾 50），再按行数三段裁切——头 2 行 +
-//（中间已裁 N 行 · 全文取 seq）+ 尾 6/10 行。
+// （中间已裁 N 行 · 全文取 seq）+ 尾 6/10 行。
 func clipOutLines(text string, fail bool, seq int64) string {
 	text = strings.TrimRight(text, "\r\n \t")
 	if text == "" {
@@ -1512,14 +1513,23 @@ const summarizeInstruction = `请把下面这段对话历史压缩成一份结�
 // 否则按保留窗口从尾部倒数——keepTail<0 表示自动触发，与规则压缩共用同一
 // 字数预算（keepStartSeq：命中轮整轮保留，边界只在轮之间，绝不切轮）；
 // keepTail=0 表示摘要覆盖全部历史（溢出兜底用到）；溢出兜底显式传 1（只留最近一轮）。
-func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo int64) (string, error) {
-	raw, err := a.Store.RawMessagesAll(sess.ID)
-	if err != nil {
-		return "", err
+// summarizePlan 从原始历史算出本次模型摘要的覆盖终点：upTo 定位按钮所在轮，
+// keepTail 决定保留窗口（见 doSummarize 各分支）。抽成独立函数供两处使用：
+// doSummarize 本体，与手动压缩入口在把模型调用放去后台**之前**的同步校验
+// （点错位置、该区间已压过，立即把错误报给前端，不等后台模型调用失败才发现）。
+// summarizable 判断一行是否进入摘要的待压缩视图（doSummarize 的渲染过滤与
+// summarizePlan 的区间有效性判定共用同一口径：元数据行不参与渲染，也不算进
+// 压缩区间的有效内容）。
+func summarizable(m *StoredMessage) bool {
+	switch m.Kind {
+	case "summary", "env", "prompt", inheritKind, "request", "audit":
+		return false
 	}
+	return true
+}
+
+func (a *App) summarizePlan(raw []*StoredMessage, keepTail int, upTo int64) (segEnd, boundary int64, prevAuto *StoredMessage, err error) {
 	summaries := activeSummaries(raw)
-	boundary := int64(0)
-	var prevAuto *StoredMessage
 	for _, s := range summaries {
 		if s.CoversUpTo > boundary {
 			boundary = s.CoversUpTo
@@ -1529,7 +1539,6 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 		}
 	}
 	rounds := splitRounds(raw)
-	var segEnd int64
 	switch {
 	case upTo > 0:
 		for _, r := range rounds {
@@ -1547,7 +1556,7 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 			}
 		}
 		if segEnd == 0 {
-			return "", fmt.Errorf("第 %d 条之前没有可压缩的回合", upTo)
+			return 0, 0, nil, fmt.Errorf("第 %d 条之前没有可压缩的回合", upTo)
 		}
 	case keepTail < 0:
 		// 自动触发：与规则压缩同一口径——按 KeepChars 预算保留最近的完整轮
@@ -1564,7 +1573,32 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 		segEnd = rounds[len(rounds)-keepTail].startSeq - 1
 	}
 	if segEnd <= boundary {
-		return "", fmt.Errorf("没有可压缩的区间（该范围之前的内容已压缩过）")
+		return 0, 0, nil, fmt.Errorf("没有可压缩的区间（该范围之前的内容已压缩过）")
+	}
+	// 轮的 endSeq 会把摘要/审计等元数据行并进轮尾（splitRounds 只按用户行
+	// 分轮）：真实对话内容已全部压过、区间里只剩元数据行时（典型：摘要行
+	// 落库后重复点同一位置，末轮 endSeq 被它自己撑大了一号），按「已压过」
+	// 报错——否则会再发起一次模型调用、落一条空的重复摘要。
+	content := 0
+	for _, m := range raw {
+		if m.Seq > boundary && m.Seq <= segEnd && summarizable(m) {
+			content++
+		}
+	}
+	if content == 0 {
+		return 0, 0, nil, fmt.Errorf("没有可压缩的区间（该范围之前的内容已压缩过）")
+	}
+	return segEnd, boundary, prevAuto, nil
+}
+
+func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo int64) (string, error) {
+	raw, err := a.Store.RawMessagesAll(sess.ID)
+	if err != nil {
+		return "", err
+	}
+	segEnd, boundary, prevAuto, err := a.summarizePlan(raw, keepTail, upTo)
+	if err != nil {
+		return "", err
 	}
 	var b strings.Builder
 	if origin == "auto" && prevAuto != nil {
@@ -1572,7 +1606,7 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	}
 	b.WriteString("【待压缩的对话历史】\n")
 	for _, m := range raw {
-		if m.Seq <= boundary || m.Seq > segEnd || m.Kind == "summary" || m.Kind == "env" || m.Kind == "prompt" || m.Kind == inheritKind || m.Kind == "request" || m.Kind == "audit" {
+		if m.Seq <= boundary || m.Seq > segEnd || !summarizable(m) {
 			continue
 		}
 		role := map[string]string{"user": "用户", "assistant": "助手", "tool": "工具结果"}[m.Role]
@@ -1628,7 +1662,7 @@ const summarizeInstructionAssistant = `请把「数字助理主对话」的这�
 // summarizeInstructionFor 按会话模式选摘要指令——只是选「发给模型的提示词
 // 文字」，不改变压缩方式/路径/保留窗口（设置里的压缩模式照旧）：数字助理主
 // 对话用上面的专属指令，其余会话用通用指令 summarizeInstruction。自动摘要
-//（llm 模式）与手动压缩（消息级「压缩」按钮、设置页「压缩数字助理主对话」）
+// （llm 模式）与手动压缩（消息级「压缩」按钮、设置页「压缩数字助理主对话」）
 // 的摘要调用都从这里取指令。
 func summarizeInstructionFor(sess *SessionMeta) string {
 	if sess != nil && sess.Mode == "assistant" {
@@ -1646,7 +1680,7 @@ func summarizeInstructionFor(sess *SessionMeta) string {
 //     usage 真值差值，见 noteCompactUsage）。折出东西就交回调用方重查——
 //     压缩后增量归零，间隔天然节流，不需要冷却参数。
 //   - 估算 token ≥ 模型阈值（CompactLlmPct>0）→ 生成模型摘要兜底。规则关闭
-//    （0）、规则压不动（折无可折）、间隔未到，都自然落到这条通道——它是
+//     （0）、规则压不动（折无可折）、间隔未到，都自然落到这条通道——它是
 //     最后防线。
 //
 // 间隔与保留共用同一计量单位（CompactUnit：chars 默认 / tokens 真值），不
@@ -1672,32 +1706,6 @@ func (a *App) maybeAutoCompact(sess *SessionMeta, msgs []Message, ctxWindow int,
 	return false, nil
 }
 
-// autoCompactNow 是自动压缩线路（maybeAutoCompact）的「提前/手动」入口：通道
-// 选择、先后顺序、调用参数与自动触发一字不差——先规则通道（CompactInterval>0
-// 即按保留预算 ruleCompactAuto 折叠），再模型摘要通道（CompactLlmPct>0 即
-// doSummarize(auto) 按保留窗口出摘要）——只是不做「到没到阈值」的判定（间隔
-// 与窗口占比都不看），右键上下文菜单「提前自动压缩」在阈值到点前手动点火用的
-// 就是它。返回 (折叠回合数, 摘要文本)；规则通道折到内容即止（与自动线路同样
-// 提前返回，不再试摘要），两通道都没启用时报错，通道启用但预算内没东西可压的
-// 报错由下层透传（没有可折叠的回合 / 没有可压缩的区间）。
-func (a *App) autoCompactNow(sess *SessionMeta) (int, string, error) {
-	if a.Cfg.CompactInterval > 0 {
-		if folded := a.ruleCompactAuto(sess, -1); folded > 0 {
-			return folded, "", nil
-		}
-		if a.Cfg.CompactLlmPct <= 0 {
-			return 0, "", fmt.Errorf("没有可折叠的回合（保留最近约 %d 字）", a.Cfg.KeepChars)
-		}
-	}
-	if a.Cfg.CompactLlmPct > 0 {
-		summary, err := a.doSummarize(sess, "auto", -1, 0)
-		if err != nil {
-			return 0, "", err
-		}
-		return 0, summary, nil
-	}
-	return 0, "", fmt.Errorf("自动压缩未启用：在 设置 · 对话历史与压缩 里把「规则压缩间隔」或「模型摘要阈值」设为大于 0")
-}
 // windowPctTokens 算「窗口 × 百分比阈值」的 token 数。
 func windowPctTokens(ctxWindow, pct int) int {
 	return int(float64(ctxWindow) * float64(pct) / 100)

@@ -39,7 +39,7 @@ type App struct {
 	Plugins          *PluginRegistry      // DSH 插件兼容层实现（adapters.go：插件兼容层/ + adapter_*.go）
 	Layers           *PluginLayerRegistry // 插件兼容层注册表：主体发现的全部插件体系（pluginlayers.go）
 	Components       *ComponentRegistry
-	SessionCX        *sessionCXRegistry   // 会话级组件/插件开关覆盖（sessioncx.go：优先于全局开关，按会话存）
+	SessionCX        *sessionCXRegistry  // 会话级组件/插件开关覆盖（sessioncx.go：优先于全局开关，按会话存）
 	CCPlugins        *CCPluginRegistry   // Claude Code 插件兼容层实现（ccplugin*.go）
 	MCPServers       *MCPServersRegistry // 独立 MCP 服务器注册表（mcpservers*.go）：用户直连 MCP 服务
 	Todos            *todoScheduler      // 待办与定时任务：组件 组件/todo-scheduler 的宿主半边（todo.go）
@@ -55,6 +55,8 @@ type App struct {
 	sessLocks           map[string]*sync.Mutex
 	compactMu           sync.Mutex                   // 规则自动压缩的 token 用量基线锁（context.go）
 	compactUsage        map[string]*compactUsageMark // 会话id → 最近 usage 与压缩基线（间隔制 token 模式的触发依据，context.go）
+	compactRunMu        sync.Mutex                   // 手动模型摘要压缩的会话级互斥锁（server.go）
+	compactRunning      map[string]bool              // 会话id → 后台模型摘要进行中（拦截重复点火；前端「后台压缩中」状态同源）
 	runMu               sync.Mutex
 	runners             map[string]*sessionRun // 正在执行的会话（含后台派发）
 	permMu              sync.Mutex
@@ -69,7 +71,7 @@ type App struct {
 	bridgeMu            sync.Mutex
 	bridgeTokens        map[string]*bridgeToken // run_python 工具桥的一次性凭证（bridge.go）
 	bridgeWaits         map[string]*bridgeWait  // 桥派子任务的回报收集表（bridge.go）
-	protectPaths        []string           // 助手自身配置/数据目录，任何模式禁访问
+	protectPaths        []string                // 助手自身配置/数据目录，任何模式禁访问
 	skillsMu            sync.Mutex
 	skillsReady         bool   // 技能母本是否已释放（SkillsDir 首次解析后置位）
 	skillsDirOurs       string // 已解析的技能目录（App 级缓存，避免跨实例污染）
@@ -316,9 +318,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.apiRoute(mux, "POST /api/sessions/{id}/retry", a.handleRetry, apiMeta{Summary: "失败后带着上下文重试一轮", Perm: permWorkspace})
 	a.apiRoute(mux, "POST /api/sessions/{id}/interject", a.handleInterject, apiMeta{Summary: "执行中发消息（插话/排队）", Params: "content、mode=steer|queue", Perm: permWorkspace})
 	a.apiRoute(mux, "POST /api/sessions/{id}/pending", a.handlePending, apiMeta{Summary: "排队坞操作", Params: "action=remove|steer|move|pause|resume", Perm: permWorkspace})
-	a.apiRoute(mux, "POST /api/sessions/{id}/compact", a.handleCompact, apiMeta{Summary: "手动压缩会话历史为摘要", Params: "upTo=压缩到哪条", Perm: permWorkspace})
+	a.apiRoute(mux, "POST /api/sessions/{id}/compact", a.handleCompact, apiMeta{Summary: "手动压缩会话历史为摘要（模型摘要后台执行，立即返回）", Params: "upTo=压缩到哪条", Perm: permWorkspace})
 	// 右键上下文菜单「提前自动压缩」：对当前会话手动点火一次自动压缩线路
-	//（autoCompactNow），与上面的手动全量压缩是并存的两条线路。
+	//（autoCompactKick），与上面的手动全量压缩是并存的两条线路。
 	a.apiRoute(mux, "POST /api/sessions/{id}/autocompact", a.handleAutoCompact, apiMeta{Summary: "提前自动压缩：不等阈值到点，按设置的保留字数手动点火一次自动压缩线路", Perm: permWorkspace})
 	// 设置 · 对话历史与压缩：数字助理主对话按「版本」管理（见 assistant_versions.go）。
 	// 当前是哪一版由库里的指针决定，前端只照版本清单显示与切换；压缩固定走
@@ -2494,17 +2496,67 @@ func (a *App) handleCompact(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": 1, "folded": folded})
 		return
 	}
-	summary, err := a.doSummarize(m, "manual", -1, body.UpTo)
+	// 模型摘要走后台：大历史的摘要要等模型流式输出一两分钟，挂在 HTTP 请求上
+	// 会把按钮吊在「压缩中…」（切走对话回来状态全丢，只能再点一次——又撞上
+	// 「该范围已压缩过」）。这里同步做完预检（点错位置/已压过立即报错）就返回
+	// 202，模型调用放 goroutine 悄悄跑，完成与失败都经 session_updated 广播，
+	// 前端不等待、切走对话不影响（CallSummarizer 本就用独立 context）。
+	if a.compactBusyOf(m.ID) {
+		writeErr(w, 409, "该会话正在后台压缩，完成或失败会自动通知")
+		return
+	}
+	raw, err := a.Store.RawMessagesAll(m.ID)
 	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if _, _, _, err := a.summarizePlan(raw, -1, body.UpTo); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
-	writeJSON(w, 200, map[string]any{"ok": 1, "summary": truncateRunes(summary, 300)})
+	a.setCompactBusy(m.ID, true)
+	a.summarizeAsync(m, "manual", -1, body.UpTo)
+	writeJSON(w, 202, map[string]any{"ok": 1, "async": true})
+}
+
+// compactBusyOf / setCompactBusy 手动模型摘要压缩的会话级进行中标记：摘要走
+// 后台 goroutine，这里挡住同一会话的重复点火——连点两次不会并发跑两个摘要
+// 调用（第二个请求直接 409「正在后台压缩」）。
+func (a *App) compactBusyOf(id string) bool {
+	a.compactRunMu.Lock()
+	defer a.compactRunMu.Unlock()
+	return a.compactRunning[id]
+}
+
+func (a *App) setCompactBusy(id string, on bool) {
+	a.compactRunMu.Lock()
+	defer a.compactRunMu.Unlock()
+	if a.compactRunning == nil {
+		a.compactRunning = map[string]bool{}
+	}
+	if on {
+		a.compactRunning[id] = true
+	} else {
+		delete(a.compactRunning, id)
+	}
+}
+
+// summarizeAsync 把一次模型摘要放到后台执行（手动压缩的「悄悄压缩」形态）：
+// 先广播 compact_started 让前端进入「后台压缩中」状态，goroutine 里完成摘要
+// 与落库（doSummarize 成功时自带 reason=compact 广播）；失败广播 compact_failed。
+// 调用方必须已置位 compactRunning（先 set 再调，防两个请求同时穿过忙检查）。
+func (a *App) summarizeAsync(sess *SessionMeta, origin string, keepTail int, upTo int64) {
+	a.broadcast(Event{Type: "session_updated", SessionID: sess.ID, Data: map[string]any{"reason": "compact_started"}})
+	go func() {
+		defer a.setCompactBusy(sess.ID, false)
+		if _, err := a.doSummarize(sess, origin, keepTail, upTo); err != nil {
+			a.broadcast(Event{Type: "session_updated", SessionID: sess.ID, Data: map[string]any{"reason": "compact_failed", "error": err.Error()}})
+		}
+	}()
 }
 
 // handleAutoCompact 右键上下文菜单「提前自动压缩」：对当前会话手动点火一次
-// **自动压缩线路**（autoCompactNow）——按设置的保留字数从最新一轮往前数、
+// **自动压缩线路**（autoCompactKick）——按设置的保留字数从最新一轮往前数、
 // 装得下的整轮保留，更早的压缩；规则折叠还是模型摘要按当前配置选路。与
 // 消息操作条上的「压缩」（handleCompact 手动全量：从指定轮往上全压）和设置页
 // 「压缩数字助理主对话」（固定模型摘要）是三个并存、各自明确的入口。
@@ -2524,17 +2576,50 @@ func (a *App) handleAutoCompact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	folded, summary, err := a.autoCompactNow(m)
+	folded, async, err := a.autoCompactKick(m)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
-	if summary != "" {
-		writeJSON(w, 200, map[string]any{"ok": 1, "scope": "auto", "summary": truncateRunes(summary, 300)})
+	if async { // 模型摘要放后台（同 handleCompact：立即返回，事件驱动刷新）
+		writeJSON(w, 202, map[string]any{"ok": 1, "scope": "auto", "async": true})
 		return
 	}
+	a.broadcast(Event{Type: "session_updated", SessionID: m.ID})
 	writeJSON(w, 200, map[string]any{"ok": 1, "scope": "auto", "folded": folded})
+}
+
+// autoCompactKick 提前点火一次自动压缩线路（通道选择、先后顺序、调用参数与
+// 阈值触发一字不差，只是不做「到没到阈值」的判定）：规则通道零模型调用、
+// 同步折完即返回；模型摘要通道返回 async=true 由调用方放后台（同一会话级
+// 互斥与事件通知，见 summarizeAsync）。规则通道折到内容即止（与自动线路
+// 同样提前返回，不再试摘要）；两通道都没启用时报错，通道启用但预算内没东西
+// 可压的报错由下层透传（没有可折叠的回合 / 没有可压缩的区间）。
+func (a *App) autoCompactKick(m *SessionMeta) (folded int, async bool, err error) {
+	if a.Cfg.CompactInterval > 0 {
+		if folded = a.ruleCompactAuto(m, -1); folded > 0 {
+			return folded, false, nil
+		}
+		if a.Cfg.CompactLlmPct <= 0 {
+			return 0, false, fmt.Errorf("没有可折叠的回合（保留最近约 %d 字）", a.Cfg.KeepChars)
+		}
+	}
+	if a.Cfg.CompactLlmPct <= 0 {
+		return 0, false, fmt.Errorf("自动压缩未启用：在 设置 · 对话历史与压缩 里把「规则压缩间隔」或「模型摘要阈值」设为大于 0")
+	}
+	if a.compactBusyOf(m.ID) {
+		return 0, false, fmt.Errorf("该会话正在后台压缩，完成或失败会自动通知")
+	}
+	raw, err := a.Store.RawMessagesAll(m.ID)
+	if err != nil {
+		return 0, false, err
+	}
+	if _, _, _, err := a.summarizePlan(raw, -1, 0); err != nil {
+		return 0, false, err
+	}
+	a.setCompactBusy(m.ID, true)
+	a.summarizeAsync(m, "auto", -1, 0)
+	return 0, true, nil
 }
 
 // 数字助理主对话现在有多个「版本」（设置 · 对话历史与压缩），当前是哪一版
@@ -2602,12 +2687,12 @@ func (a *App) handleAssistantClear(w http.ResponseWriter, r *http.Request) {
 // handleAssistantCompact 立即压缩数字助理主对话**当前这一版**（设置 · 对话历史
 // 与压缩 · 压缩按钮）。固定走上下文压缩里「AI 模型压缩」那条路（doSummarize）：无视
 // Cfg.CompactMode（规则/关闭都不看），保留窗口与区间划分原样沿用现有实现
-//（keepRoundsByBudget：从最近一轮往上数，保留「保留字数」预算内装得下的
+// （keepRoundsByBudget：从最近一轮往上数，保留「保留字数」预算内装得下的
 // 完整轮；最近一轮自身超预算时摘要覆盖全部历史，不硬保这一轮）。
 // 设计目的：数字助理主对话平时也会自动压缩，默认走规则引擎（规则折叠）；等
 // 规则引擎也压不动、上下文仍然过长时，用户才会来点这个按钮——所以这里到点
 // 一定是模型压缩。origin=manual 与对话里消息级「压缩」按钮的 llm 分支同款
-//（独立叠加、永不重压）；没东西可压时透传现有错误文案，不另造话术。
+// （独立叠加、永不重压）；没东西可压时透传现有错误文案，不另造话术。
 // 执行中拒绝（409）；PreCompact 插件 hook 与手动压缩同一口径（可被阻断）。
 // 压完在对话区补一条【已压缩】系统通知：摘要行只是上下文材料、不进普通
 // 消息流，用户在对话里见不到它（通知同时是模型可见的 user 消息，下一轮模型

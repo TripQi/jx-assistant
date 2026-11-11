@@ -2466,7 +2466,25 @@ body.bin-mode #wst-view, body.bin-mode #wst-add { display: none; } /* 回收站�
   width: min(880px, 94vw); height: min(680px, 88vh);
   max-width: none; padding: 0; overflow: hidden;
   display: flex; flex-direction: column;
+  position: relative; /* 等比缩放把手的定位基准（见下面的 .set-resize） */
 }
+/* 设置卡的等比缩放把手：右下角一个斜纹小握把，拖它宽高同比例变（JS 见
+   app-settings.js）。平时淡、悬停才亮，不挡底栏「取消/保存」——按钮右边缘
+   距卡片 20px，把手只占右下角 16px。窄屏整屏设置不看它（媒体查询里隐藏）。 */
+.set-resize {
+  position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
+  cursor: nwse-resize; touch-action: none; color: var(--text-3);
+  z-index: 3;
+}
+.set-resize::after {
+  content: ''; position: absolute; right: 3px; bottom: 3px; width: 9px; height: 9px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  border-bottom-right-radius: 3px; opacity: .6;
+}
+.set-resize:hover, .set-resize.dragging { color: var(--accent); }
+.set-resize:hover::after, .set-resize.dragging::after { opacity: 1; }
+/* 拖动中：全页禁选、光标保持斜向缩放——不然指针扫过文字会选出一片蓝 */
+body.set-resizing { user-select: none; cursor: nwse-resize; }
 /* 手机二级页的返回头：桌面永远隐藏（窄屏 + pane-open 才显示，见文末媒体查询） */
 .set-back { display: none; }
 .settings-body { display: flex; flex: 1; min-height: 0; }
@@ -3238,6 +3256,8 @@ body.bin-mode #wst-view, body.bin-mode #wst-add { display: none; } /* 回收站�
      那是上下黑边的来源）；层级走全局的 --z-page（230），压过左右栏与顶栏
      （--z-page 230 > --z-topbar 220 > --z-panel 210），弹窗层再压过它 */
   .settings-card { width: 100%; height: 100%; max-height: none; border-radius: 0; border: none; }
+  /* 手机/窄屏：设置是整屏，不做等比缩放（把手藏起来；JS 也会清掉内联尺寸） */
+  .set-resize { display: none; }
   .set-footer .tip { display: none; } /* 手机上底栏只留按钮，说明文字太长 */
   /* 返回头一级/二级都在：一级标题「设置」（返回＝退出设置），二级标题＝分区名 */
   .set-back {

@@ -286,6 +286,7 @@ async function openSettings(pane) {
     $('about-version').textContent = '版本 ' + (st.version || '-');
     } catch (e) { /* 状态取不到时保留页面默认版本文本 */ }
   loadAboutShell();
+  setResizeOnOpen(); // 上次调过的设置窗口大小（等比），没调过就是 CSS 默认
 }
 
 /* ---------- 关于页：远程外壳版本 + 一键清远程端缓存 ----------
@@ -1879,6 +1880,159 @@ function setHistPush() {
 }
 
 function settingsCard() { return document.querySelector('.settings-card'); }
+
+/* ---------- 设置窗口等比缩放（桌面端） ----------
+   WebView2 里设置弹窗原先是固定尺寸，用户要拖大看长表格。这里只允许**等比**：
+   宽高按同一比例变（卡片栅格、左导航、底栏都按这个比例重新分配，不会被拉扁）。
+   几条落到实现上的决定：
+   - 基准＝CSS 的默认尺寸（min(880px,94vw) × min(680px,88vh)），它的宽高比就是
+     用户眼里的「正常比例」；缩放只在基准上下 0.7×～1.6× 之间，且任何时刻不
+     超出可视区域（窄屏/小窗自动退回 CSS 的整屏/自适应表现）；
+   - 记住的是「宽度」（jx.setW），高度按基准比例算——存比例会在换了大屏后
+     突然变得巨大，存宽度更符合「上次调过的窗口大小」；
+   - 拖动用 pointer 事件 + setPointerCapture：WebView2 里鼠标拖出元素后
+     mousemove 会丢事件，pointer capture 才跟得住；
+   - 拖动开始时把卡片从「flex 居中」切成左上角锚定（absolute），这样指针与
+     卡片右下角 1:1 跟随，不会出现「拖一倍跑两倍」的别扭手感；
+   - 双击把手复位：清掉记忆、回到默认尺寸与居中布局。 */
+const SET_RESIZE_KEY = 'jx.setW';
+const SET_RESIZE_MIN_SCALE = 0.7;
+const SET_RESIZE_MAX_SCALE = 1.6;
+const setResize = { drag: null, timer: 0, anchored: false };
+
+function setResizeBase() {
+  // 与 style.css 的 .settings-card 默认尺寸一致
+  return { w: Math.min(880, window.innerWidth * 0.94), h: Math.min(680, window.innerHeight * 0.88) };
+}
+
+// setResizeLimits 上下限：基准的 0.7×～1.6×，再收到可视区域内（左右各留 2%，
+// 上下按 .modal-card 的 max-height:88vh 收）。窗口太小/太矮时 minW 会被 maxW
+// 顶回来，不会出现负区间。
+function setResizeLimits() {
+  const base = setResizeBase();
+  const ratio = base.w / base.h; // 基准的宽高比：全程序唯一的缩放比例来源
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // 高度上限必须对齐 CSS 的 max-height:88vh——超过它，卡片高度会被样式表截掉，
+  // 底栏「取消/保存」就藏到卡片外面去了
+  const maxW = Math.max(320, Math.min(base.w * SET_RESIZE_MAX_SCALE, vw * 0.96, vh * 0.88 * ratio));
+  const minW = Math.min(Math.max(520, base.w * SET_RESIZE_MIN_SCALE), maxW);
+  return { minW, maxW, ratio };
+}
+
+// setResizeClear 回到 CSS 默认（居中、尺寸交给样式表）
+function setResizeClear() {
+  const card = settingsCard();
+  if (!card) return;
+  card.style.width = '';
+  card.style.height = '';
+  card.style.position = '';
+  card.style.left = '';
+  card.style.top = '';
+  card.style.margin = '';
+  setResize.anchored = false;
+}
+
+// setResizeApply 落地一个宽度：anchor=null 保持居中；给 anchor 时左上角钉在
+// {left,top}（拖动中），右下角跟指针 1:1——只有当卡片要被推出可视区域时，才把
+// 左上角往上/往左让一点，绝不让卡片（尤其底栏）跑到屏幕外。
+function setResizeApply(w, anchor) {
+  const card = settingsCard();
+  if (!card || isNarrow()) { setResizeClear(); return null; }
+  const lim = setResizeLimits();
+  const width = Math.round(Math.min(Math.max(w, lim.minW), lim.maxW));
+  const height = Math.round(width / lim.ratio);
+  card.style.width = width + 'px';
+  card.style.height = height + 'px';
+  if (anchor) {
+    // 左上角锚定：右下角跟指针走；只在卡片要被推出可视区域时，把左上角往上/
+    // 往左让一点（高度上限已含在 maxW 里，这里只保证整张卡在视口内——不强制
+    // 贴到 88vh 那条带上，否则按下把手的一瞬间卡片会往上跳一截）
+    const left = Math.min(Math.max(8, anchor.left), Math.max(8, window.innerWidth - width - 8));
+    const top = Math.min(Math.max(8, anchor.top), Math.max(8, window.innerHeight - height - 8));
+    card.style.position = 'absolute';
+    card.style.margin = '0';
+    card.style.left = Math.round(left) + 'px';
+    card.style.top = Math.round(top) + 'px';
+    setResize.anchored = true;
+  } else if (setResize.anchored) {
+    setResizeClear();
+    card.style.width = width + 'px';
+    card.style.height = height + 'px';
+  }
+  return { width, height };
+}
+
+// setResizeOnOpen 打开设置时套用记忆尺寸（没调过就交给 CSS 默认）
+function setResizeOnOpen() {
+  const card = settingsCard();
+  if (!card) return;
+  if (isNarrow()) { setResizeClear(); return; }
+  const w = Number(lsGet(SET_RESIZE_KEY, 0)) || 0;
+  if (!(w > 0)) { setResizeClear(); return; }
+  setResizeApply(w, null);
+}
+
+// setResizeReset 双击把手＝恢复默认尺寸（连记忆一起清掉）
+function setResizeReset() {
+  lsSet(SET_RESIZE_KEY, '');
+  setResizeClear();
+}
+
+function initSettingsResize() {
+  const handle = $('set-resize');
+  if (!handle) return;
+  handle.addEventListener('pointerdown', (e) => {
+    if (isNarrow() || e.button !== 0) return;
+    const card = settingsCard();
+    if (!card) return;
+    e.preventDefault();
+    const r = card.getBoundingClientRect();
+    // 居中 → 左上角锚定：视觉位置不变，之后右下角跟着指针走
+    setResize.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, w: r.width, h: r.height, left: r.left, top: r.top };
+    setResizeApply(r.width, { left: r.left, top: r.top });
+    try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 老内核不支持就用普通事件 */ }
+    handle.classList.add('dragging');
+    document.body.classList.add('set-resizing');
+  });
+  handle.addEventListener('pointermove', (e) => {
+    const d = setResize.drag;
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    const { ratio } = setResizeLimits();
+    // 横拖看 dx、竖拖看 dy（换算成宽度），谁占主导听谁的——两个方向都能拖得动
+    const byX = d.w + dx;
+    const byY = (d.h + dy) * ratio;
+    setResizeApply(Math.abs(dx) >= Math.abs(dy * ratio) ? byX : byY, { left: d.left, top: d.top });
+    e.preventDefault();
+  });
+  const finish = (e) => {
+    const d = setResize.drag;
+    if (!d || (e && e.pointerId !== d.id)) return;
+    setResize.drag = null;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('set-resizing');
+    try { if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+    const card = settingsCard();
+    const w = card ? Math.round(card.getBoundingClientRect().width) : 0;
+    if (w > 0) lsSet(SET_RESIZE_KEY, String(w)); // 记住这次调整，下次打开设置沿用
+  };
+  handle.addEventListener('pointerup', finish);
+  handle.addEventListener('pointercancel', finish);
+  handle.addEventListener('dblclick', (e) => { e.preventDefault(); setResizeReset(); });
+  // 窗口尺寸变化：重新夹一遍（变小了要收回来；跨到窄屏直接退回 CSS 整屏）
+  window.addEventListener('resize', () => {
+    if (setResize.drag) return;
+    clearTimeout(setResize.timer);
+    setResize.timer = setTimeout(() => {
+      if (!$('settings').classList.contains('hidden')) setResizeOnOpen();
+    }, 150);
+  });
+  setResizeOnOpen();
+}
+
+initSettingsResize();
 
 // 唯一 DOM 出口：从 setNav 推导全部导航外观（菜单高亮/分区显隐/翻页/返回头标题/弹窗显隐）
 function renderNav() {

@@ -926,6 +926,10 @@
         <button id="set-save" class="accent">保存</button>
       </div>
     </div>
+    <!-- 等比缩放把手（右下角）：拖大/拖小窗口，宽高按同一比例变；双击恢复默认
+         尺寸。逻辑见 app-settings.js 的「设置窗口等比缩放」一节；窄屏设置是整屏，
+         把手由 style.css 的窄屏媒体查询隐藏 -->
+    <div class="set-resize" id="set-resize" role="separator" aria-label="拖动等比缩放设置窗口，双击恢复默认尺寸" title="拖动等比缩放；双击恢复默认尺寸"></div>
   </div>
 </div>
 

@@ -229,6 +229,25 @@
   color: var(--text-3);
 }
 
+/* 用量记录表：13 列（多了「推理强度」），边距与字号收紧一档才塞得下；模型与
+   渠道名可能很长，超宽省略（悬停 title 看全）。真放不下时容器横向滚动
+   （.us-table-wrap 已是 overflow-x:auto），不换行、不压破卡片 */
+.us-records-table {
+  font-size: 11.5px;
+}
+
+.us-records-table th,
+.us-records-table td {
+  padding: 6px 6px;
+}
+
+.us-records-table td:nth-child(2),
+.us-records-table td:nth-child(5) {
+  max-width: 168px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 分页 */
 .us-pager {
   display: flex;

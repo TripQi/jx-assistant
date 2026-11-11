@@ -1981,8 +1981,10 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   `usage_events` 一次模型调用一行（成功失败都记，成功率才算得出来），字段：时间、
   会话、用途（main 主对话 / task 任务会话 / sub 子任务 / aux 辅助对话 / title 标题
   生成 / compact 压缩摘要 / assist 其他辅助生成）、provider、Key、模型、协议
-  （chat/responses/anthropic）、输入/缓存读/缓存写/输出 tokens、首字延迟、总耗时、
-  成败、错误摘要、是否流式。索引：ts / session_id / model。
+  （chat/responses/anthropic）、输入/缓存读/缓存写/输出 tokens、**推理强度**
+  （thinking：本次调用**实际使用**的思考档位，空串＝没指定、跟随服务端默认——
+  标题/摘要/git 摘要/插件 mods 这类辅助调用不吃会话档位，一律记空，别拿会话的
+  档位冒充）、首字延迟、总耗时、成败、错误摘要、是否流式。索引：ts / session_id / model。
 - **采集点**：`App.meterUsage`（usagestats.go）包住调用方的 `StreamCallbacks`，在
   模型调用的每一个出口各包一层——agent.go 主循环（含重试的每次尝试）、
   contextengine.go 的 `CallSummarizer`、llmapi.go 的 `/api/llm/ask`（`purpose` 由
@@ -1998,9 +2000,11 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   单价的模型只显示 token，费用列写「未配单价」（不给 0，免得误读成免费）。价格不
   进明细表，聚合时现算——改价后历史费用跟着变。页面固定标注「按本地单价估算，
   不代表账单」。内置初始价见 `defaultUsagePricing`（美元价按 usdToCNY 折算），可编辑。
-- **界面**：设置 → 用量（组件注册的 pane）：渠道/日期筛选、9 个 KPI、每日趋势
+- **界面**：设置 → 用量（组件注册的 pane）：渠道/日期/**推理强度**筛选、9 个 KPI、每日趋势
   （手写 SVG 折线，不引图表库）、模型占比环形图、按模型统计表、明细分页表
-  （首字延迟列在这里，速度条不显示它）、单价与倍率、清理区。**不做热力图**（用户明确不要）。
+  （首字延迟与推理强度列在这里，速度条不显示它们；推理强度显示档位显示名
+  None/Low/Medium/High/Extra High/Max，空值写「默认」，筛选下拉另有一档「默认」
+  兜住老数据与不吃档位的调用）、单价与倍率、清理区。**不做热力图**（用户明确不要）。
 - **速度条**：输入框下方 `↑ 42.3 tok/s · 本轮 1.2k tok`。主前端在 SSE 的
   delta/reasoning 处 `JX.emit('chat:stream')`，每步流尾 `Event{Type:"usage"}` 带真实
   输出 tokens 与首字延迟（`chat:usage`），收尾 `chat:stream-end`；组件按收到的字符估

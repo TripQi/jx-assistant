@@ -36,6 +36,12 @@
     anthropic: 'anthropic',
   };
 
+  // 思考档位显示名：与主界面「思考档位」菜单同一套（models.go 的 thinkingLevels）。
+  // 库里存内部值，空串＝这次调用没指定档位（跟随服务端默认），界面写「默认」。
+  var THINK_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+  var THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+  var THINK_DEFAULT = 'default'; // 筛选里「默认」档的哨兵值（后端 usageThinkingDefault）
+
   var DONUT_COLORS = ['#4d6bfe', '#1f9d55', '#e8a33d', '#9a6700', '#a855f7', '#0ea5e9', '#8b949e'];
 
   // 页面状态（模块级：切走再回来保留筛选与分页）
@@ -45,6 +51,7 @@
     to: '',
     provider: '',
     key: '',
+    thinking: '', // 推理强度筛选：'' 全部 / 'default' 未指定档位 / 六档之一
     page: 0,
     pricing: null,
     pricingDirty: false,
@@ -176,6 +183,24 @@
     labRange.appendChild(selRange);
     filters.appendChild(labRange);
 
+    // 推理强度筛选：全量选项固定六档 + 「默认」（没指定档位：老数据与辅助调用）
+    var selThink = el('select');
+    selThink.title = '按本次调用实际使用的思考档位筛选（「默认」＝调用时没指定档位，跟随服务端默认）';
+    var oAllThink = el('option', '', '全部推理强度');
+    oAllThink.value = '';
+    selThink.appendChild(oAllThink);
+    var oDefThink = el('option', '', '默认');
+    oDefThink.value = THINK_DEFAULT;
+    selThink.appendChild(oDefThink);
+    THINK_LEVELS.forEach(function (lv) {
+      var o = el('option', '', THINK_LABELS[lv]);
+      o.value = lv;
+      selThink.appendChild(o);
+    });
+    var labThink = el('label', '', '推理强度');
+    labThink.appendChild(selThink);
+    filters.appendChild(labThink);
+
     var inFrom = el('input');
     inFrom.type = 'date';
     var inTo = el('input');
@@ -302,6 +327,11 @@
       state.page = 0;
       refreshData(ctx);
     };
+    selThink.onchange = function () {
+      state.thinking = selThink.value || '';
+      state.page = 0;
+      refreshData(ctx);
+    };
     btnRefresh.onclick = function () { refreshAll(ctx); };
     btnClean.onclick = function () {
       var from = cFrom.value;
@@ -322,6 +352,7 @@
 
     // 初值：筛选控件按 state 回填
     selRange.value = state.range;
+    selThink.value = state.thinking || '';
     if (state.range === 'custom') {
       var r0 = dateRange();
       inFrom.value = state.from || r0.from;
@@ -397,6 +428,7 @@
     var q = 'from=' + encodeURIComponent(r.from) + '&to=' + encodeURIComponent(r.to);
     if (state.provider) q += '&provider=' + encodeURIComponent(state.provider);
     if (state.key) q += '&key=' + encodeURIComponent(state.key);
+    if (state.thinking) q += '&thinking=' + encodeURIComponent(state.thinking);
 
     apiGet('/api/usage/summary?' + q).then(function (d) {
       renderSummary(ctx, d);
@@ -651,10 +683,10 @@
     if (!items.length) {
       ctx.recTable.appendChild(el('div', 'us-empty', '这段时间没有调用记录'));
     } else {
-      var t = el('table', 'us-table');
+      var t = el('table', 'us-table us-records-table');
       var thead = el('thead');
       var htr = el('tr');
-      ['时间', '模型', '类型', '渠道 · Key', '输入', '输出', '缓存写', '缓存读', '总计', '首字延迟', '耗时', '状态']
+      ['时间', '模型', '类型', '推理强度', '渠道 · Key', '输入', '输出', '缓存写', '缓存读', '总计', '首字延迟', '耗时', '状态']
         .forEach(function (h) { htr.appendChild(el('th', '', h)); });
       thead.appendChild(htr);
       t.appendChild(thead);
@@ -667,6 +699,14 @@
           (it.sessionId ? ' · 会话 ' + it.sessionId : '');
         r.appendChild(name);
         r.appendChild(el('td', '', PROTO_LABEL[it.protocol] || it.protocol || 'chat'));
+        // 推理强度：空＝这次调用没指定档位（跟随服务端默认，老数据也是空）
+        var th = THINK_LABELS[it.thinking];
+        if (th) r.appendChild(el('td', '', th));
+        else {
+          var thd = el('td', 'muted', '默认');
+          thd.title = '这次调用没有指定思考档位（跟随服务端默认；老数据也记为默认）';
+          r.appendChild(thd);
+        }
         var ch = el('td', 'l', (it.providerName || it.providerId || '默认渠道') +
           (it.keyLabel ? ' · ' + it.keyLabel : ''));
         ch.title = (it.providerId || '') + (it.keyId ? ' / ' + it.keyId : '');

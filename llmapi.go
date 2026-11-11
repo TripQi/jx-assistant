@@ -67,7 +67,7 @@ func (a *App) handleLLMAsk(w http.ResponseWriter, r *http.Request) {
 	case usagePurposeCompact:
 		purpose = usagePurposeCompact
 	}
-	meterCb, finishUsage := a.meterUsage(purpose, sess, target, StreamCallbacks{
+	meterCb, finishUsage := a.meterUsage(purpose, sess, target, "", StreamCallbacks{
 		OnText: func(s string) { sb.WriteString(s) },
 	})
 	err := StreamChat(ctx, target, ChatRequest{

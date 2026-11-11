@@ -195,7 +195,9 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, input string) (string,
 	start := time.Now()
 	// 用量明细（组件 usage-stats）：摘要调用单独记为「上下文压缩」用途——压缩的
 	// token 花销往往不小，混在主对话里看不出钱花在哪
-	meterCb, finishUsage := e.app.meterUsage(usagePurposeCompact, sess, target, StreamCallbacks{
+	// 摘要调用不吃会话档位（请求不带 reasoning effort，走服务端默认）：明细里
+	// 推理强度记空，与「实际使用的档位」一致
+	meterCb, finishUsage := e.app.meterUsage(usagePurposeCompact, sess, target, "", StreamCallbacks{
 		OnText: func(s string) { sb.WriteString(s) },
 		OnUsage: func(u Usage) {
 			uu := u

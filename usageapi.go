@@ -108,6 +108,7 @@ func usageQueryFilter(r *http.Request) usageFilter {
 		To:         strings.TrimSpace(q.Get("to")),
 		ProviderID: strings.TrimSpace(q.Get("provider")),
 		KeyID:      strings.TrimSpace(q.Get("key")),
+		Thinking:   strings.TrimSpace(q.Get("thinking")),
 	}
 	// 快捷区间由前端算好传 from/to；服务端只做兜底（date=today|7d|30d）
 	if f.From == "" || f.To == "" {
@@ -252,7 +253,7 @@ func (a *App) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 			"ts": r.TS, "sessionId": r.SessionID, "purpose": r.Purpose,
 			"providerId": r.ProviderID, "providerName": names[r.ProviderID],
 			"keyId": r.KeyID, "keyLabel": labels[r.ProviderID+"\x00"+r.KeyID],
-			"model": r.Model, "protocol": r.Protocol,
+			"model": r.Model, "protocol": r.Protocol, "thinking": r.Thinking,
 			"input": r.Input, "output": r.Output, "cacheRead": r.CacheRead, "cacheWrite": r.CacheWrite,
 			"total": r.Total, "ttftMs": r.TTFTMs, "durationMs": r.DurationMs,
 			"ok": r.OK, "error": r.Error, "stream": r.Stream,

@@ -1187,7 +1187,7 @@ func (a *App) gitSummarize(ctx context.Context, session, repo string) (string, e
 	defer cancel()
 	var sb strings.Builder
 	// 用量明细（组件 usage-stats）：git 提交摘要记成「其他辅助生成」，与主对话分开
-	meterCb, finishUsage := a.meterUsage(usagePurposeAssist, nil, target, StreamCallbacks{
+	meterCb, finishUsage := a.meterUsage(usagePurposeAssist, nil, target, "", StreamCallbacks{
 		OnText: func(s string) { sb.WriteString(s) },
 	})
 	err = StreamChat(sctx, target, ChatRequest{

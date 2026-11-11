@@ -1304,7 +1304,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// 用量明细埋点（组件 usage-stats）：包一层回调记首字延迟与流尾 usage，
 			// 流结束（成功或失败）调 finishUsage 异步落一条明细——失败调用也记，
 			// 页面才能算成功率
-			meterCb, finishUsage := a.meterUsage(usagePurposeOf(sess), sess, target, StreamCallbacks{
+			meterCb, finishUsage := a.meterUsage(usagePurposeOf(sess), sess, target, req.ReasoningEffort, StreamCallbacks{
 				// 模型流强断登记（停止看门狗硬终结用）：流建立时注册、结束时注销——
 				// 硬停止时直接断开底层连接，不依赖 ctx 取消生效
 				OnBody: func(abort func()) {

@@ -80,7 +80,7 @@ func TestUsageRecordPersist(t *testing.T) {
 	sess := &SessionMeta{ID: "s-usage-1", Mode: "task"}
 	target := LLMTarget{ProviderID: "p1", KeyID: "k1", Model: "gpt-4o", Protocol: "anthropic"}
 
-	cb, finish := a.meterUsage(usagePurposeTask, sess, target, StreamCallbacks{
+	cb, finish := a.meterUsage(usagePurposeTask, sess, target, "high", StreamCallbacks{
 		OnText: func(string) {}, OnUsage: func(Usage) {},
 	})
 	cb.OnText("你好")
@@ -88,8 +88,8 @@ func TestUsageRecordPersist(t *testing.T) {
 		CacheReadTokens: 200, CacheCreationTokens: 30})
 	finish(nil)
 
-	// 失败调用：没有 usage，也要留一条（成功率要算得出来）
-	_, finish2 := a.meterUsage(usagePurposeCompact, nil, target, StreamCallbacks{})
+	// 失败调用：没有 usage，也要留一条（成功率要算得出来）；辅助调用不吃档位
+	_, finish2 := a.meterUsage(usagePurposeCompact, nil, target, "", StreamCallbacks{})
 	finish2(errors.New("模型服务返回 401：鉴权失败"))
 
 	waitUsageRows(t, a, 2)
@@ -128,7 +128,7 @@ func TestUsageRecordDisabled(t *testing.T) {
 	if a.usageEnabled() {
 		t.Fatal("组件关闭后 usageEnabled 应为 false")
 	}
-	cb, finish := a.meterUsage(usagePurposeTask, nil, LLMTarget{Model: "m"}, StreamCallbacks{})
+	cb, finish := a.meterUsage(usagePurposeTask, nil, LLMTarget{Model: "m"}, "", StreamCallbacks{})
 	cb.OnText("x")
 	finish(nil)
 	time.Sleep(500 * time.Millisecond) // 给可能的误落库留出时间窗口
@@ -346,5 +346,74 @@ func TestUsageRecordsPagination(t *testing.T) {
 	big, bigTotal, err := a.Store.UsageRecords(usageFilter{}, 100000, 0)
 	if err != nil || bigTotal != 720 || len(big) != usageRecordPageMax {
 		t.Fatalf("limit 应钳到 %d，得到 %d（总 %d）err=%v", usageRecordPageMax, len(big), bigTotal, err)
+	}
+}
+
+// TestUsageThinkingColumn 看护「推理强度」列：
+//   - 采集落「本次调用实际使用的档位」（主对话按会话档位；标题/摘要等不吃档位的
+//     辅助调用记空串）；
+//   - 老数据（这列加之前写下的行）读出来是空串、不报错；
+//   - 筛选：按档位精确匹配，「默认」那一档兜住空串（老数据与辅助调用）。
+func TestUsageThinkingColumn(t *testing.T) {
+	a := newUsageTestApp(t)
+	// 主对话：会话档位 xhigh 真的落到了请求上（agent.go 传 req.ReasoningEffort）
+	cb, finish := a.meterUsage(usagePurposeMain, &SessionMeta{ID: "s1", Mode: "assistant"},
+		LLMTarget{Model: "m", ProviderID: "p"}, "xhigh", StreamCallbacks{})
+	cb.OnText("x")
+	finish(nil)
+	// 标题生成：走服务端默认，明细里必须是空串（不是会话档位）
+	cb2, finish2 := a.meterUsage(usagePurposeTitle, nil, LLMTarget{Model: "m", ProviderID: "p"}, "", StreamCallbacks{})
+	cb2.OnText("x")
+	finish2(nil)
+	waitUsageRows(t, a, 2)
+
+	rows, total, err := a.Store.UsageRecords(usageFilter{}, 10, 0)
+	if err != nil || total != 2 {
+		t.Fatalf("明细条数不对: total=%d err=%v", total, err)
+	}
+	// 新的在前：rows[0] 是标题生成、rows[1] 是主对话
+	if rows[0].Thinking != "" {
+		t.Fatalf("不吃档位的调用应记空串，得到 %q", rows[0].Thinking)
+	}
+	if rows[1].Thinking != "xhigh" {
+		t.Fatalf("主对话应记会话档位 xhigh，得到 %q", rows[1].Thinking)
+	}
+
+	// 老数据兼容：按旧列清单插入一行（thinking 取列默认值），读出来必须是空串
+	if _, err := a.Store.db.Exec(`INSERT INTO usage_events
+		(ts, session_id, purpose, provider_id, key_id, model, protocol,
+		 input_tokens, cache_read, cache_write, output_tokens, ttft_ms, duration_ms, ok, error, stream)
+		VALUES ('2026-10-01 10:00:00','s-old','task','p','k','m-old','chat',10,0,0,20,0,100,1,'',1)`); err != nil {
+		t.Fatalf("插入老格式明细失败: %v", err)
+	}
+	rows, total, err = a.Store.UsageRecords(usageFilter{}, 10, 0)
+	if err != nil || total != 3 {
+		t.Fatalf("老数据读回失败: total=%d err=%v", total, err)
+	}
+	if rows[0].Model != "m-old" || rows[0].Thinking != "" {
+		t.Fatalf("老数据应读成空档位，得到 %+v", rows[0])
+	}
+
+	// 筛选：按档位
+	only, n, err := a.Store.UsageRecords(usageFilter{Thinking: "xhigh"}, 10, 0)
+	if err != nil || n != 1 || only[0].Thinking != "xhigh" {
+		t.Fatalf("按档位 xhigh 筛选应只剩 1 条，得到 n=%d err=%v", n, err)
+	}
+	// 筛选：「默认」＝空串那一档（老数据 + 不吃档位的调用）
+	def, n, err := a.Store.UsageRecords(usageFilter{Thinking: usageThinkingDefault}, 10, 0)
+	if err != nil || n != 2 {
+		t.Fatalf("按「默认」筛选应有 2 条，得到 n=%d err=%v", n, err)
+	}
+	for _, r := range def {
+		if r.Thinking != "" {
+			t.Fatalf("「默认」筛选不该带回有档位的行: %+v", r)
+		}
+	}
+	// 未知档位串＝不筛（不能变成「查不到任何数据」）
+	if got := usageThinkingFilter("weird"); got != "" {
+		t.Fatalf("未知档位应视为不筛，得到 %q", got)
+	}
+	if _, n, _ := a.Store.UsageRecords(usageFilter{Thinking: "weird"}, 10, 0); n != 3 {
+		t.Fatalf("未知档位筛选应返回全部 3 条，得到 %d", n)
 	}
 }

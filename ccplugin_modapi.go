@@ -615,7 +615,7 @@ func (a *App) modModelComplete(ctx context.Context, opts map[string]any) (string
 	req := ChatRequest{Model: target.Model, Messages: msgs}
 	var out strings.Builder
 	// 用量明细（组件 usage-stats）：插件 mods 的模型调用记成「其他辅助生成」
-	meterCb, finishUsage := a.meterUsage(usagePurposeAssist, nil, target, StreamCallbacks{
+	meterCb, finishUsage := a.meterUsage(usagePurposeAssist, nil, target, "", StreamCallbacks{
 		OnText: func(s string) { out.WriteString(s) },
 	})
 	err := StreamChat(ctx, target, req, meterCb)

@@ -62,6 +62,7 @@ type usageRow struct {
 	CacheRead  int64  // 缓存读取 tokens（命中）
 	CacheWrite int64  // 缓存写入 tokens（Anthropic 的 cache_creation）
 	Output     int64  // 输出 tokens
+	Thinking   string // 本次调用实际使用的思考档位；空串＝没指定（跟随服务端默认）
 	TTFTMs     int64  // 首字延迟（请求发出 → 首个正文/思考增量）
 	DurationMs int64  // 总耗时
 	OK         bool
@@ -158,20 +159,27 @@ func (a *App) recordUsage(r usageRow) {
 // usageCall 是一次模型调用的采集器：包住调用方原有的 StreamCallbacks，只额外
 // 记录首字延迟、流尾 usage 与成败，流结束调一次 finish 落库。
 type usageCall struct {
-	app     *App
-	purpose string
-	sessID  string
-	target  LLMTarget
-	start   time.Time
-	ttft    time.Duration
-	usage   *Usage
-	done    bool
+	app      *App
+	purpose  string
+	sessID   string
+	target   LLMTarget
+	thinking string // 本次调用实际落到请求上的档位（空串＝跟随服务端默认）
+	start    time.Time
+	ttft     time.Duration
+	usage    *Usage
+	done     bool
 }
 
 // meterUsage 埋点包装：调用方把自己的回调交进来，拿到包过一层的回调与收尾函数
 // （流结束/失败时调一次，传 StreamChat 的返回错误）。purpose 见上面的用途常量。
-func (a *App) meterUsage(purpose string, sess *SessionMeta, target LLMTarget, cb StreamCallbacks) (StreamCallbacks, func(error)) {
+// thinking 必须是**这次调用真正发给模型的档位**：主对话传请求上的 reasoning
+// effort，不吃档位的辅助调用（标题/摘要/插件 mods）传空——记会话的档位会把
+// 没生效的档位算到辅助调用头上，明细就不可信了。
+func (a *App) meterUsage(purpose string, sess *SessionMeta, target LLMTarget, thinking string, cb StreamCallbacks) (StreamCallbacks, func(error)) {
 	m := &usageCall{app: a, purpose: purpose, target: target, start: time.Now()}
+	if lv, ok := normalizeThinkingLevel(thinking); ok {
+		m.thinking = lv
+	}
 	if sess != nil {
 		m.sessID = sess.ID
 	}
@@ -221,6 +229,7 @@ func (m *usageCall) finish(err error) {
 		KeyID:      m.target.KeyID,
 		Model:      m.target.Model,
 		Protocol:   usageProtocolLabel(m.target.Protocol),
+		Thinking:   m.thinking,
 		TTFTMs:     m.ttft.Milliseconds(),
 		DurationMs: time.Since(m.start).Milliseconds(),
 		OK:         err == nil,
@@ -253,8 +262,8 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	}
 	stmt, err := tx.Prepare(`INSERT INTO usage_events
 		(ts, session_id, purpose, provider_id, key_id, model, protocol,
-		 input_tokens, cache_read, cache_write, output_tokens, ttft_ms, duration_ms, ok, error, stream)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -262,7 +271,7 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	defer stmt.Close()
 	for _, r := range rows {
 		if _, err := stmt.Exec(r.TS, r.SessionID, r.Purpose, r.ProviderID, r.KeyID, r.Model, r.Protocol,
-			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.TTFTMs, r.DurationMs, boolInt(r.OK), r.Error, boolInt(r.Stream)); err != nil {
+			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.Thinking, r.TTFTMs, r.DurationMs, boolInt(r.OK), r.Error, boolInt(r.Stream)); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -271,12 +280,34 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 }
 
 // usageFilter 是页面的筛选条件：日期范围（含首尾，'YYYY-MM-DD'，空=不限）+
-// 渠道 + 该渠道下的一把 Key（多 Key 供应商的「渠道 · Key」下拉）。
+// 渠道 + 该渠道下的一把 Key（多 Key 供应商的「渠道 · Key」下拉）+ 推理强度。
+// 推理强度取值为六档之一，或 usageThinkingDefault（「默认」＝当时没指定档位，
+// 老数据与辅助调用都在这一档）。
 type usageFilter struct {
 	From       string
 	To         string
 	ProviderID string
 	KeyID      string
+	Thinking   string
+}
+
+// usageThinkingDefault 是筛选里「默认（未指定档位）」的哨兵值：库里存的是空串，
+// 直接用空串当筛选值会与「不筛选」撞车（空串表示全部）。
+const usageThinkingDefault = "default"
+
+// usageThinkingFilter 把筛选值归一："" 不筛、"default" 筛空串、六档原样。
+func usageThinkingFilter(s string) string {
+	lv := strings.ToLower(strings.TrimSpace(s))
+	if lv == "" {
+		return ""
+	}
+	if lv == usageThinkingDefault {
+		return usageThinkingDefault
+	}
+	if ok := containsStr(thinkingLevels(), lv); ok {
+		return lv
+	}
+	return ""
 }
 
 // where 生成 WHERE 子句与参数。日期用 substr(ts,1,10) 比较——ts 是本地时间
@@ -299,6 +330,15 @@ func (f usageFilter) where() (string, []any) {
 	if k := strings.TrimSpace(f.KeyID); k != "" {
 		conds = append(conds, "key_id = ?")
 		args = append(args, k)
+	}
+	switch usageThinkingFilter(f.Thinking) {
+	case "":
+		// 不筛
+	case usageThinkingDefault:
+		conds = append(conds, "thinking = ''")
+	default:
+		conds = append(conds, "thinking = ?")
+		args = append(args, usageThinkingFilter(f.Thinking))
 	}
 	if len(conds) == 0 {
 		return "", nil
@@ -404,6 +444,7 @@ type usageRecord struct {
 	CacheRead  int64  `json:"cacheRead"`
 	CacheWrite int64  `json:"cacheWrite"`
 	Output     int64  `json:"output"`
+	Thinking   string `json:"thinking,omitempty"` // 本次调用实际使用的思考档位，空＝跟随服务端默认
 	Total      int64  `json:"total"`
 	TTFTMs     int64  `json:"ttftMs"`
 	DurationMs int64  `json:"durationMs"`
@@ -431,7 +472,7 @@ func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, i
 		return nil, 0, err
 	}
 	q := `SELECT ts, session_id, purpose, provider_id, key_id, model, protocol,
-			input_tokens, cache_read, cache_write, output_tokens, ttft_ms, duration_ms, ok, error, stream
+			input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream
 		FROM usage_events` + where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.Query(q, append(append([]any{}, args...), limit, offset)...)
 	if err != nil {
@@ -443,7 +484,7 @@ func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, i
 		var r usageRecord
 		var ok, stream int
 		if err := rows.Scan(&r.TS, &r.SessionID, &r.Purpose, &r.ProviderID, &r.KeyID, &r.Model, &r.Protocol,
-			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.TTFTMs, &r.DurationMs, &ok, &r.Error, &stream); err != nil {
+			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.Thinking, &r.TTFTMs, &r.DurationMs, &ok, &r.Error, &stream); err != nil {
 			return nil, 0, err
 		}
 		r.OK = ok != 0

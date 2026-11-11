@@ -389,6 +389,16 @@ var storeMigrations = []migration{
 			`CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_events(model)`,
 		},
 	},
+	{
+		// 明细补「推理强度」列：思考档位影响 token 花销与耗时，明细里看不出这次
+		// 调用用的是哪一档就说不清钱花在哪。空串＝这次调用没指定档位（跟随服务端
+		// 默认：标题生成/摘要/git 摘要等辅助调用不吃会话档位），老数据同样落空串。
+		id:       "0019_usage_thinking",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE usage_events ADD COLUMN thinking TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

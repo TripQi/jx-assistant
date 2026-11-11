@@ -18,6 +18,11 @@ package main
 //      拒绝。读不受限（官方同款语义，WRITE_RESTRICTED）。
 //   5. fail closed：任何一步 Win32 失败，子进程宁可不启动。
 //
+// 2026-11-11 补：restricting 列表还必须含 CONSOLE LOGON（S-1-2-1），且令牌
+// 默认 DACL 要补授它——否则控制台程序（cmd/powershell/python）在子系统建
+// 控制台时就 0xC0000142 秒退，整条命令通道静默失效（详见 startConfinedWindows
+// 步骤 3 的注释）。
+//
 // 已知边界（DSH 官方同款，自报 partial）：Everyone 可写的位置与 NTFS 硬
 // 链接可以绕路写（硬链接在受限进程打开 ws 内链接名时，NTFS 懒传播会把
 // 工作区根的继承 ACE 应用到共享 SD，外部别名随之可写——曾以首授后全树
@@ -25,6 +30,11 @@ package main
 // 走父目录 FILE_DELETE_CHILD（清柜权）路线时不触发写受限双检——
 // %TEMP%/Documents/Desktop 等用户 FullControl 位置可被非 -Force 删除
 // （判定实验固化在 sbx_delete_matrix_test.go）；只限写，不限读与联网。
+// CONSOLE LOGON 是为控制台被迫加进 restricting 列表的（见上），实测它在
+// C:\ProgramData、C:\Windows\Temp、C:\Users\Public 三处都无写权，不额外
+// 开门；若将来为兼容某个工具把 BUILTIN\Users 也加进来，ProgramData 根与
+// C:\Windows\Temp 会随之可写（实测），届时必须补相应收窄（给合成 SID 打
+// 显式 deny ACE，或改 AppContainer + capability）。
 //
 // 历史注记：曾在官方之上叠加「密级关卡」（令牌降 Low 完整性 + 工作区打
 // Low 强制标签）封堵上述删除路线，因常驻 Low 标签污染真实工作区（把程序
@@ -657,23 +667,37 @@ func startConfinedWindows(r sandboxRun) (*confinedChild, error) {
 	// 扫描不构成有效防线，徒增每工作区一次的全树遍历，已删（见文件头
 	// 「已知边界」）。
 
-	// 3) 受限令牌（官方 token.ts 配方）：
+	// 3) 受限令牌（官方 token.ts 配方 + 一处本机实测的必要补丁）：
 	//   OpenProcessToken 要含 TOKEN_ASSIGN_PRIMARY —— CreateRestrictedToken
 	//   返回句柄继承源句柄的访问权，缺了它 CreateProcessAsUser 直接拒绝访问。
 	//   restricting 列表按档位：
-	//     read-only:       [logon SID, Everyone]
-	//     workspace-write: [logon SID, Everyone, 工作区SID, 临时目录SID]
+	//     read-only:       [logon SID, Everyone, CONSOLE LOGON]
+	//     workspace-write: [logon SID, Everyone, CONSOLE LOGON, 工作区SID, 临时目录SID]
 	//   logon SID 保住 WinSta0/桌面等每登录对象（缺了子进程 0xC0000142 崩）；
 	//   Everyone 保住系统目录的读/执行；写只认我们授了 ACE 的合成 SID，
 	//   Everyone 可写的位置就是官方文档承认的 partial 缺口。
-	//   INTERACTIVE/LOCAL 刻意不进列表（与 DSH 终版配方一致）：C:\Users\Public
-	//   默认授 INTERACTIVE 写权，放行即逃逸——DSH 官方修复的同款盲区
-	//   （其 runner.spec 'ambient-writable escape regression'），回归测试见
-	//   sbx_adversarial_test.go 的 Public 用例。
+	//
+	//   **CONSOLE LOGON（S-1-2-1）是必须的**（2026-11-11 探针实测）：控制台程序
+	//   （cmd / powershell / python 全是）启动时子系统要给子进程建控制台，而控制台
+	//   对象的 DACL 授的是登录会话类身份、不授 Everyone。缺它时 pass-2 在 DLL 初始
+	//   化阶段就拒，子进程 0xC0000142 秒退、一个字节都写不出来——这就是「沙箱内
+	//   命令静默失效、返回『命令执行完成，无输出』」的真正根因。配合 3b 的默认
+	//   DACL 补授，两处缺一不可（缺任一处同样 0xC0000142）。
+	//   选它而不选 BUILTIN\Users：两者都能建控制台，但 Users 会连带把
+	//   C:\ProgramData 根、C:\Windows\Temp 这些 Users 有写权的位置写开（实测），
+	//   CONSOLE LOGON 没有这类写权（同样实测三处典型位置全拒）。INTERACTIVE 也
+	//   能建控制台，但 C:\Users\Public 默认授 INTERACTIVE 写权——放行即逃逸
+	//   （DSH 官方修复的同款盲区 runner.spec 'ambient-writable escape
+	//   regression'），故仍在排除名单里。
 	worldSid, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("sandbox unavailable: 构造 Everyone SID 失败: %w", err)
+	}
+	consoleLogonSid, err := windows.CreateWellKnownSid(windows.WinConsoleLogonSid)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("sandbox unavailable: 构造 CONSOLE LOGON SID 失败: %w", err)
 	}
 	var tok windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(),
@@ -691,6 +715,7 @@ func startConfinedWindows(r sandboxRun) (*confinedChild, error) {
 	restricting := []windows.SIDAndAttributes{
 		{Sid: logonSid, Attributes: 0},
 		{Sid: worldSid, Attributes: 0},
+		{Sid: consoleLogonSid, Attributes: 0}, // 控制台对象只授登录会话类身份（见上）
 	}
 	if r.Policy == permWorkspace {
 		restricting = append(restricting,
@@ -708,16 +733,18 @@ func startConfinedWindows(r sandboxRun) (*confinedChild, error) {
 	defer restricted.Close()
 
 	// 3b) 令牌默认 DACL 补授（官方 setTokenDefaultDaclGrant）：受限令牌创建的
-	// 新对象（管道、临时文件）默认 DACL 里没有任何 restricting SID 的 ACE，
-	// pass-2 检查会在创建时就拒绝。给默认 DACL 并入一条该 SID 的完全访问 ACE，
-	// 对象创建改由父容器的 DACL 把关（工作区外的文件依旧创建不出来）。
+	// 新对象（管道、临时文件、控制台对象）默认 DACL 里没有任何 restricting SID
+	// 的 ACE，pass-2 检查会在创建时就拒绝。给默认 DACL 并入该 SID 的完全访问
+	// ACE，对象创建改由父容器的 DACL 把关（工作区外的文件依旧创建不出来）。
+	// CONSOLE LOGON 那条同样必须：控制台对象的安全描述符由令牌默认 DACL 派生，
+	// 缺了它即使 restricting 列表里有它也建不出控制台（实测 0xC0000142）。
 	grantSid := worldSid
 	if r.Policy == permWorkspace {
 		// 官方 index.ts:294 同款优先级：私有临时 SID 优先——新建对象的
 		// 默认 DACL 只带本次运行的临时能力，不携带共享的工作区能力。
 		grantSid = tempSid
 	}
-	if err := grantTokenDefaultDacl(restricted, grantSid); err != nil {
+	if err := grantTokenDefaultDacl(restricted, grantSid, consoleLogonSid); err != nil {
 		os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("sandbox unavailable: %w", err)
 	}
@@ -1090,26 +1117,29 @@ func tokenLogonSid(tok windows.Token) (*windows.SID, error) {
 	return nil, fmt.Errorf("令牌里没有登录会话 SID")
 }
 
-// grantTokenDefaultDacl 向受限令牌的默认 DACL 并入一条 grantSid 的完全
-// 访问 ACE（官方 setTokenDefaultDaclGrant）。默认 DACL 决定令牌持有者
-// 新建对象的初始安全描述符——不补授，受限子进程创建管道/临时文件会在
-// 受限检查（pass-2）被拒。任何失败都返回错误（fail closed）。
-func grantTokenDefaultDacl(tok windows.Token, grantSid *windows.SID) error {
+// grantTokenDefaultDacl 向受限令牌的默认 DACL 并入 grantSids 的完全访问 ACE
+// （官方 setTokenDefaultDaclGrant）。默认 DACL 决定令牌持有者新建对象的初始
+// 安全描述符——不补授，受限子进程创建管道/临时文件/控制台对象会在受限检查
+// （pass-2）被拒。任何失败都返回错误（fail closed）。
+func grantTokenDefaultDacl(tok windows.Token, grantSids ...*windows.SID) error {
 	dacl, err := tokenDefaultDaclBytes(tok)
 	if err != nil {
 		return err
 	}
-	sideb, err := sidBytes(grantSid)
-	if err != nil {
-		return err
+	for _, grantSid := range grantSids {
+		sideb, err := sidBytes(grantSid)
+		if err != nil {
+			return err
+		}
+		ace := make([]byte, 8+len(sideb))
+		ace[0] = accessAllowedACE
+		ace[1] = 0 // 对象 DACL 不需要继承标志
+		binary.LittleEndian.PutUint16(ace[2:], uint16(len(ace)))
+		binary.LittleEndian.PutUint32(ace[4:], fileAllAccess)
+		copy(ace[8:], sideb)
+		dacl = mergeAce(dacl, ace)
 	}
-	ace := make([]byte, 8+len(sideb))
-	ace[0] = accessAllowedACE
-	ace[1] = 0 // 对象 DACL 不需要继承标志
-	binary.LittleEndian.PutUint16(ace[2:], uint16(len(ace)))
-	binary.LittleEndian.PutUint32(ace[4:], fileAllAccess)
-	copy(ace[8:], sideb)
-	nacl := mergeAce(dacl, ace)
+	nacl := dacl
 
 	// SetTokenInformation(TokenDefaultDacl=6, &TOKEN_DEFAULT_DACL{PACL}, 8)
 	info := make([]byte, 8)

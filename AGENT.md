@@ -1969,8 +1969,46 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `gitpanel.go`（+`gitpanel_windows.go`/`_other.go`） | Git 面板（组件 `git-panel` 的宿主半边）：仓库扫描、porcelain/图谱/分支解析、暂存/提交（白名单 argv 直调 git，永不过 shell） |
 | `gittools.go` | git_sync 模型工具（组件 `git-panel`）：与面板共用 gitSync 执行缝的宿主通道远程同步，绕开沙箱内远程 git 必败的限制（背景与实测见《Git远程同步工具-改动说明.md》） |
 | `server.go` | 路由、聊天 SSE、全局事件流、压缩接口、插件注入、内嵌前端 |
+| `usagestats.go` / `usagepricing.go` / `usageapi.go` | 「用量统计」（组件 `usage-stats` 的宿主半边）：逐次调用明细表 `usage_events` + 采集埋点 + 异步落库 + 保留策略；模型单价与渠道倍率（存 meta 表 `globaldata:usage.pricing`）；`/api/usage/*` 汇总/明细/单价/清理。见「用量统计」节 |
 | `web/` | 前端：工作区分组侧栏、子对话抽屉、子任务卡片、模型选择器、设置页、市场页（`app-market.js`：左侧栏底部入口、主区整页视图 body.market-mode、三 tab+搜索+一键装卸；组件装卸后 `CX.refresh()` 热生效） |
 > **服务端已独立成仓库**（`D:\智能体工作区\jxaiserver`，module jxai-server）：远程访问中继 + 技能/组件/插件市场（含 /admin 管理页）+ 更新分发（日期+V序号版本体系）+ 公司接入（登记/UDP 发现/按人发 new-api 令牌/每月额度）。本仓库只保留客户端半边（market.go 市场客户端、wizard.go 接入向导、update.go 更新检查——与服务端的协议契约见各自文件头注释）；其部署与用法见该仓库 README/部署。开发完全分开，两边接口变更需双侧同步。
+
+## 用量统计（组件 usage-stats，usagestats.go / usagepricing.go / usageapi.go）
+
+计费与采集的口径由用户定死（2026-11-11），不要自行改：
+
+- **采集**：`sessions` 只有会话级累计，看不出按天/按模型/按渠道的账。明细表
+  `usage_events` 一次模型调用一行（成功失败都记，成功率才算得出来），字段：时间、
+  会话、用途（main 主对话 / task 任务会话 / sub 子任务 / aux 辅助对话 / title 标题
+  生成 / compact 压缩摘要 / assist 其他辅助生成）、provider、Key、模型、协议
+  （chat/responses/anthropic）、输入/缓存读/缓存写/输出 tokens、首字延迟、总耗时、
+  成败、错误摘要、是否流式。索引：ts / session_id / model。
+- **采集点**：`App.meterUsage`（usagestats.go）包住调用方的 `StreamCallbacks`，在
+  模型调用的每一个出口各包一层——agent.go 主循环（含重试的每次尝试）、
+  contextengine.go 的 `CallSummarizer`、llmapi.go 的 `/api/llm/ask`（`purpose` 由
+  调用方给，session-title 组件传 `title`）、gitpanel.go 的提交摘要、
+  ccplugin_modapi.go 的 mods。**只入队不写库**（`usageCh` 有缓冲，满了丢一条并记
+  日志），落库协程按 32 条或 300ms 批量提交——流式热路径绝不能被 SQLite 卡住。
+- **开关**：采集由组件 `usage-stats` 的全局开关控制（`usageEnabled`），关掉即停记、
+  已有数据保留；前端页面与速度条随同一个开关消失（组件 dispose 摘干净）。
+- **保留**：启动跑一次 + 每天一次（`usageJanitor`）：超 90 天或超 20 万条删最旧，
+  保留最新；页面另有「按日期范围清理」（二次确认，不可恢复）。
+- **计费**：模型基础价按模型 id 配四个价（输入/输出/缓存读/缓存写，元 / 百万
+  tokens），渠道一个倍率（默认 1.0），**费用 = 基础价算出的金额 × 渠道倍率**；未配
+  单价的模型只显示 token，费用列写「未配单价」（不给 0，免得误读成免费）。价格不
+  进明细表，聚合时现算——改价后历史费用跟着变。页面固定标注「按本地单价估算，
+  不代表账单」。内置初始价见 `defaultUsagePricing`（美元价按 usdToCNY 折算），可编辑。
+- **界面**：设置 → 用量（组件注册的 pane）：渠道/日期筛选、9 个 KPI、每日趋势
+  （手写 SVG 折线，不引图表库）、模型占比环形图、按模型统计表、明细分页表
+  （首字延迟列在这里，速度条不显示它）、单价与倍率、清理区。**不做热力图**（用户明确不要）。
+- **速度条**：输入框下方 `↑ 42.3 tok/s · 本轮 1.2k tok`。主前端在 SSE 的
+  delta/reasoning 处 `JX.emit('chat:stream')`，每步流尾 `Event{Type:"usage"}` 带真实
+  输出 tokens 与首字延迟（`chat:usage`），收尾 `chat:stream-end`；组件按收到的字符估
+  token（与 `estimateTokens` 同一启发式 3/4）实时显示，收到真实 usage 后定格、约 3 秒
+  淡出。
+- **验证**：`go test -run TestUsage .`（落库/聚合/倍率/未配单价/清理/分页/组件关闭
+  不记）；真机走 `node gui-test/usage-verify.mjs`（自建隔离实例 + 无头 Edge，发真实
+  消息，截图落 `gui-test-screenshots/usage-*.png`）。
 
 ## 渠道协议（provider protocol）
 

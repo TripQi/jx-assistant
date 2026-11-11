@@ -1,17 +1,22 @@
 package main
 
-// 用量统计（usagestats.go）数据层的自检测试：
+// 用量统计（usagestats.go / usagepricing.go / usageapi.go）的自检测试：
 //   - 记账落库：一次成功调用与一次失败调用的明细字段（用途/渠道/Key/协议/
 //     首字延迟/token/错误摘要）
 //   - 组件关闭时不记录（开关是采集的唯一门闩）
-//   - 保留策略（超 90 天 / 超 20 万条删最旧）
+//   - 按天 / 按模型聚合（多渠道合并、费用逐渠道算）
+//   - 计费口径：基础价 × 渠道倍率、未配单价不给 0
+//   - 保留策略（超 90 天 / 超 20 万条删最旧）与按日期范围清理
 //   - 明细分页（新的在前、总数正确）
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,6 +57,12 @@ func waitUsageRows(t *testing.T, a *App, want int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("等落库超时：期望至少 %d 条，实际 %d 条", want, a.Store.UsageCount())
+}
+
+// jsonBody 把 map 编成 httptest 请求体（测试里构造 POST body 用）。
+func jsonBody(v any) *strings.Reader {
+	raw, _ := json.Marshal(v)
+	return strings.NewReader(string(raw))
 }
 
 // seedUsageRows 直接写明细（聚合/分页/清理类测试用——不经过异步队列）。
@@ -132,6 +143,105 @@ func TestUsageRecordDisabled(t *testing.T) {
 	}
 }
 
+// TestUsageSummaryAggregation 看护按天/按模型聚合与费用口径：同模型多渠道合并
+// token、费用按各自渠道倍率算完相加，未配单价的模型标记 priced=false。
+func TestUsageSummaryAggregation(t *testing.T) {
+	a := newUsageTestApp(t)
+	// 自配价表：m1 输入 10 元/M、输出 20 元/M；p2 渠道倍率 2.0
+	if err := a.saveUsagePricing(usagePricing{
+		Models:      map[string]modelPrice{"m1": {Input: 10, Output: 20, CacheRead: 1, CacheWrite: 2}},
+		Multipliers: map[string]float64{"p2": 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedUsageRows(t, a,
+		// 11-01：m1 @ p1（倍率 1.0）：输入 1M → 10 元，输出 1M → 20 元
+		usageRow{TS: "2026-11-01 10:00:00", Model: "m1", Protocol: "chat", ProviderID: "p1",
+			Input: 1000000, Output: 1000000, OK: true},
+		// 11-01：m1 @ p2（倍率 2.0）：输入 1M → 20 元，输出 1M → 40 元
+		usageRow{TS: "2026-11-01 11:00:00", Model: "m1", Protocol: "chat", ProviderID: "p2",
+			Input: 1000000, Output: 1000000, OK: false},
+		// 11-02：未配单价的 m2
+		usageRow{TS: "2026-11-02 09:00:00", Model: "m2", Protocol: "responses", ProviderID: "p1",
+			Input: 500, Output: 500, OK: true},
+	)
+	rec := httptest.NewRecorder()
+	a.handleUsageSummary(rec, httptest.NewRequest("GET", "/api/usage/summary?from=2026-11-01&to=2026-11-02", nil))
+	if rec.Code != 200 {
+		t.Fatalf("summary 应为 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	var resp usageSummaryResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.KPI.Calls != 3 || resp.KPI.Errors != 1 {
+		t.Fatalf("请求数/错误数不对: %+v", resp.KPI)
+	}
+	if resp.KPI.Input != 2000500 || resp.KPI.Output != 2000500 || resp.KPI.Total != 4001000 {
+		t.Fatalf("总 token 不对: %+v", resp.KPI)
+	}
+	if got, want := resp.KPI.Cost, 90.0; got < want-0.001 || got > want+0.001 {
+		t.Fatalf("估算花费应为 %.2f（10+20+20+40），得到 %.4f", want, got)
+	}
+	if resp.KPI.Priced {
+		t.Fatal("有未配单价的模型时 KPI.Priced 应为 false")
+	}
+	if resp.KPI.UnpricedCalls != 1 {
+		t.Fatalf("未配单价的调用数应为 1，得到 %d", resp.KPI.UnpricedCalls)
+	}
+	if len(resp.Daily) != 2 {
+		t.Fatalf("应有 2 天的趋势数据，得到 %d: %+v", len(resp.Daily), resp.Daily)
+	}
+	if d := resp.Daily[0]; d.Day != "2026-11-01" || d.Cost < 89.999 || d.Cost > 90.001 {
+		t.Fatalf("11-01 费用应为 90 元（渠道倍率 2 生效），得到 %+v", d)
+	}
+	if resp.Daily[1].Priced {
+		t.Fatal("11-02 只有未配单价的模型，Priced 应为 false")
+	}
+	// 按模型：m1 两条（不同渠道）合并成一行
+	var m1 *usageModelStat
+	for i := range resp.ByModel {
+		if resp.ByModel[i].Model == "m1" {
+			m1 = &resp.ByModel[i]
+		}
+	}
+	if m1 == nil {
+		t.Fatalf("按模型统计里没有 m1: %+v", resp.ByModel)
+	}
+	if m1.Input != 2000000 || m1.Calls != 2 || m1.Total != 4000000 {
+		t.Fatalf("m1 的两条记录应合并：%+v", *m1)
+	}
+	if m1.Cost < 89.999 || m1.Cost > 90.001 || !m1.Priced {
+		t.Fatalf("m1 费用应为 90 元且已配价：%+v", *m1)
+	}
+}
+
+// TestUsagePricingCost 看护计费公式与「未配单价」口径。
+func TestUsagePricingCost(t *testing.T) {
+	p := usagePricing{
+		Models:      map[string]modelPrice{"m": {Input: 2, Output: 8, CacheRead: 0.2, CacheWrite: 4}},
+		Multipliers: map[string]float64{"relay": 1.5},
+	}
+	tk := usageTokens{Input: 1000000, Output: 1000000, CacheRead: 1000000, CacheWrite: 1000000}
+	// (2+8+0.2+4) = 14.2；直连倍率 1.0
+	if got, ok := p.cost("m", "direct", tk); !ok || got < 14.199 || got > 14.201 {
+		t.Fatalf("直连费用应为 14.2，得到 %.4f ok=%v", got, ok)
+	}
+	// 中转站倍率 1.5
+	if got, ok := p.cost("m", "relay", tk); !ok || got < 21.299 || got > 21.301 {
+		t.Fatalf("倍率 1.5 后应为 21.3，得到 %.4f ok=%v", got, ok)
+	}
+	// 未配单价：不给 0，返回 ok=false
+	if got, ok := p.cost("unknown-model", "direct", tk); ok || got != 0 {
+		t.Fatalf("未配单价应返回 ok=false / 0，得到 %.4f ok=%v", got, ok)
+	}
+	// 倍率缺省 1.0、非法倍率按缺省
+	p.Multipliers["zero"] = 0
+	if got := p.multiplierOf("zero"); got != 1.0 {
+		t.Fatalf("非法倍率应按 1.0，得到 %v", got)
+	}
+}
+
 // TestUsagePrune 看护保留策略：超龄删、超条数删最旧，保留最新。
 func TestUsagePrune(t *testing.T) {
 	a := newUsageTestApp(t)
@@ -163,6 +273,42 @@ func TestUsagePrune(t *testing.T) {
 	// 空库再跑一次不炸也不删
 	if n, err := a.Store.UsagePrune("", 200000); err != nil || n != 0 {
 		t.Fatalf("空跑不应删任何东西，得到 n=%d err=%v", n, err)
+	}
+}
+
+// TestUsageCleanupRange 看护「按日期范围清理」的边界（含首尾、倒序入参）。
+func TestUsageCleanupRange(t *testing.T) {
+	a := newUsageTestApp(t)
+	seedUsageRows(t, a,
+		usageRow{TS: "2026-10-01 10:00:00", Model: "a", OK: true},
+		usageRow{TS: "2026-10-05 10:00:00", Model: "b", OK: true},
+		usageRow{TS: "2026-10-09 10:00:00", Model: "c", OK: true},
+	)
+	rec := httptest.NewRecorder()
+	a.handleUsageCleanup(rec, httptest.NewRequest("POST", "/api/usage/cleanup",
+		jsonBody(map[string]any{"from": "2026-10-09", "to": "2026-10-05"})))
+	if rec.Code != 200 {
+		t.Fatalf("清理应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	var out struct{ Deleted int64 }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Deleted != 2 {
+		t.Fatalf("倒序入参也要删 2 条（10-05 与 10-09），得到 %d", out.Deleted)
+	}
+	if n := a.Store.UsageCount(); n != 1 {
+		t.Fatalf("应剩 1 条，得到 %d", n)
+	}
+	// 空范围必须被挡住（不能删全表）
+	rec = httptest.NewRecorder()
+	a.handleUsageCleanup(rec, httptest.NewRequest("POST", "/api/usage/cleanup",
+		jsonBody(map[string]any{"from": "", "to": ""})))
+	if rec.Code != 400 {
+		t.Fatalf("空范围应 400，得到 %d", rec.Code)
+	}
+	if n := a.Store.UsageCount(); n != 1 {
+		t.Fatalf("空范围不能删数据，剩 %d 条", n)
 	}
 }
 

@@ -1990,23 +1990,23 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   （/chat/completions、/messages、/responses）；「拉取模型」「测试连通」
   也按协议选端点与鉴权头（Anthropic 用 x-api-key + anthropic-version，
   其余 Bearer）。
-- **思考档位对照表**：档位清单由 `guessReasoningLevels(protocol, modelID)`
-  按协议+模型 ID 推断（/models 拉不到能力信息，同一模型在不同协议下档位
-  不同）；`effectiveReasoningLevels` 用同一口径把存量配置里的旧推断档位
-  （子集）自动刷新到当前版本——菜单档位没有手工编辑入口，全靠它跟随升级。
-  UI 文案 THINK_LABELS（开/关/低/中/高/最大）。
+- **思考档位（与模型彻底解绑）**：全系统固定六档 `none` / `low` / `medium` /
+  `high` / `xhigh` / `max`（显示名 None/Low/Medium/High/Extra High/Max，
+  前端 THINK_LABELS）。任何模型、任何渠道都显示同一套，由用户自己选——
+  不再按模型名推断，也不采用服务端 `/models` 上报的
+  `effort.supported_levels`（未知档位透传到前端只会「能选、后端 400」）。
+  模型支不支持、服务端认不认都不在这里管：能自动降级就降级，报错让用户
+  自己换档。老会话库里的档位兼容读：`disabled` → `none`、`enabled`（只开关
+  不指深浅）→ 空串（跟随服务端默认），迁移 0016 一次性归一存量数据。
 
-  | 协议 | 适用模型 | 菜单档位 | 请求报文 |
-  |---|---|---|---|
-  | Anthropic 原生 | claude-* | 开/关/低/中/高/**最大** | `thinking{type:enabled,budget_tokens}`：low=2048、medium=6144、high=12288、max=24576、enabled=6144；disabled 与空串省略 thinking 即不思考。max_tokens 必须大于预算（不足自动抬升），思考时不发 temperature |
-  | OpenAI Responses | gpt-5* / o3 / o4 | 关/低/中/高（无 max） | `reasoning.effort`：low/medium/high 原样；disabled 与空串省略 reasoning（gpt-5 服务端默认 medium）；推理模型思考关不掉，「关」=不发参数；max 归 high（兼容映射） |
-  | OpenAI 兼容 | deepseek-* | 开/关/低/高/**最大** | `thinking{type}` 开关 + `reasoning_effort` low/high/max 原样透传 |
-  | OpenAI 兼容 | gpt-5* / o3 / o4 | 低/中/高 | `reasoning_effort`（官方 chat/completions 也支持，无关闭档） |
-  | OpenAI 兼容 | claude-*（走网关） | 开/关/低/中/高 | 维持既有口径（thinking{type}/reasoning_effort 各自透传；不给 max——多数网关不认，选了不生效不如不列） |
+  | 渠道协议 | 请求报文 |
+  |---|---|
+  | OpenAI 兼容（chat/completions） | `reasoning_effort`：六档原样发（none…max）；空串不干预 |
+  | OpenAI Responses（/v1/responses） | `reasoning.effort`：六档原样发（none…max）；空串不干预 |
+  | Anthropic 原生（/v1/messages） | `none` → `thinking:{type:disabled}`；其余五档 → `thinking:{type:adaptive}` + 顶层 `output_config.effort` 原样发。不再用 `budget_tokens`（老映射已删，也不为思考抬 `max_tokens`）；adaptive 时不发 temperature |
 
-  会话级档位 PATCH 白名单（server.go）= 枚举全集
-  `enabled/disabled/low/medium/high/max` + 空串，**不分协议**——渠道协议
-  切换后档位串由协议层各自映射，校验只挡非法值。
+  会话级档位 PATCH 白名单（server.go）= 六档 + 空串（`enabled`/`disabled`
+  归一后接受），建会话路径同一套校验（sessioncreate.go）。
 - **usage 归一**：Anthropic 的 `cache_read_input_tokens` /
   `cache_creation_input_tokens` 映入 Usage 的 CacheReadTokens /
   CacheCreationTokens（写入量不计入命中）；Responses 的

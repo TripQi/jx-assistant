@@ -78,9 +78,9 @@ type ChatRequest struct {
 	// 流尾统计：OpenAI 兼容端（DeepSeek/GLM 等）要求显式开启才在最后一个
 	// chunk 附带 usage（缓存命中率的数据来源）
 	StreamOptions *StreamOptionsCfg `json:"stream_options,omitempty"`
-	// 思考控制：DeepSeek/智谱等用 thinking{type}，OpenAI o/gpt-5 系用 reasoning_effort
-	Thinking        *ThinkingCfg `json:"thinking,omitempty"`
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	// 思考控制：全系统固定六档（thinkingLevels），chat/completions 一律走
+	// reasoning_effort 原样透传——不再按模型挑 thinking{type} 开关那套老口径。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// 以下三个参数主循环不设置（服务端默认），供协议转换与测试用：
 	// Anthropic 必填 max_tokens（协议层会兜底默认值）；temperature 三协议都
 	// 透传；tool_choice 按 OpenAI 语义（auto/none/required/具名工具）。
@@ -105,25 +105,16 @@ type ImageURL struct {
 	URL string `json:"url"`
 }
 
-// ThinkingCfg 是 DeepSeek/GLM 风格的思考开关参数。
-type ThinkingCfg struct {
-	Type string `json:"type"` // enabled | disabled
-}
-
-// ApplyThinking 按档位设置请求的思考参数；空串=不干预（用服务端默认）。
-// enabled/disabled → thinking{type}；其余非空档位（low/medium/high/max 等，
-// 以服务端 supported_levels 为准）→ reasoning_effort 原样透传。
+// ApplyThinking 把会话思考档位落到请求。档位与模型解绑：六档一律走
+// reasoning_effort 原样透传（none…max），空串=不干预（跟随服务端默认）。
+// 老会话库里的 disabled 归一到 none、enabled（只开关不指深浅）归一到空串；
+// 认不出的串同样按不干预处理——不替用户瞎猜，报错让用户自己换档。
 func (r *ChatRequest) ApplyThinking(level string) {
-	switch level {
-	case "enabled", "disabled":
-		r.Thinking = &ThinkingCfg{Type: level}
-		r.ReasoningEffort = ""
-	case "":
-		// 不干预
-	default:
-		r.Thinking = nil
-		r.ReasoningEffort = level
+	lv, ok := normalizeThinkingLevel(level)
+	if !ok {
+		lv = ""
 	}
+	r.ReasoningEffort = lv
 }
 
 // StreamCallbacks 把流式输出回调给调用方：思考增量、正文增量、完整的工具调用

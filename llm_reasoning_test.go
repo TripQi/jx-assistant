@@ -96,19 +96,24 @@ func TestFillReasoningStubIdempotent(t *testing.T) {
 	}
 }
 
-// 思考档位的线上报文口径：开/关走 thinking{type}（DeepSeek/GLM 风格），强度档
-//（low/high/max 等）走 reasoning_effort 原样透传且不再发 thinking；空串不干预。
+// 思考档位的线上报文口径：六档一律走 reasoning_effort 原样透传（none…max），
+// 空串不干预；老值 disabled 归一到 none、enabled 归一到不干预，认不出的串同样
+// 不干预（报错让用户自己换档，不替用户猜）。
 func TestApplyThinking(t *testing.T) {
 	cases := []struct {
 		level    string
 		wantJSON string // 附加在基础报文后的键（不含外层花括号）
 	}{
 		{"", ``},
-		{"enabled", `"thinking":{"type":"enabled"}`},
-		{"disabled", `"thinking":{"type":"disabled"}`},
+		{"enabled", ``},
+		{"disabled", `"reasoning_effort":"none"`},
+		{"none", `"reasoning_effort":"none"`},
 		{"low", `"reasoning_effort":"low"`},
+		{"medium", `"reasoning_effort":"medium"`},
 		{"high", `"reasoning_effort":"high"`},
+		{"xhigh", `"reasoning_effort":"xhigh"`},
 		{"max", `"reasoning_effort":"max"`},
+		{"minimal", ``}, // 六档之外：不干预
 	}
 	for _, c := range cases {
 		req := ChatRequest{Model: "m", Messages: []Message{}, Stream: true}

@@ -122,15 +122,16 @@ func anthropicProtocol() llmProtocol {
 // anthropicRequest /v1/messages 请求体。max_tokens 是必填项（与 OpenAI 可省
 // 不同），由 marshalAnthropic 保证非零。
 type anthropicRequest struct {
-	Model         string                 `json:"model"`
-	System        string                 `json:"system,omitempty"`
-	Messages      []anthropicMessage     `json:"messages"`
-	MaxTokens     int                    `json:"max_tokens"`
-	Temperature   *float64               `json:"temperature,omitempty"`
-	Tools         []anthropicTool        `json:"tools,omitempty"`
-	ToolChoice    *anthropicToolChoice   `json:"tool_choice,omitempty"`
-	Thinking      *anthropicThinkingCfg  `json:"thinking,omitempty"`
-	Stream        bool                   `json:"stream"`
+	Model        string                `json:"model"`
+	System       string                `json:"system,omitempty"`
+	Messages     []anthropicMessage    `json:"messages"`
+	MaxTokens    int                   `json:"max_tokens"`
+	Temperature  *float64              `json:"temperature,omitempty"`
+	Tools        []anthropicTool       `json:"tools,omitempty"`
+	ToolChoice   *anthropicToolChoice  `json:"tool_choice,omitempty"`
+	Thinking     *anthropicThinkingCfg `json:"thinking,omitempty"`
+	OutputConfig *anthropicOutputCfg   `json:"output_config,omitempty"`
+	Stream       bool                  `json:"stream"`
 }
 
 // anthropicMessage 消息体：role 只剩 user/assistant（system 提到顶层参数），
@@ -179,32 +180,15 @@ type anthropicToolChoice struct {
 	Name string `json:"name,omitempty"`
 }
 
-// anthropicThinkingCfg 思考配置：budget_tokens 下限 1024，且必须小于
-// max_tokens（不足时 marshalAnthropic 自动抬升 max_tokens）。
+// anthropicThinkingCfg 思考配置：官方现行口径是 adaptive（让模型自己决定
+// 思考多深），深浅由顶层 output_config.effort 控制；none 档用 disabled。
 type anthropicThinkingCfg struct {
-	Type         string `json:"type"` // enabled
-	BudgetTokens int    `json:"budget_tokens"`
+	Type string `json:"type"` // adaptive | disabled
 }
 
-// anthropicThinkingBudget 把会话思考档位映射成 Anthropic 的思考预算。
-// enabled（只开关不指深浅）给中档；disabled 与空串不干预（Anthropic 默认不思考，
-// 没有 disabled 字样，省略即关闭）。max 档给 24k，是 deepseek 系 effort 语义
-// 里「能开多大开多大」的近似。
-func anthropicThinkingBudget(level string) int {
-	switch level {
-	case "low":
-		return 2048
-	case "medium":
-		return 6144
-	case "high":
-		return 12288
-	case "max":
-		return 24576
-	case "enabled":
-		return 6144
-	default: // "" / "disabled"：不思考
-		return 0
-	}
+// anthropicOutputCfg 思考深浅：官方现行口径（与 thinking{type:adaptive} 配套）。
+type anthropicOutputCfg struct {
+	Effort string `json:"effort"` // low | medium | high | xhigh | max
 }
 
 // marshalAnthropic 统一消息 → /v1/messages 请求体。
@@ -228,12 +212,16 @@ func marshalAnthropic(target LLMTarget, req ChatRequest) ([]byte, error) {
 	if out.MaxTokens <= 0 {
 		out.MaxTokens = 8192
 	}
-	if budget := anthropicThinkingBudget(req.ReasoningEffortOrThinking()); budget > 0 {
-		out.Thinking = &anthropicThinkingCfg{Type: "enabled", BudgetTokens: budget}
-		// 硬约束：max_tokens 必须大于思考预算（否则 API 400）
-		if out.MaxTokens <= budget {
-			out.MaxTokens = budget + 4096
-		}
+	// 思考档位：none → thinking{type:disabled}；其余五档 → adaptive +
+	// output_config.effort 原样发（官方推荐口径，不再折成 budget_tokens）。
+	switch lv := req.ReasoningEffort; lv {
+	case "":
+		// 不干预（跟随服务端默认）
+	case "none":
+		out.Thinking = &anthropicThinkingCfg{Type: "disabled"}
+	default:
+		out.Thinking = &anthropicThinkingCfg{Type: "adaptive"}
+		out.OutputConfig = &anthropicOutputCfg{Effort: lv}
 		// 思考模式下 temperature 只接受 1：显式带了非 1 值会 400，去掉交给服务端默认
 		out.Temperature = nil
 	}
@@ -250,15 +238,6 @@ func marshalAnthropic(target LLMTarget, req ChatRequest) ([]byte, error) {
 		out.ToolChoice = tc
 	}
 	return json.Marshal(out)
-}
-
-// ReasoningEffortOrThinking 返回会话思考档位（ApplyThinking 把档位拆进了
-// Thinking.Type 或 ReasoningEffort 两个字段，协议转换方拿的是原始档位串）。
-func (r *ChatRequest) ReasoningEffortOrThinking() string {
-	if r.Thinking != nil {
-		return r.Thinking.Type
-	}
-	return r.ReasoningEffort
 }
 
 // toAnthropicToolChoice OpenAI 语义的 tool_choice（auto/none/required/具名）
@@ -614,10 +593,9 @@ type responsesTool struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
-// responsesReasoning 思考控制：只有 effort 一档（Responses 没有 disabled，
-// 不干预即服务端默认；enabled 语义与「服务端默认」重合，同样省略）。
+// responsesReasoning 思考控制：effort 六档原样发（none…max）。
 type responsesReasoning struct {
-	Effort string `json:"effort"` // low | medium | high
+	Effort string `json:"effort"` // none | low | medium | high | xhigh | max
 }
 
 // marshalResponses 统一消息 → /v1/responses 请求体。
@@ -633,7 +611,8 @@ func marshalResponses(target LLMTarget, req ChatRequest) ([]byte, error) {
 		Temperature:  req.Temperature,
 		Stream:       true,
 	}
-	if effort := responsesEffort(req.ReasoningEffortOrThinking()); effort != "" {
+	// 思考档位六档原样发（none…max），空串=不干预
+	if effort := req.ReasoningEffort; effort != "" {
 		out.Reasoning = &responsesReasoning{Effort: effort}
 	}
 	if n := req.MaxTokens; n > 0 {
@@ -658,19 +637,6 @@ func marshalResponses(target LLMTarget, req ChatRequest) ([]byte, error) {
 		out.ToolChoice = map[string]any{"type": "function", "name": tc}
 	}
 	return json.Marshal(out)
-}
-
-// responsesEffort 思考档位 → Responses effort：low/medium 原样、high/max 归
-// high（Responses 只有这三档）；enabled/disabled/空串不干预。
-func responsesEffort(level string) string {
-	switch level {
-	case "low", "medium":
-		return level
-	case "high", "max":
-		return "high"
-	default: // "" / enabled / disabled
-		return ""
-	}
 }
 
 // toResponsesInput 统一消息 → instructions + input 数组。

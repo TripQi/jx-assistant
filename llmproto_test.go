@@ -116,21 +116,26 @@ func TestMarshalAnthropicRequestConversion(t *testing.T) {
 	}
 }
 
-// 思考档位 → thinking{enabled,budget_tokens} 映射与 max_tokens 硬约束
-//（budget 必须 < max_tokens，不足自动抬升）。
+// 思考档位 → Anthropic 官方现行口径：none → thinking{type:disabled}，其余五档
+// → thinking{type:adaptive} + output_config.effort 原样发；不再有 budget_tokens
+// 映射，也不再为思考抬升 max_tokens。
 func TestMarshalAnthropicThinking(t *testing.T) {
 	cases := []struct {
-		level    string
-		budget   int   // 0 = 不带 thinking
-		maxTok   int   // 期望 max_tokens（含自动抬升后的值）
-		maxOut   int   // LLMTarget.MaxOutput（0 = 未声明，走默认 8192）
+		level      string
+		wantThink  string // "" = 不带 thinking
+		wantEffort string // "" = 不带 output_config
+		maxTok     int    // 期望 max_tokens（未声明 MaxOutput 时默认 8192）
+		maxOut     int    // LLMTarget.MaxOutput（0 = 未声明）
 	}{
-		{"", 0, 8192, 0},
-		{"disabled", 0, 8192, 0},
-		{"low", 2048, 8192, 0},
-		{"enabled", 6144, 8192, 0},
-		{"high", 12288, 16384, 0}, // 8192 <= 12288 → 抬到 budget+4096
-		{"max", 24576, 32768, 32768},
+		{"", "", "", 8192, 0},
+		{"enabled", "", "", 8192, 0}, // 老值：跟随服务端默认
+		{"none", "disabled", "", 8192, 0},
+		{"disabled", "disabled", "", 8192, 0}, // 老值兼容
+		{"low", "adaptive", "low", 8192, 0},
+		{"medium", "adaptive", "medium", 8192, 0},
+		{"high", "adaptive", "high", 8192, 0},
+		{"xhigh", "adaptive", "xhigh", 8192, 0},
+		{"max", "adaptive", "max", 32768, 32768}, // 档位再大也不抬 max_tokens
 	}
 	for _, c := range cases {
 		req := ChatRequest{Messages: []Message{TextMessage("user", "hi")}}
@@ -145,6 +150,9 @@ func TestMarshalAnthropicThinking(t *testing.T) {
 				Type         string `json:"type"`
 				BudgetTokens int    `json:"budget_tokens"`
 			} `json:"thinking"`
+			OutputConfig *struct {
+				Effort string `json:"effort"`
+			} `json:"output_config"`
 			Temperature *float64 `json:"temperature"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
@@ -153,17 +161,26 @@ func TestMarshalAnthropicThinking(t *testing.T) {
 		if raw.MaxTokens != c.maxTok {
 			t.Errorf("档位 %q: max_tokens=%d，期望 %d", c.level, raw.MaxTokens, c.maxTok)
 		}
-		if c.budget == 0 {
+		if c.wantThink == "" {
 			if raw.Thinking != nil {
 				t.Errorf("档位 %q 不该带 thinking: %s", c.level, body)
 			}
-		} else {
-			if raw.Thinking == nil || raw.Thinking.Type != "enabled" || raw.Thinking.BudgetTokens != c.budget {
-				t.Errorf("档位 %q thinking 映射错误: %v（报文 %s）", c.level, raw.Thinking, body)
-			}
+		} else if raw.Thinking == nil || raw.Thinking.Type != c.wantThink {
+			t.Errorf("档位 %q thinking.type 错误: %v（报文 %s）", c.level, raw.Thinking, body)
 		}
-		if raw.Temperature != nil {
-			t.Errorf("不应携带 temperature: %s", body)
+		if raw.Thinking != nil && raw.Thinking.BudgetTokens != 0 {
+			t.Errorf("档位 %q 不该再发 budget_tokens: %s", c.level, body)
+		}
+		if c.wantEffort == "" {
+			if raw.OutputConfig != nil {
+				t.Errorf("档位 %q 不该带 output_config: %s", c.level, body)
+			}
+		} else if raw.OutputConfig == nil || raw.OutputConfig.Effort != c.wantEffort {
+			t.Errorf("档位 %q output_config.effort 错误: %v（报文 %s）", c.level, raw.OutputConfig, body)
+		}
+		// adaptive（思考开着）时 temperature 会 400，必须去掉；disabled/不干预保留
+		if c.wantThink == "adaptive" && raw.Temperature != nil {
+			t.Errorf("档位 %q 思考开着时不应携带 temperature: %s", c.level, body)
 		}
 	}
 }
@@ -394,11 +411,13 @@ func TestMarshalResponsesRequestConversion(t *testing.T) {
 	}
 }
 
-// 思考档位 → effort：low/medium 原样、high/max→high、enabled/disabled/空串省略。
+// 思考档位 → reasoning.effort：六档原样发（none…max），空串省略；
+// 老值 disabled → none、enabled → 省略。
 func TestResponsesEffortMapping(t *testing.T) {
 	cases := map[string]string{
-		"": "", "enabled": "", "disabled": "",
-		"low": "low", "medium": "medium", "high": "high", "max": "high",
+		"": "", "enabled": "",
+		"none": "none", "disabled": "none",
+		"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
 	}
 	for level, want := range cases {
 		req := ChatRequest{Messages: []Message{TextMessage("user", "hi")}}

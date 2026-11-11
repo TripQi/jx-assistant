@@ -692,6 +692,9 @@
               <div class="sf-label">更新检查源</div>
               <input id="set-update-url" class="pf-input" placeholder="https://公司服务端:2227/updates/latest" autocomplete="off" spellcheck="false">
               <p class="sf-desc">软件更新检查地址（填 off 关闭检查）；接入向导会自动填好。每小时检查一次，有新版会在页顶提示。检查与安装操作在 设置 · 关于 · 软件更新。</p>
+              <!-- 二开版本：这一栏保留（老配置不丢、向导继续写），但程序自身的更新
+                   检查已被源码级开关屏蔽，填了不生效——避免用户以为没保存成功 -->
+              <p class="sf-desc" id="set-update-url-off" style="display:none"><b>二开版本已停用</b>：程序自身更新已被源码级屏蔽（update.go 的 SelfUpdateDisabled），此处填写的地址不生效。</p>
             </div>
           </div>
           <p class="tip">网络访问设置保存在服务端；远程接入改动即时生效，局域网绑定改动重启程序后生效。</p>
@@ -865,9 +868,14 @@
               </div>
             </div>
           </div>
+          <!-- 二开版本（fork/disable-self-update）：程序自身更新被 update.go 的
+               SelfUpdateDisabled 源码级屏蔽——本块控件由 app-settings.js 的
+               refreshUpdateBox 按 /api/status 的 update.disabled 整体收起，
+               只留下面那句说明。开关改回 false 即自动恢复原样，前端一行都不用动。 -->
           <div class="gen-section">
             <h4>软件更新</h4>
-            <div class="set-field">
+            <p class="sf-desc" id="update-disabled-note" style="display:none">二开版本已禁用「程序自身更新」：不检查上游发布，也不会下载或替换本程序（技能、组件与运行时更新不受影响）。</p>
+            <div class="set-field" id="update-man-box">
               <p class="sf-desc" id="update-man-state">当前版本 -</p>
               <div class="update-man-actions">
                 <button id="btn-update-check" class="pf-add" type="button">立即检查更新</button>

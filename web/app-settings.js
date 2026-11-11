@@ -1693,6 +1693,19 @@ bindRemoteInput('set-update-mode', 'updateMode');
 
 /* ---------- 软件更新（update_blocks.go 分块静默更新） ---------- */
 
+// syncSelfUpdateOff 二开版本（update.go 的 SelfUpdateDisabled）的界面处置：
+// off=true 时收起「软件更新」整块控件（按钮/更新方式下拉），只留一句「已禁用」
+// 说明；「网络访问」页的更新检查地址栏保留但标注不生效——用户填了不生效却没
+// 提示，最容易当成保存失败来排障。
+function syncSelfUpdateOff(off) {
+  const box = $('update-man-box');
+  if (box) box.style.display = off ? 'none' : '';
+  const note = $('update-disabled-note');
+  if (note) note.style.display = off ? '' : 'none';
+  const addrOff = $('set-update-url-off');
+  if (addrOff) addrOff.style.display = off ? '' : 'none';
+}
+
 // refreshUpdateBox 设置页「软件更新」分区：当前/最新版本、最近检查、就绪待
 // 重启等状态一屏汇总（/api/status 的 update 字段）；设置页打开时与手动检查后刷新。
 async function refreshUpdateBox() {
@@ -1702,6 +1715,9 @@ async function refreshUpdateBox() {
   let st;
   try { st = await api('/api/status'); } catch (e) { el.textContent = '状态获取失败：' + e.message; return; }
   const u = st.update || {};
+  // 二开版本（update.go 的 SelfUpdateDisabled）：程序自身更新整个停用——本区控件
+  // 收起只留一句说明，网络访问页的检查地址栏标注「不生效」（字段仍保留，老配置不丢）
+  syncSelfUpdateOff(!!u.disabled);
   let text = '当前版本 ' + (u.current || '-') + '　·　最新版本 ' + (u.latest || '未知');
   if (u.pendingRestart && u.pendingVersion) {
     text += '　·　<b>新版本 ' + esc(u.pendingVersion) + ' 已就绪，重启软件后生效</b>';

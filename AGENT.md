@@ -2134,3 +2134,36 @@ deadlineMs 倒计时截止——ask_user_question 可用 timeout_sec 设秒数�
   等装有该校验的客户端基本淘汰后，切换为**纯日期式**（与客户端版本同款 2026MMDD-N）。届时改
   `打包\发布静默更新.ps1` 的 `$RuntimeVersion` 一处即可。
 - 铁律：**重打 runtime 块（哪怕一行没改）必须伴随新发布版本号**；绝不复用版本号发不同哈希。
+
+## 二开版本屏蔽「程序自身更新」（分支 fork/disable-self-update，2026-11-11）
+
+本仓库是二开版本（`main` 保持上游镜像，二开改动走 `fork/` 前缀的分支）。上游的更新检查会
+静默换掉本程序 exe、或用完整安装包覆盖整个安装——等于把二开成果顶掉且不可逆，因此加了一个
+**源码级开关**：
+
+- **开关位置**：`update.go` 顶部 `const SelfUpdateDisabled = true`（注释里列明为真时的全部
+  效果）。恢复上游行为＝改回 `false`，其他一行都不用动：接口守卫与前端界面都只认这个开关
+  经 `/api/status` 下发的 `disabled` 标志。
+- 为真时的行为（守卫分级，都在 `update.go` / `update_blocks.go` / `server.go`）：
+  - `StartUpdateChecker` 不拉发布源——`startUpdatePolling("")` 起的那条轮询里
+    `checkUpdateOnce` 见开关即早退，**一个发布源请求都不发**；留这条同节奏轮询只为
+    「企业技能包/工作流自动更新」（`autoUpdateMarketSkills` 原本搭在更新轮询上，属市场的事，
+    不该被连坐停掉）。
+  - `POST /api/update/check`、`/api/update/installer`、`/api/update/restart` 一律 400
+    「二开版本已禁用程序自身更新」；`downloadAndRunInstaller`、`applyEngineBlock` 各再兜一道
+    （不管调用方从哪进来都换不掉 exe）。
+  - `/api/status` 的 `update` 走 `statusUpdateSnapshot()`：`available` 恒 false、
+    不带 `pendingRestart`、多一个 `disabled: true`；内部状态机（`updateSnapshot`）不动，
+    免得搅乱既有状态与老单测。
+  - 前端按 `update.disabled` 收起「设置 · 关于 · 软件更新」整块控件（`app-settings.js` 的
+    `syncSelfUpdateOff`，块内 DOM 保留、仅隐藏，翻开关即可复原），只留一句「已禁用」说明；
+    「设置 · 网络访问」的更新检查地址栏保留（老配置与接入向导仍照写）但标注「不生效」。
+    更新横幅与左下角「更新」胶囊本来就只看 `available`/`pendingRestart`，恒假即自然不出现。
+- **不受影响，但"发现新版"那一步会跟着停**：技能市场 `marketURL`（手动装卸、发布、企业技能
+  包自动更新照常）、内置组件、便携 Python 运行时、组件块——它们的更新策略代码一行没改，
+  只是清单（`blocks.json`）来自同一个发布源检查。要单独恢复其中任何一项，给它另起一条独立
+  轮询，别把引擎检查打开。
+- 单测：`update_fork_test.go`——开关为真时不发发布源请求、`/api/status` 不出现 `available`
+  与 `pendingRestart`、三条能替换程序本体的路（整包/engine 交换/待重启接力）全部早退；
+  开关改回 false 时这些用例自动 skip。
+

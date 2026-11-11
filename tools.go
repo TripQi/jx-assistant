@@ -136,7 +136,10 @@ func (a *App) toolsFor(mode string) []Tool {
 		// 不必为「这个文件写了什么」专门派个任务；写与执行类工具绝不进场。
 		tools = append([]Tool{listSessionsTool(), readSummaryTool(), dispatchTaskTool(), sendToSessionTool(),
 			stopSessionTool(), a.callAPITool(), componentCallTool(),
-			readFileTool(), listDirTool(), globTool(), grepTool(), webFetchTool(),
+			// read_image 是纯只读动作（看图不需要写真东西），总控自己就能看清
+			// 用户上传的图片再做编排，不必为一个「这张图说了什么」派任务；
+			// ocr 仍留给任务会话（识别是加工动作，不是看）。
+			readFileTool(), listDirTool(), globTool(), grepTool(), webFetchTool(), readImageTool(),
 			deliverResultTool(),
 			enterPlanModeTool(), exitPlanModeTool(), updateGoalTool()}, append(todos, history...)...)
 	} else if mode == "aux" {

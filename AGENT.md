@@ -1063,7 +1063,7 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
 | 模式 | 说明 | 工具 |
 |---|---|---|
 | `task` | 任务会话，实际干活 | 读/写/编辑/glob/grep/shell（含后台作业 job_*）/web_fetch/**web_search（联网搜索，经服务端搜索网关，见 websearch.go；服务端半边是 jxaiserver 的 search.go，协议改动需双侧同步）** + ask_user_question / exit_plan_mode / progress_write + **dispatch_sub（派子对话）** + **call_api（与前端同接口的通用直调，见 callapi.go）** + **request_manager（找长期助理协调，见 requestmgr.go）** + 历史查询 |
-| `assistant` | 数字助理总控（左上角唯一入口，不占侧栏） | 编排：list_sessions / read_session_summary / **dispatch_task（派顶层工作任务）** / send_to_session（给已有会话发话：执行中＝**插话**注入当前轮、空闲＝直接开跑，可选 permission 只能同等或降权）/ stop_session（按用户指示分级停止：协作取消→3 秒未收口自动强制终结，与人工停止按钮同一停止函数、仅触发者不同）/ **call_api（与前端同接口的通用直调，见 callapi.go）** + deliver_result（把派发产出的成果文件登记为本对话的交付卡片，只展示不搬文件）+ **只读四件套 read/list_dir/glob/grep + web_fetch（答小问题：约十步内的查看自己看文件回答，大文件通读与批量分析仍派任务；写与执行类工具绝不给总控——纪律见 agent.go 的 assistantPrompt）**+ 历史查询 |
+| `assistant` | 数字助理总控（左上角唯一入口，不占侧栏） | 编排：list_sessions / read_session_summary / **dispatch_task（派顶层工作任务）** / send_to_session（给已有会话发话：执行中＝**插话**注入当前轮、空闲＝直接开跑，可选 permission 只能同等或降权）/ stop_session（按用户指示分级停止：协作取消→3 秒未收口自动强制终结，与人工停止按钮同一停止函数、仅触发者不同）/ **call_api（与前端同接口的通用直调，见 callapi.go）** + deliver_result（把派发产出的成果文件登记为本对话的交付卡片，只展示不搬文件）+ **只读工具 read/list_dir/glob/grep/read_image + web_fetch（答小问题：约十步内的查看自己看文件回答，大文件通读与批量分析仍派任务；写与执行类工具绝不给总控——纪律见 agent.go 的 assistantPrompt）**+ 历史查询 |
 | `aux` | 辅助对话：早期的只读答疑小会话（右栏可见；新建子对话自 0007 起改为分支克隆，见下节） | 只读文件 + web_fetch/web_search + 历史查询 |
 | `skill-create` | 创建技能：把「怎么做」沉淀成给后续 AI 照做的 SKILL.md 教程——用户点按钮录演示让 AI 分析，或直接派活让 AI 探路总结；**默认完全访问**（演示记录与亲自验证都刚需电脑/浏览器）；提示词核心是「顿悟操作逻辑 + 写大致步骤不写死细节」（推荐/避免方式、快捷键、抗界面变化，见 agent.go `skillPrompt`） | task 全量工具 + **register_skill（注册/覆盖技能）**；演示录制归用户直控（界面按钮经 `/api/demo-record/*`，材料以【演示记录】通知进对话） |
 

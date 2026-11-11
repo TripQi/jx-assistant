@@ -197,8 +197,9 @@ func TestAssistantLosesSubDispatchTools(t *testing.T) {
 func TestAssistantReadOnlyTools(t *testing.T) {
 	a, _ := newDispatchTestApp(t)
 	as := toolNames(t, a, "assistant")
-	// 五个只读工具注册进总控（小问题自己看文件答，不必派任务）
-	for _, keep := range []string{"read", "list_dir", "glob", "grep", "web_fetch"} {
+	// 六个只读工具注册进总控（小问题自己看文件答，不必派任务；
+	// read_image 让总控自己看懂用户上传的图片再做编排）
+	for _, keep := range []string{"read", "list_dir", "glob", "grep", "web_fetch", "read_image"} {
 		if !as[keep] {
 			t.Fatalf("数字助理应有只读工具 %s", keep)
 		}

@@ -88,18 +88,19 @@ func spawnConfinedLocal(ctx context.Context, r sandboxRun) (string, error) {
 }
 
 // startConfinedAsync 在沙箱内启动一个后台作业风格的进程：输出增量写入 w，
-// ctx 取消时终止进程。返回一个等待 goroutine 已启动的标记（作业侧关 done）。
-func startConfinedAsync(ctx context.Context, r sandboxRun, w io.Writer) (func() bool, error) {
+// ctx 取消时终止进程。返回等待函数（wait 返回即进程已死透）与退出文案函数
+// （"exit 3"；取不到码时为空串，调用方按 ctx 状态自己定性）。
+func startConfinedAsync(ctx context.Context, r sandboxRun, w io.Writer) (func() bool, func() string, error) {
 	switch {
 	case isWindowsRuntime:
 		wsAbs, err := filepath.Abs(r.Workspace)
 		if err != nil {
-			return nil, fmt.Errorf("sandbox unavailable: %w", err)
+			return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
 		}
 		r.Workspace = wsAbs
 		child, err := startConfinedWindows(r)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		go child.drain(w)
 		waitDone := make(chan struct{}, 1)
@@ -109,15 +110,15 @@ func startConfinedAsync(ctx context.Context, r sandboxRun, w io.Writer) (func() 
 			close(waitDone)
 		}()
 		wait := func() bool { <-waitDone; return true }
-		return wait, nil
+		return wait, child.exitText, nil
 	case isLinuxRuntime:
 		exe, err := os.Executable()
 		if err != nil {
-			return nil, fmt.Errorf("sandbox unavailable: %w", err)
+			return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
 		}
 		tempDir, err := os.MkdirTemp("", "jx-sbx-")
 		if err != nil {
-			return nil, fmt.Errorf("sandbox unavailable: 创建私有临时目录失败: %w", err)
+			return nil, nil, fmt.Errorf("sandbox unavailable: 创建私有临时目录失败: %w", err)
 		}
 		wrapped := "cd " + shellQuote(r.Dir) + " && { " + r.Command + " ;}"
 		args := []string{"__jx-sandbox-restrict", "restrict", "--mode", r.Policy,
@@ -131,12 +132,12 @@ func startConfinedAsync(ctx context.Context, r sandboxRun, w io.Writer) (func() 
 		if err := cmd.Start(); err != nil {
 			tree.finish()
 			os.RemoveAll(tempDir)
-			return nil, fmt.Errorf("sandbox unavailable: %w", err)
+			return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
 		}
 		tree.attach(cmd)
 		waitDone := make(chan struct{}, 1)
 		go func() { _ = cmd.Wait(); tree.finish(); os.RemoveAll(tempDir); close(waitDone) }()
-		return func() bool { <-waitDone; return true }, nil
+		return func() bool { <-waitDone; return true }, processExitText(cmd), nil
 	case isAndroidRuntime:
 		// 安卓后台作业：同前台，无 OS 级沙箱；内置运行时优先、未就绪回落系统 sh
 		// （见 spawnConfinedLocal 的安卓分支注释）。
@@ -157,14 +158,24 @@ func startConfinedAsync(ctx context.Context, r sandboxRun, w io.Writer) (func() 
 		tree := armTreeKill(cmd)
 		if err := cmd.Start(); err != nil {
 			tree.finish()
-			return nil, fmt.Errorf("sandbox unavailable: %w", err)
+			return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
 		}
 		tree.attach(cmd)
 		waitDone := make(chan struct{}, 1)
 		go func() { _ = cmd.Wait(); tree.finish(); close(waitDone) }()
-		return func() bool { <-waitDone; return true }, nil
+		return func() bool { <-waitDone; return true }, processExitText(cmd), nil
 	default:
-		return nil, fmt.Errorf("sandbox unavailable: 当前平台暂无沙箱后端")
+		return nil, nil, fmt.Errorf("sandbox unavailable: 当前平台暂无沙箱后端")
+	}
+}
+
+// processExitText 取 exec.Cmd 的退出文案（"exit 3"）；未结束或取不到时为空串。
+func processExitText(cmd *exec.Cmd) func() string {
+	return func() string {
+		if cmd.ProcessState == nil {
+			return ""
+		}
+		return fmt.Sprintf("exit %d", cmd.ProcessState.ExitCode())
 	}
 }
 

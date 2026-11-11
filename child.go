@@ -297,16 +297,17 @@ func runArgv(ctx context.Context, r sandboxRun) (string, error) {
 	return strings.TrimRight(decodeCmdOutput(out), "\r\n") + note, err
 }
 
-// startChild 异步启动一个会话命令（后台作业）：输出增量写入 w，返回等待函数。
-// 与同步路径共用沙箱分派与登记（进度面板能看见它一直在跑）。
-func (a *App) startChild(ctx context.Context, r sandboxRun, w io.Writer) (func() bool, error) {
+// startChild 异步启动一个会话命令（后台作业）：输出增量写入 w，返回等待函数
+// 与退出文案函数（"exit 3"；取不到码时为空串）。与同步路径共用沙箱分派与
+// 登记（进度面板能看见它一直在跑）。
+func (a *App) startChild(ctx context.Context, r sandboxRun, w io.Writer) (func() bool, func() string, error) {
 	r = a.childDefaults(r)
 	if r.Argv != nil {
 		r.Timeout = 0 // 异步：不限时，终止只经 ctx
 		cmd, tree := argvCmd(ctx, r, w)
 		if err := cmd.Start(); err != nil {
 			tree.finish()
-			return nil, err
+			return nil, nil, err
 		}
 		tree.attach(cmd)
 		entry := a.registerChild(r, cmd.Process.Pid)
@@ -317,13 +318,13 @@ func (a *App) startChild(ctx context.Context, r sandboxRun, w io.Writer) (func()
 			entry.setExit(childExitInfo(err, ctx))
 			close(done)
 		}()
-		return func() bool { <-done; return true }, nil
+		return func() bool { <-done; return true }, processExitText(cmd), nil
 	}
 	if r.Policy == permFull {
 		cmd, tree := shellCmd(ctx, r, w)
 		if err := cmd.Start(); err != nil {
 			tree.finish()
-			return nil, err
+			return nil, nil, err
 		}
 		tree.attach(cmd)
 		entry := a.registerChild(r, cmd.Process.Pid)
@@ -334,18 +335,32 @@ func (a *App) startChild(ctx context.Context, r sandboxRun, w io.Writer) (func()
 			entry.setExit(childExitInfo(err, ctx))
 			close(done)
 		}()
-		return func() bool { <-done; return true }, nil
+		return func() bool { <-done; return true }, processExitText(cmd), nil
 	}
-	wait, err := startConfinedAsync(ctx, r, w)
+	wait, exit, err := startConfinedAsync(ctx, r, w)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entry := a.registerChild(r, 0)
 	go func() {
 		wait()
-		entry.setExit(childExitInfo(nil, ctx))
+		entry.setExit(exitTextOr(ctx, exit))
 	}()
-	return wait, nil
+	return wait, exit, nil
+}
+
+// exitTextOr 优先用真实退出码文案；取不到码（或本就被取消/超时）时退回
+// ctx 定性（超时 / 被终止 / exit 0）。
+func exitTextOr(ctx context.Context, exit func() string) string {
+	if ctx != nil && ctx.Err() != nil {
+		return childExitInfo(nil, ctx)
+	}
+	if exit != nil {
+		if s := exit(); s != "" {
+			return s
+		}
+	}
+	return childExitInfo(nil, ctx)
 }
 
 // shellCmd 起一个「输出进 w」的 shell 子进程（不受限档位的异步路径）。

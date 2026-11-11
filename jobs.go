@@ -124,7 +124,7 @@ func (a *App) startJob(t *toolContext, command, shell, cwd, policy, origin strin
 	// 「运行中的程序」登记都在那一处；不限时，终止只经 ctx（job_kill）。
 	spec := sandboxRun{Dir: cwd, Command: command, Shell: shell, Policy: policy,
 		Workspace: t.workspace(), Remote: t.sess, Label: "job:run_in_background"}
-	wait, err := a.startChild(ctx, spec, j.buf)
+	wait, exit, err := a.startChild(ctx, spec, j.buf)
 	if err != nil {
 		a.jobsMu.Lock()
 		delete(a.jobs, j.ID)
@@ -139,12 +139,12 @@ func (a *App) startJob(t *toolContext, command, shell, cwd, policy, origin strin
 			j.setExit("被终止（job_kill 或会话停止）")
 			return
 		}
-		// 沙箱路径的 wait 不携带真实退出码（文案照旧），但补一行日志留痕：
-		// 「作业启动后秒退」类异常（2026-10-17 曾发生一次、不可复现）从此可从
-		// 日志对账定位，不再查无实据。运行时长是关键信号：秒退 = 命令没真跑起来。
+		// 退出码一律以真实采集到的为准（沙箱路径此前硬写 "exit 0"，子进程
+		// 秒退也报成功——2026-11「命令通道静默失效」就是这么被掩盖的）。
+		info := exitTextOr(ctx, exit)
+		j.setExit(info)
 		dur := time.Since(j.startedAt).Round(time.Second)
-		j.setExit("exit 0")
-		log.Printf("[作业] %s（%s）正常结束，运行 %s", j.ID, truncateRunes(j.Command, 60), dur)
+		log.Printf("[作业] %s（%s）结束：%s，运行 %s", j.ID, truncateRunes(j.Command, 60), info, dur)
 		if onDone != nil {
 			onDone(j) // 【后台脚本回报】等收尾动作：此时输出缓冲已齐、exitInfo 已定
 		}

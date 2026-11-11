@@ -39,6 +39,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -576,6 +577,31 @@ type confinedChild struct {
 	stdoutR      *os.File
 	stderrR      *os.File
 	tempDir      string
+	started      time.Time
+
+	// 退出码（wait 返回后才有值）。沙箱路径此前从不采集它：子进程在 DLL
+	// 初始化阶段就死（如 0xC0000142）时，调用方只看到「命令执行完成，无输出」，
+	// 与「命令真的跑完但没输出」无法区分——这是 2026-11 那批「沙箱内命令静默
+	// 失效」排查最痛的地方，所以退出码必须原样带出来。
+	exitCode  uint32
+	exitKnown bool
+}
+
+// exitText 退出码文案（"exit 3" / "exit 3221225794 (0xC0000142)"）；
+// wait 之前或取码失败时返回空串。
+func (c *confinedChild) exitText() string {
+	if !c.exitKnown {
+		return ""
+	}
+	return "exit " + exitCodeText(c.exitCode)
+}
+
+// collectExit 读取子进程退出码（wait 返回后调用）。
+func (c *confinedChild) collectExit() {
+	var code uint32
+	if err := windows.GetExitCodeProcess(c.proc, &code); err == nil {
+		c.exitCode, c.exitKnown = code, true
+	}
 }
 
 // kill 终止子进程（job_kill / 超时用）。
@@ -857,7 +883,7 @@ func startConfinedWindows(r sandboxRun) (*confinedChild, error) {
 		return nil, fmt.Errorf("sandbox unavailable: ResumeThread 失败: %w", err)
 	}
 	return &confinedChild{proc: pi.Process, thread: pi.Thread, job: job,
-		stdoutR: stdoutR, stderrR: stderrR, tempDir: tempDir}, nil
+		stdoutR: stdoutR, stderrR: stderrR, tempDir: tempDir, started: time.Now()}, nil
 }
 
 // drain 把两路输出合并写入 w（阻塞到流关闭，适合放 goroutine）。
@@ -898,6 +924,8 @@ func (c *confinedChild) wait(ctx context.Context, timeout time.Duration) (timedO
 		<-waitDone
 		timedOut = true
 	}
+	// 进程已退出（含被终止）：把真实退出码取回来，别让「怎么死的」丢失
+	c.collectExit()
 	return timedOut
 }
 
@@ -911,17 +939,54 @@ func spawnConfinedWindows(ctx context.Context, r sandboxRun) (string, error) {
 	var buf syncBuffer
 	go child.drain(&buf)
 	timedOut := child.wait(ctx, r.Timeout)
+	// 留痕：命令行 + 退出码 + 耗时。「沙箱内秒退无输出」这类问题以前只能靠
+	// 猜（没有退出码、没有事件日志），这条日志是最直接的现场。
+	log.Printf("[沙箱] %s（%s）-> %s，耗时 %s",
+		truncateRunes(r.childCommandLine(), 120), r.Policy,
+		orUnknown(child.exitText()), time.Since(child.started).Round(time.Millisecond))
 	res := strings.TrimRight(decodeCmdOutput(buf.Bytes()), "\r\n")
 	if len(res) > 64*1024 {
 		res = res[:64*1024] + "\n[输出过长已截断]"
 	}
 	if timedOut {
 		res += "\n[命令超时或被取消，已终止]"
+	} else if code, ok := child.exitCodeOr(); ok && code != 0 {
+		// 与完全访问路径（runUnconfinedLocal）同口径：非 0 退出必须让模型看见，
+		// 否则「子进程怎么死」会被伪装成「命令执行完成，无输出」。大数值补十六
+		// 进制——NTSTATUS 崩溃码（如 0xC0000142 DLL 初始化失败）一眼能认。
+		res += fmt.Sprintf("\n[进程退出异常: %s]", exitStatusText(code))
 	}
 	if strings.TrimSpace(res) == "" {
 		res = "（命令执行完成，无输出）"
 	}
 	return res, nil
+}
+
+// exitCodeOr 取子进程退出码（未采集到时 ok=false）。
+func (c *confinedChild) exitCodeOr() (uint32, bool) {
+	return c.exitCode, c.exitKnown
+}
+
+// exitStatusText 退出码文案：普通退出码 "exit status 3"（与 exec 同口径），
+// NTSTATUS 崩溃码补十六进制。
+func exitStatusText(code uint32) string {
+	return "exit status " + exitCodeText(code)
+}
+
+// exitCodeText 十进制退出码；大于 255 的（NTSTATUS 崩溃码）补十六进制。
+func exitCodeText(code uint32) string {
+	if code > 255 {
+		return fmt.Sprintf("%d (0x%08X)", code, code)
+	}
+	return fmt.Sprintf("%d", code)
+}
+
+// orUnknown 退出文案缺省占位（日志用）。
+func orUnknown(s string) string {
+	if s == "" {
+		return "退出码未知"
+	}
+	return s
 }
 
 // syncBuffer 是并发安全的输出缓冲。

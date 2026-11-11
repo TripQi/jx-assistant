@@ -18,13 +18,13 @@ import (
 // 协议实现见 llmproto.go（与 StreamChat 同接口），这里只存类型，调用层零感知。
 
 // ModelCfg 是一个可选模型的定义；ContextWindow 为 0 表示未知，按默认处理。
+// 思考档位不在这里：档位与模型彻底解绑，全系统一套（见 thinkingLevels）。
 type ModelCfg struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name,omitempty"`
-	ContextWindow   int      `json:"contextWindow,omitempty"`
-	MaxOutput       int      `json:"maxOutput,omitempty"`
-	SupportsImages  bool     `json:"supportsImages,omitempty"`
-	ReasoningLevels []string `json:"reasoningLevels,omitempty"` // 思考档位：enabled/disabled/low/medium/high
+	ID             string `json:"id"`
+	Name           string `json:"name,omitempty"`
+	ContextWindow  int    `json:"contextWindow,omitempty"`
+	MaxOutput      int    `json:"maxOutput,omitempty"`
+	SupportsImages bool   `json:"supportsImages,omitempty"`
 }
 
 // ProviderCfg 是一个模型服务提供方。
@@ -67,20 +67,19 @@ const DefaultContextWindow = 262144
 func DefaultProviders() []ProviderCfg {
 	return []ProviderCfg{
 		{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1", Models: []ModelCfg{
-			// 官方思考控制：thinking{type} 开关 + reasoning_effort low/high/max
-			//（minimal/medium/xhigh/ultra 均映射到这三档，菜单不重复列）
-			{ID: "deepseek-flash", Name: "DeepSeek-V4.1-Flash", ContextWindow: 1048576, ReasoningLevels: []string{"enabled", "disabled", "low", "high", "max"}},
-			{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", ContextWindow: 1048576, ReasoningLevels: []string{"enabled", "disabled", "low", "high", "max"}},
+			// 官方思考控制走 reasoning_effort（档位由用户自己选，见 thinkingLevels）
+			{ID: "deepseek-flash", Name: "DeepSeek-V4.1-Flash", ContextWindow: 1048576},
+			{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", ContextWindow: 1048576},
 		}},
 		{ID: "token-plan-cn", Name: "小米 MiMo（Token Plan）", BaseURL: "https://token-plan-cn.xiaomimimo.com/v1", Models: []ModelCfg{
-			{ID: "mimo-v2.6-pro", Name: "MiMo v2.6 Pro", ReasoningLevels: []string{"enabled", "disabled"}},
-			{ID: "mimo-v2.6-flash", Name: "MiMo v2.6 Flash", ReasoningLevels: []string{"enabled", "disabled"}},
+			{ID: "mimo-v2.6-pro", Name: "MiMo v2.6 Pro"},
+			{ID: "mimo-v2.6-flash", Name: "MiMo v2.6 Flash"},
 		}},
 		{ID: "zhipu", Name: "智谱 GLM（按量计费）", BaseURL: "https://open.bigmodel.cn/api/paas/v4",
 			Note: "按 token 计费的开放平台端点；订阅了 Coding Plan 套餐的用户请改用下方的套餐端点，否则扣不到套餐额度"},
 		{ID: "zhipu-coding", Name: "智谱 GLM（Coding Plan 套餐）", BaseURL: "https://open.bigmodel.cn/api/coding/paas/v4", Models: []ModelCfg{
-			{ID: "glm-5.3", Name: "GLM-5.3", ContextWindow: 1048576, MaxOutput: 131072, ReasoningLevels: []string{"enabled", "low", "high", "max"}},
-			{ID: "glm-5.3-flash", Name: "GLM-5.3-Flash（多模态）", ContextWindow: 1048576, MaxOutput: 131072, SupportsImages: true, ReasoningLevels: []string{"enabled", "low", "high", "max"}},
+			{ID: "glm-5.3", Name: "GLM-5.3", ContextWindow: 1048576, MaxOutput: 131072},
+			{ID: "glm-5.3-flash", Name: "GLM-5.3-Flash（多模态）", ContextWindow: 1048576, MaxOutput: 131072, SupportsImages: true},
 		}, Note: "走 Coding Plan 订阅额度；Key 需在「个人编程套餐」页单独创建，与按量计费 Key 不通用。套餐优先保障编程工具，通用 Agent 高负载时段可能限流排队"},
 		{ID: "doubao", Name: "火山方舟 / 豆包（按量计费）", BaseURL: "https://ark.cn-beijing.volces.com/api/v3",
 			Note: "模型填模型 ID（如 doubao-seed-2.0-pro）或接入点 ID（ep- 开头）；Key 在火山引擎方舟控制台创建"},
@@ -105,21 +104,19 @@ func DefaultProviders() []ProviderCfg {
 		// Anthropic 原生协议预置：x-api-key 鉴权 + /v1/messages（llmproto.go）；
 		// baseURL 约定与 OpenAI 一致（填到 /v1）。模型别名即官方短名。
 		{ID: "anthropic", Name: "Anthropic", BaseURL: "https://api.anthropic.com/v1", Protocol: "anthropic", Models: []ModelCfg{
-			// 思考预算档（budget_tokens）：enabled=6144、disabled=不发 thinking、
-			// low/medium/high/max=2048/6144/12288/24576（llmproto.go）
-			{ID: "claude-opus-4-1", Name: "Claude Opus 4.1", ContextWindow: 200000, MaxOutput: 32768, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
-			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
-			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
+			// 思考走官方现行口径：thinking{type:adaptive} + output_config.effort
+			//（none=thinking{type:disabled}；档位由用户自己选，见 thinkingLevels）
+			{ID: "claude-opus-4-1", Name: "Claude Opus 4.1", ContextWindow: 200000, MaxOutput: 32768, SupportsImages: true},
+			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true},
 		}, Note: "密钥用 Anthropic 控制台的 API Key（sk-ant- 开头）；兼容 new-api 等中转站时地址填中转站地址"},
 		// OpenAI Responses 协议预置：官方新一代 /v1/responses 端点（与上面的
 		// chat/completions 预置同一 BaseURL 同一 Key，两种端点并存，按需选）。
-		// 思考档位走 reasoning.effort（llmproto.go）：disabled=不发 reasoning
-		//（服务端默认，gpt-5 官方默认 medium）、low/medium/high=effort 值；
-		// Responses 没有 max 档，推理模型的思考关不掉，disabled 就是最低。
+		// 思考档位走 reasoning.effort，六档原样发（llmproto.go）。
 		{ID: "openai-responses", Name: "OpenAI（Responses 协议）", BaseURL: "https://api.openai.com/v1", Protocol: "responses", Models: []ModelCfg{
-			{ID: "gpt-5", Name: "GPT-5", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
-			{ID: "gpt-5-mini", Name: "GPT-5 mini", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
-			{ID: "o3", Name: "o3", ContextWindow: 200000, MaxOutput: 100000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
+			{ID: "gpt-5", Name: "GPT-5", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true},
+			{ID: "gpt-5-mini", Name: "GPT-5 mini", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true},
+			{ID: "o3", Name: "o3", ContextWindow: 200000, MaxOutput: 100000, SupportsImages: true},
 		}, Note: "官方新一代 Responses 端点；与「OpenAI」预置（chat/completions）同一账号同一 Key，二选一即可"},
 		{ID: "ollama", Name: "Ollama 本地", BaseURL: "http://127.0.0.1:11434/v1"},
 	}
@@ -310,95 +307,30 @@ func guessModelMeta(id string) (ctx int, images bool) {
 	return 0, images
 }
 
-// guessReasoningLevels 按渠道协议 + 模型 ID 推断可用的思考档位（/models 接口
-// 不提供能力信息，只能按已知命名规则推断；返回 nil 表示无思考控制，菜单不
-// 显示二级）。同一模型走不同协议时思考控制完全不同（Anthropic 是
-// thinking.budget_tokens、Responses 是 reasoning.effort、兼容端点是
-// thinking{type}/reasoning_effort），所以协议维度必须参与推断。
-// 档位语义（llmproto.go 的 marshalAnthropic/marshalResponses 落到报文）：
-//   - OpenAI 兼容（默认）：enabled/disabled → thinking{type}；
-//     low/medium/high/max → reasoning_effort 原样透传
-//   - anthropic 协议：enabled=中档预算、disabled=不发 thinking、
-//     low/medium/high/max → budget_tokens 2048/6144/12288/24576
-//   - responses 协议：disabled=不发 reasoning（服务端默认 effort）、
-//     low/medium/high → reasoning.effort（Responses 无 max 档）
-func guessReasoningLevels(protocol, id string) []string {
-	s := strings.ToLower(id)
-	has := func(subs ...string) bool {
-		for _, x := range subs {
-			if strings.Contains(s, x) {
-				return true
-			}
-		}
-		return false
-	}
-	switch protocol {
-	case "anthropic":
-		// Anthropic 原生渠道只有 claude 系；预算档上限 24k（Opus 4.1
-		// 建议 ≤24k，超过收益递减且挤占 max_tokens）
-		if has("claude") {
-			return []string{"enabled", "disabled", "low", "medium", "high", "max"}
-		}
-		return nil
-	case "responses":
-		// Responses 端点的推理模型（gpt-5 / o 系）；没有 disabled 之外的
-		// 关闭手段——推理模型思考关不掉，disabled 档=不发 reasoning，
-		// 服务端按官方默认（gpt-5 为 medium）处理
-		if has("o1") || has("o3") || has("o4") || has("gpt-5") {
-			return []string{"disabled", "low", "medium", "high"}
-		}
-		return nil
-	}
-	switch {
-	case has("claude"):
-		// 兼容网关上的 claude（new-api/OpenRouter 等）：thinking 开关 +
-		// reasoning_effort 两套都部分支持，维持既有档位（协议层各走各的）
-		return []string{"enabled", "disabled", "low", "medium", "high"}
-	case has("o1"), has("o3"), has("o4"), has("gpt-5"):
-		return []string{"low", "medium", "high"} // OpenAI effort 档
-	case has("deepseek-reasoner"), has("-r1"):
-		return []string{"enabled"} // 思考专用模型，只能开
-	case has("deepseek"):
-		// 官方支持 thinking 开关 + reasoning_effort low/high/max（思考默认开、
-		// effort 默认 high；minimal/medium/xhigh/ultra 是这三档的别名映射）
-		return []string{"enabled", "disabled", "low", "high", "max"}
-	case has("glm-5.3"):
-		return []string{"enabled", "low", "high", "max"} // 5.3 起思考常开，用 reasoning_effort 调深浅
-	case has("glm-4.5"), has("glm-4.6"), has("glm-5"):
-		return []string{"enabled", "disabled"}
-	case has("qwen3"), has("kimi"), has("k2"):
-		return []string{"enabled", "disabled"}
-	}
-	return nil
+// thinkingLevels 是全系统唯一的思考档位清单。档位与模型、渠道协议彻底解绑：
+// 任何模型、任何渠道都显示同一套六档，由用户自己选——模型支不支持、服务端
+// 认不认都不在这里猜（能自动降级就降级，报错让用户自己换档）。
+// 内部值 → 显示名（前端 THINK_LABELS）：none/low/medium/high/xhigh/max →
+// None/Low/Medium/High/Extra High/Max。
+func thinkingLevels() []string {
+	return []string{"none", "low", "medium", "high", "xhigh", "max"}
 }
 
-// effectiveReasoningLevels 取模型思考档位的最终展示/使用值：存储值优先
-//（「拉取模型」固化的服务端真实 supported_levels），但存储值是当前按
-// 协议+ID 推断结果的子集时视为过时的自动推断，跟随本版本推断刷新——档位
-// 没有手工编辑入口，存量配置里的值全是程序写入的（保存兜底会把 guess 写死进
-// config），guess 修正后老配置必须能跟着升级，否则用户永远看不到新档位。
-// 协议参与推断（同一 ID 在不同协议渠道档位不同），协议没变过的存量自然按
-// 原协议口径刷新；协议切换后旧档位与新模式对不上（非子集）则原样保留，
-// 重新「拉取模型」即换新。
-func effectiveReasoningLevels(protocol, modelID string, stored []string) []string {
-	guessed := guessReasoningLevels(protocol, modelID)
-	if len(stored) == 0 {
-		return guessed
-	}
-	if guessed == nil {
-		return stored // 该 ID 按命名规则无思考控制：存过值说明拉取到过真实档位
-	}
-	subset := true
-	for _, lv := range stored {
-		if !containsStr(guessed, lv) {
-			subset = false
-			break
+// normalizeThinkingLevel 把档位串归一成六档之一（或空串=跟随服务端默认）。
+// 老会话库里存的是上一代的 enabled/disabled：disabled 归一到 none，enabled
+//（只开关不指深浅）归一到空串；六档之外的串不合规，ok=false 交调用方处理。
+func normalizeThinkingLevel(s string) (level string, ok bool) {
+	switch lv := strings.ToLower(strings.TrimSpace(s)); lv {
+	case "", "enabled":
+		return "", true
+	case "disabled":
+		return "none", true
+	default:
+		if containsStr(thinkingLevels(), lv) {
+			return lv, true
 		}
+		return "", false
 	}
-	if subset {
-		return guessed
-	}
-	return stored
 }
 
 func containsStr(list []string, s string) bool {
@@ -511,11 +443,11 @@ func pingModel(p *ProviderCfg, model string) error {
 }
 
 // FetchModels 从提供方拉取可用模型清单（GET {baseURL}/models），
-// 新条目按 ID 猜测上下文窗口与图片能力自动填好。
-// FetchModels 从提供方拉取可用模型清单（GET {baseURL}/models）。
-// DeepSeek 等较新的兼容端会在清单里直接给出 context_window /
-// max_output_tokens / input_modalities / effort.supported_levels——
-// 这些真实字段优先；只返回 id 的老式端点回退到按 ID 猜测。
+// 新条目按 ID 猜测上下文窗口与图片能力自动填好。DeepSeek 等较新的兼容端
+// 会在清单里直接给出 context_window / max_output_tokens / input_modalities——
+// 这些真实字段优先；只返回 id 的老式端点回退到按 ID 猜测。服务端的
+// effort.supported_levels 不采用：档位全系统固定六档（thinkingLevels），
+// 未知档位透传到前端只会变成「能选、后端 400」。
 func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 	url := strings.TrimRight(p.BaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -552,9 +484,6 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 			MaxOutputTokens int      `json:"max_output_tokens"`
 			InputModalities []string `json:"input_modalities"`
 			Modalities      []string `json:"modalities"`
-			Effort          struct {
-				SupportedLevels []string `json:"supported_levels"`
-			} `json:"effort"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -589,14 +518,9 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 				}
 			}
 		}
-		levels := m.Effort.SupportedLevels
-		if len(levels) == 0 {
-			levels = guessReasoningLevels(p.Protocol, m.ID)
-		}
 		models = append(models, ModelCfg{
 			ID: m.ID, Name: m.Name, ContextWindow: ctx,
 			MaxOutput: m.MaxOutputTokens, SupportsImages: img,
-			ReasoningLevels: levels,
 		})
 	}
 	if len(models) == 0 {

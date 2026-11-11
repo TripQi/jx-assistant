@@ -1,190 +1,102 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 )
 
-// 思考档位推断的协议维度：同一模型 ID 在三种渠道协议下档位不同
-//（Anthropic 预算档 / Responses effort 档 / 兼容端点既有口径）。
-func TestGuessReasoningLevelsByProtocol(t *testing.T) {
+// 档位与模型彻底解绑：全系统一套六档，任何模型、任何渠道看到的是同一份清单。
+func TestThinkingLevelsFixed(t *testing.T) {
+	want := []string{"none", "low", "medium", "high", "xhigh", "max"}
+	if got := thinkingLevels(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("thinkingLevels() = %v，期望 %v", got, want)
+	}
+}
+
+// 老会话库里的档位要能兼容读：disabled → none、enabled（只开关不指深浅）→
+// 空串（跟随服务端默认）；六档原样（大小写/空白归一）；其余串判非法。
+func TestNormalizeThinkingLevel(t *testing.T) {
 	cases := []struct {
-		name, proto, id string
-		want            []string
+		in, want string
+		ok       bool
 	}{
-		{
-			name: "anthropic 渠道 claude 全档含 max", proto: "anthropic", id: "claude-sonnet-4-5",
-			want: []string{"enabled", "disabled", "low", "medium", "high", "max"},
-		},
-		{
-			name: "anthropic 渠道非 claude 无档位", proto: "anthropic", id: "glm-5.3",
-			want: nil,
-		},
-		{
-			name: "responses 渠道 gpt-5", proto: "responses", id: "gpt-5.2",
-			want: []string{"disabled", "low", "medium", "high"},
-		},
-		{
-			name: "responses 渠道 o3", proto: "responses", id: "o3",
-			want: []string{"disabled", "low", "medium", "high"},
-		},
-		{
-			name: "responses 渠道 o4-mini", proto: "responses", id: "o4-mini",
-			want: []string{"disabled", "low", "medium", "high"},
-		},
-		{
-			name: "responses 渠道非推理模型无档位", proto: "responses", id: "gpt-4o",
-			want: nil,
-		},
-		{
-			// OpenAI 官方 chat/completions 对 gpt-5/o 系支持 reasoning_effort
-			//（low/medium/high；档位口径既有行为不变）
-			name: "兼容渠道 gpt-5", proto: "", id: "gpt-5",
-			want: []string{"low", "medium", "high"},
-		},
-		{
-			// 兼容网关上的 claude（new-api/OpenRouter 等）：维持既有档位，
-			// 不带 anthropic 协议特有的 max（reasoning_effort 透传 max 多数
-			// 网关不认识，选了不生效不如不列）
-			name: "兼容渠道 claude 维持旧档", proto: "", id: "claude-opus-4-1",
-			want: []string{"enabled", "disabled", "low", "medium", "high"},
-		},
-		{
-			name: "兼容渠道 deepseek 照旧", proto: "", id: "deepseek-flash",
-			want: []string{"enabled", "disabled", "low", "high", "max"},
-		},
+		{"", "", true},
+		{"none", "none", true},
+		{"LOW", "low", true},
+		{" Medium ", "medium", true},
+		{"high", "high", true},
+		{"xhigh", "xhigh", true},
+		{"max", "max", true},
+		{"disabled", "none", true},
+		{"enabled", "", true},
+		{"minimal", "", false}, // 服务端旧档位名不再透传
+		{"ultra", "", false},
 	}
 	for _, c := range cases {
-		got := guessReasoningLevels(c.proto, c.id)
-		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s：guessReasoningLevels(%q, %q) = %v，期望 %v", c.name, c.proto, c.id, got, c.want)
+		got, ok := normalizeThinkingLevel(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("normalizeThinkingLevel(%q) = (%q, %v)，期望 (%q, %v)", c.in, got, ok, c.want, c.ok)
 		}
 	}
 }
 
-// 思考档位的最终口径：存储值是当前推断的子集 → 视为旧版自动推断写死的，
-// 跟随新版本刷新；拉取到的真实 supported_levels（含推断之外的档位）原样保留。
-func TestEffectiveReasoningLevels(t *testing.T) {
-	cases := []struct {
-		name, proto, id string
-		stored          []string
-		want            []string
-	}{
-		{
-			// 存量 DeepSeek 配置：旧版 guess 写死的开/关两档，本版本补了强度档
-			name: "deepseek 旧推断自动升级", proto: "", id: "deepseek-flash",
-			stored: []string{"enabled", "disabled"},
-			want:   []string{"enabled", "disabled", "low", "high", "max"},
-		},
-		{
-			// 存量 Anthropic 渠道：旧版写死的五档（无 max），本版本补 max
-			name: "anthropic 存量补 max", proto: "anthropic", id: "claude-sonnet-4-5",
-			stored: []string{"enabled", "disabled", "low", "medium", "high"},
-			want:   []string{"enabled", "disabled", "low", "medium", "high", "max"},
-		},
-		{
-			// 存量 Responses 渠道：兼容协议时期写死的三档，本版本补 disabled
-			name: "responses 存量补 disabled", proto: "responses", id: "gpt-5",
-			stored: []string{"low", "medium", "high"},
-			want:   []string{"disabled", "low", "medium", "high"},
-		},
-		{
-			// 协议切换后旧档位对不上新模式（非子集）：原样保留，重新拉取换新
-			name: "协议切换后旧档位保留", proto: "responses", id: "gpt-5",
-			stored: []string{"enabled", "low"},
-			want:   []string{"enabled", "low"},
-		},
-		{
-			// 拉取到的真实档位里有推断不认识的档：以存储值为准
-			name: "真实 supported_levels 不被推断覆盖", proto: "", id: "deepseek-v4-pro",
-			stored: []string{"enabled", "low", "high", "max", "xhigh"},
-			want:   []string{"enabled", "low", "high", "max", "xhigh"},
-		},
-		{
-			name: "存储为空回退推断", proto: "", id: "glm-5.3",
-			stored: nil,
-			want:   []string{"enabled", "low", "high", "max"},
-		},
-		{
-			// 按命名规则无思考控制的模型：存过值说明端点报过真实档位，原样保留
-			name: "推断为 nil 时存储值原样", proto: "", id: "my-custom-model",
-			stored: []string{"low", "high"},
-			want:   []string{"low", "high"},
-		},
-		{
-			name: "推断为 nil 且存储为空", proto: "", id: "llama-3",
-			stored: nil,
-			want:   nil,
-		},
+// 预置模板只声明协议与模型目录，不再逐模型写档位（档位全系统一套）。
+func TestPresetProtocols(t *testing.T) {
+	want := map[string]string{"anthropic": "anthropic", "openai-responses": "responses", "deepseek": ""}
+	for id, wantProto := range want {
+		preset, ok := PresetByID(id)
+		if !ok {
+			t.Fatalf("预置清单里没有 %s", id)
+		}
+		if preset.Protocol != wantProto {
+			t.Errorf("预置 %s 协议类型 %q，期望 %q", id, preset.Protocol, wantProto)
+		}
 	}
-	for _, c := range cases {
-		got := effectiveReasoningLevels(c.proto, c.id, c.stored)
-		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s：effectiveReasoningLevels(%q, %q, %v) = %v，期望 %v", c.name, c.proto, c.id, c.stored, got, c.want)
+	// Anthropic / Responses 预置必须自带模型目录（无 Key 可配的开箱体验）
+	for _, id := range []string{"anthropic", "openai-responses"} {
+		preset, _ := PresetByID(id)
+		if len(preset.Models) == 0 {
+			t.Errorf("预置 %s 应自带模型目录", id)
 		}
 	}
 }
 
-// 预置 DeepSeek 模板必须自带强度档：新用户开箱即有思考强度可选。
-func TestDeepSeekPresetHasEffortLevels(t *testing.T) {
-	preset, ok := PresetByID("deepseek")
-	if !ok {
-		t.Fatal("预置清单里没有 deepseek")
+// 「拉取模型」不采用服务端上报的 effort.supported_levels：未知档位（minimal/
+// ultra 之类）透传到前端只会变成「能选、后端 400」。其余真实字段（上下文、
+// 输出上限、多模态）照旧优先采用。
+func TestFetchModelsIgnoresServerLevels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"deepseek-flash","display_name":"DeepSeek V4.1 Flash","context_window":1048576,
+			 "max_output_tokens":65536,"input_modalities":["text","image"],
+			 "effort":{"supported_levels":["minimal","low","medium","ultra"]}}
+		]}`))
+	}))
+	defer srv.Close()
+	a := &App{}
+	models, err := a.FetchModels(&ProviderCfg{ID: "x", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
 	}
-	for _, m := range preset.Models {
-		for _, lv := range []string{"enabled", "disabled", "low", "high", "max"} {
-			if !containsStr(m.ReasoningLevels, lv) {
-				t.Errorf("预置模型 %s 缺思考档位 %q（现有 %v）", m.ID, lv, m.ReasoningLevels)
-			}
-		}
+	if len(models) != 1 {
+		t.Fatalf("模型条数 %d，期望 1", len(models))
 	}
-}
-
-// 预置 Anthropic 模板开箱即有全档（含 max=预算 24576），与 llmproto 的
-// anthropicThinkingBudget 一一对应。
-func TestAnthropicPresetHasAllLevels(t *testing.T) {
-	preset, ok := PresetByID("anthropic")
-	if !ok {
-		t.Fatal("预置清单里没有 anthropic")
+	m := models[0]
+	if m.ID != "deepseek-flash" || m.Name != "DeepSeek V4.1 Flash" {
+		t.Errorf("id/名称解析错误：%+v", m)
 	}
-	if preset.Protocol != "anthropic" {
-		t.Fatalf("anthropic 预置协议类型错误：%q", preset.Protocol)
+	if m.ContextWindow != 1048576 || m.MaxOutput != 65536 || !m.SupportsImages {
+		t.Errorf("真实字段未采用：%+v", m)
 	}
-	want := []string{"enabled", "disabled", "low", "medium", "high", "max"}
-	for _, m := range preset.Models {
-		if !reflect.DeepEqual(m.ReasoningLevels, want) {
-			t.Errorf("预置模型 %s 档位 %v，期望 %v", m.ID, m.ReasoningLevels, want)
-		}
-		for _, lv := range want {
-			if lv != "disabled" && anthropicThinkingBudget(lv) == 0 {
-				t.Errorf("预置档位 %q 在 anthropicThinkingBudget 里没有预算映射", lv)
-			}
-		}
-	}
-}
-
-// 预置 Responses 模板：协议 responses、模型档位 disabled/low/medium/high
-//（Responses 无 max 档；effort 值在 responsesEffort 里都有映射）。
-func TestResponsesPresetLevels(t *testing.T) {
-	preset, ok := PresetByID("openai-responses")
-	if !ok {
-		t.Fatal("预置清单里没有 openai-responses")
-	}
-	if preset.Protocol != "responses" {
-		t.Fatalf("openai-responses 预置协议类型错误：%q", preset.Protocol)
-	}
-	if len(preset.Models) == 0 {
-		t.Fatal("openai-responses 预置应自带模型目录（无 Key 可配的开箱体验）")
-	}
-	want := []string{"disabled", "low", "medium", "high"}
-	for _, m := range preset.Models {
-		if !reflect.DeepEqual(m.ReasoningLevels, want) {
-			t.Errorf("预置模型 %s 档位 %v，期望 %v", m.ID, m.ReasoningLevels, want)
-		}
-		for _, lv := range []string{"low", "medium", "high"} {
-			if responsesEffort(lv) == "" {
-				t.Errorf("预置档位 %q 在 responsesEffort 里没有 effort 映射", lv)
-			}
-		}
+	// 结构里不再有档位字段：服务端上报的 minimal/ultra 不可能漏到前端
+	raw, _ := json.Marshal(m)
+	var obj map[string]any
+	_ = json.Unmarshal(raw, &obj)
+	if _, has := obj["reasoningLevels"]; has {
+		t.Errorf("模型目录不该再带档位：%s", raw)
 	}
 }

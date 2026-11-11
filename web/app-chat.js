@@ -7220,10 +7220,20 @@ function modelNameOf(key) {
   return (hit && (hit.modelName || hit.modelId)) || mid;
 }
 
-// 思考档位中文文案：语义准确、大小阶梯一目了然（低/中/高/最大；max 译
-//「最大」——「深」「最高」都与「高」分不清大小）。厂家特有档位不在表里
-// 的原样显示。
-const THINK_LABELS = { enabled: '思考·开', disabled: '思考·关', low: '思考·低', medium: '思考·中', high: '思考·高', max: '思考·最大' };
+// 思考档位：全系统固定六档，与模型、渠道协议无关（任何模型都能展开同一套，
+// 由用户自己选；服务端认不认、能自动降级就降级，报错由用户自己换档）。
+// 内部值 = 发给模型的值，显示名按官方口径。
+const THINK_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+const THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+
+// 老草稿里的档位（上一代的 disabled/enabled）归一，与后端 normalizeThinkingLevel 同口径：
+// disabled → none、enabled（只开关不指深浅）→ 空（跟随服务端默认）、认不出的清空。
+function normThinkLevel(lv) {
+  const v = String(lv || '').trim().toLowerCase();
+  if (!v || v === 'enabled') return '';
+  if (v === 'disabled') return 'none';
+  return THINK_LEVELS.includes(v) ? v : '';
+}
 
 // 当前生效的思考档位（会话级 / 首页草稿 / 指定视图的会话）
 function curThinking(view) {
@@ -7267,27 +7277,9 @@ async function pickThinking(level, view) {
   syncComposer(view);
 }
 
-// 默认模型的思考档位（模型菜单的「默认」条目用）
-function levelsOfDefault() {
-  for (const m of state.models || []) {
-    if (m.providerId === state.defaultProvider && m.modelId === state.defaultModel) {
-      return m.reasoningLevels || [];
-    }
-  }
-  return [];
-}
-
 // 悬停展开只在真 hover 指针（鼠标）上生效；触屏没有 hover，思考档位靠点行尾箭头
 const hoverFineMq = window.matchMedia ? window.matchMedia('(hover: hover) and (pointer: fine)') : null;
 let modelSubLeaveTimer = 0; // 指针离开主面板/二级浮窗后的延迟收起计时（见 modelSubHideSoon）
-
-// 该模型的思考档位（「默认」条目取默认模型的档位）
-function modelLevelsOf(key) {
-  if (key === '__default__') return levelsOfDefault();
-  const [pid, mid] = key.split('|');
-  const hit = (state.models || []).find((m) => m.providerId === pid && m.modelId === mid);
-  return (hit && hit.reasoningLevels) || [];
-}
 
 function renderModelPop(view) {
   view = view || popView || mainView;
@@ -7295,13 +7287,12 @@ function renderModelPop(view) {
   const cur = currentModelKey(view);
   // 行尾箭头（带命中区 .lv-hit）：触屏点它开合思考档位；桌面悬停即展开、点它也可展开
   const arrow = '<span class="lv-hit"><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></span>';
-  const defLv = levelsOfDefault();
   let html = '';
   // 公司通道的额度显示在它自己的分组头上（见下面的 quotaBadge）：员工点开模型
   // 选择，公司通道那一段就写着「剩余 N 积分 / 额度已用完」，不额外占一行。
   const companyQuota = state.companyQuota || null;
   const fmtPoints = (n) => (n || 0).toLocaleString('zh-CN');
-  html += `<button class="pop-item model-item ${cur === '__default__' ? 'sel' : ''}${modelPopExpand === '__default__' && defLv.length ? ' exp' : ''}" data-key="__default__"><span>默认（${esc(state.defaultModel || '未配置')}）</span>${defLv.length ? arrow : ''}</button>`;
+  html += `<button class="pop-item model-item ${cur === '__default__' ? 'sel' : ''}${modelPopExpand === '__default__' ? ' exp' : ''}" data-key="__default__"><span>默认（${esc(state.defaultModel || '未配置')}）</span>${arrow}</button>`;
   let lastProv = '';
   for (const m of state.models || []) {
     if (m.providerId !== lastProv) {
@@ -7326,10 +7317,9 @@ function renderModelPop(view) {
       lastProv = m.providerId;
     }
     const k = m.providerId + '|' + m.modelId;
-    const hasLv = m.reasoningLevels && m.reasoningLevels.length;
     // 停用服务商的模型置灰（公司通道出公司自动停用期间仍可见，点了也能选——
     // 会话解析时会自动回落到可用服务商，但选单里如实标注状态）
-    html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k && hasLv ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(m.modelName || m.modelId)}</span>${hasLv ? arrow : ''}</button>`;
+    html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(m.modelName || m.modelId)}</span>${arrow}</button>`;
   }
   pop.innerHTML = html;
   pop.querySelectorAll('.model-item').forEach((b) => {
@@ -7343,17 +7333,16 @@ function renderModelPop(view) {
         if ($('model-sub-pop').classList.contains('hidden')) syncModelSubPop(popView);
         return;
       }
-      const hasLv = !!modelLevelsOf(key).length;
-      modelPopExpand = hasLv ? key : '';
+      modelPopExpand = key;
       pop.querySelectorAll('.model-item.exp').forEach((x) => x.classList.remove('exp'));
-      if (hasLv) b.classList.add('exp');
+      b.classList.add('exp');
       syncModelSubPop(popView);
     };
     b.onclick = async (e) => {
       // 点行尾箭头 = 只开合该行的思考档位浮窗，不选中、不收菜单。
       // 触屏没有 hover，箭头就是开合开关；桌面悬停已能展开，箭头点开可以、
       // 点收不行——收下之后指针还停在行上，合成悬停会把它立刻再弹出来
-      if (e.target.closest('.lv-hit') && modelLevelsOf(key).length) {
+      if (e.target.closest('.lv-hit')) {
         if (hoverFineMq && hoverFineMq.matches) {
           if (modelPopExpand === key) return;
           modelPopExpand = key;
@@ -7382,7 +7371,7 @@ function syncModelSubPop(view) {
   const sub = $('model-sub-pop');
   const main = $('model-pop');
   const key = modelPopExpand;
-  const levels = key ? modelLevelsOf(key) : [];
+  const levels = key ? THINK_LEVELS : [];
   let row = null;
   if (levels.length && !main.classList.contains('hidden')) {
     main.querySelectorAll('.model-item').forEach((b) => { if (b.dataset.key === key) row = b; });

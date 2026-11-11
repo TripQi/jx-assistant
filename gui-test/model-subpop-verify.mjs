@@ -2,17 +2,18 @@
 // 自包含——需要时自动构建隔离实例（mock 模型、独立 data/工作区，落 .jxai/tmp）
 // 并拉起无头 Edge（CDP 9223，沿用 cdp.mjs 约定）。断言与截图落
 // gui-test-screenshots/modelsub-*。交互模型（2026-10 改版）：
-//   桌面悬停整行 = 右侧浮出该行的思考档位；悬停无档位行 = 收起；
+//   档位全系统固定六档（None/Low/Medium/High/Extra High/Max），任何模型行都能展开；
+//   桌面悬停整行 = 右侧浮出这套六档；
 //   点行任意处 = 选中该模型并整体收起（不再顺带弹二级菜单——旧版点击会 toggle，
 //   连点两下互相抵消出现「关不掉」）；点行尾箭头(.lv-hit) = 手动开合档位浮窗；
 //   在未选中的模型行上点档位 = 一并选中该模型再定档。
 // 用例：
 //   A 打开模型菜单：面板可见、无内嵌档位残留、二级浮窗默认收起
-//   B 悬停带档位的模型行：二级浮窗显示、贴行右侧、行标 exp、内容正确；
-//     悬停无档位行 → 浮窗收起
-//   C 点档位「思考·低」：双面板都收起、芯片文案 = 模型名 + 思考·低
+//   B 悬停模型行：二级浮窗显示、贴行右侧、行标 exp、内容=默认+固定六档；
+//     悬停另一行 → 浮窗跟着切到那一行
+//   C 点档位「Low」：双面板都收起、芯片文案 = 模型名 + Low
 //   D 重开菜单：不幽灵弹出上次的浮窗；点行主体 = 选中并整体收起（切到 DeepSeek）
-//   E 点箭头展开；移开指针 250ms 自动收起；在未选中行(GLM)点「思考·高」→ 一并选中并收起
+//   E 点箭头展开；移开指针 250ms 自动收起；在未选中行(GLM)点「High」→ 一并选中并收起
 //   F 点另一行箭头浮窗切档；桌面已展开行再点箭头保持展开；点行主体=选中并收起
 //     （触屏 hover:none 分支无法在无头桌面模拟：本机 Edge setEmulatedMedia 不支持
 //      hover/pointer 特性，点行收起与箭头展开路径已由 D/E/F 覆盖，真机另验收）
@@ -54,9 +55,9 @@ async function up() {
       providers: [{
         id: 'mock', name: 'Mock 服务', baseURL: 'mock', apiKey: '',
         models: [
-          { id: 'glm-5.3', name: 'GLM-5.3', reasoningLevels: ['enabled', 'low', 'high', 'max'] },
-          { id: 'plain-model', name: '无档位模型' },
-          { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', reasoningLevels: ['enabled', 'disabled'] },
+          { id: 'glm-5.3', name: 'GLM-5.3' },
+          { id: 'plain-model', name: '另一个模型' },
+          { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
         ],
       }],
       workspace: join(TMP, 'ws'), updateURL: '',
@@ -106,6 +107,17 @@ async function moveTo(c, x, y) {
   await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round(x), y: Math.round(y) });
   await sleep(200);
 }
+// 打开模型菜单：点芯片；首点偶尔被上一段的异步收尾吃掉（无头 CDP 下的时序），补点一次
+async function openModelMenu(c) {
+  await clickEl(c, `document.getElementById('model-chip')`);
+  await sleep(350);
+  if (!(await state(c)).mainOpen) {
+    await clickEl(c, `document.getElementById('model-chip')`);
+    await sleep(350);
+  }
+  return state(c);
+}
+
 const state = (c) => read(c, `(() => ({
   mainOpen: !document.getElementById('model-pop').classList.contains('hidden'),
   subOpen: !document.getElementById('model-sub-pop').classList.contains('hidden'),
@@ -127,14 +139,15 @@ const flyout = (c, key) => read(c, `(() => {
 async function main() {
   await up();
   const models = (await (await fetch(BASE + '/api/models')).json()).models || [];
-  const target = models.find((m) => (m.reasoningLevels || []).length >= 3)
-    || models.find((m) => (m.reasoningLevels || []).length > 0);
-  const plain = models.find((m) => !(m.reasoningLevels || []).length);
-  if (!target || !plain) throw new Error('mock 模型清单里缺带档位/无档位的模型');
+  // 档位与模型解绑：随便两个模型都该展开同一套六档
+  const target = models[0];
+  const plain = models[1];
+  if (!target || !plain) throw new Error('mock 模型清单不足两个模型');
   const key = target.providerId + '|' + target.modelId;
   const plainKey = plain.providerId + '|' + plain.modelId;
   const rowExpr = `document.querySelector('#model-pop .model-item[data-key="${key}"]')`;
-  const LV_LABEL = { enabled: '思考·开', disabled: '思考·关', low: '思考·低', medium: '思考·中', high: '思考·高', max: '思考·深' };
+  const LV_LABEL = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+  const WANT_LV = ['None', 'Low', 'Medium', 'High', 'Extra High', 'Max'];
 
   const t = await newTab(BASE + '/', 1280, 900);
   try {
@@ -159,18 +172,19 @@ async function main() {
     ok('B2b 浮窗不覆盖主面板任何一行', !b.coversMenu, '');
     ok('B3 浮窗与行垂直方向有交集', b.overlapY, `subTop=${b.subTop.toFixed(0)} rowTop=${b.rowTop.toFixed(0)}`);
     ok('B4 行带 exp 高亮', b.rowExp, '');
-    const want = ['默认（跟随服务）', ...(target.reasoningLevels || []).map((x) => LV_LABEL[x] || x)];
-    ok('B5 内容=默认 + ' + (target.reasoningLevels || []).map((x) => LV_LABEL[x] || x).join('/'),
-      b.items[0] === '默认（跟随服务）' && b.items.length === want.length, JSON.stringify(b.items));
+    const want = ['默认（跟随服务）', ...WANT_LV];
+    ok('B5 内容=默认 + ' + WANT_LV.join('/'),
+      b.items.length === want.length && want.every((x, i) => b.items[i] === x), JSON.stringify(b.items));
     await shot(t, join(SCREEN, 'modelsub-1-hover.png'));
     const rp = await read(t, `(() => { const r = document.querySelector('#model-pop .model-item[data-key="${plainKey}"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
     await moveTo(t, rp.x, rp.y);
-    ok('B6 悬停无档位行浮窗收起', !(await state(t)).subOpen, '');
+    const b6 = await flyout(t, plainKey);
+    ok('B6 悬停另一模型行：浮窗跟着切过去且仍是同一套六档',
+      b6.open && b6.rowExp && b6.items.length === want.length, JSON.stringify(b6.items));
 
-    // ---------- C 点「思考·低」：一并选中该模型并定档，双面板收起 ----------
+    // ---------- C 点「Low」：一并选中该模型并定档，双面板收起 ----------
     await moveTo(t, rb.x, rb.y);
-    const low = (target.reasoningLevels || []).includes('low') ? 'low' : (target.reasoningLevels || [])[0];
-    const lowLabel = LV_LABEL[low];
+    const lowLabel = LV_LABEL.low;
     await clickEl(t, `[...document.querySelectorAll('#model-sub-pop .mp-lv')].find((x) => x.textContent.trim() === ${JSON.stringify(lowLabel)})`);
     await sleep(400);
     const c1 = await state(t);
@@ -199,8 +213,12 @@ async function main() {
 
     // ---------- E 点箭头展开；移开指针自动收起；未选中行上定档=一并选中 ----------
     await moveTo(t, 8, 8); // 先把指针挪远：菜单打开位置不压指针，避免合成悬停误弹
-    await clickEl(t, `document.getElementById('model-chip')`);
-    await sleep(350);
+    await sleep(400); // 等指针离开面板的收起计时走完，否则它会在刚打开菜单时把面板关掉
+    await openModelMenu(t);
+    if (!(await state(t)).mainOpen) {
+      await clickEl(t, `document.getElementById('model-chip')`);
+      await sleep(350);
+    }
     await clickEl(t, `document.querySelector('#model-pop .model-item[data-key="${key}"] .lv-hit')`);
     await sleep(300);
     const e1 = await flyout(t, key);
@@ -213,7 +231,7 @@ async function main() {
     const rc = await rowCenter(key);
     await moveTo(t, rc.x, rc.y); // 悬停重新展开，直接在未选中的行上定档
     await sleep(250);
-    const high = (target.reasoningLevels || []).includes('high') ? '思考·高' : e1.items[e1.items.length - 1];
+    const high = LV_LABEL.high;
     await clickEl(t, `[...document.querySelectorAll('#model-sub-pop .mp-lv')].find((x) => x.textContent.trim() === ${JSON.stringify(high)})`);
     await sleep(400);
     const e2 = await state(t);
@@ -232,9 +250,11 @@ async function main() {
     await sleep(300);
     const f1 = await read(t, `(() => ({
       subOpen: !document.getElementById('model-sub-pop').classList.contains('hidden'),
+      dsExp: document.querySelector('#model-pop .model-item[data-key="mock|deepseek-v4-pro"]').classList.contains('exp'),
       items: [...document.querySelectorAll('#model-sub-pop .mp-lv')].map((x) => x.textContent.trim()),
     }))()`);
-    ok('F1 点另一行箭头浮窗切到该行档位', f1.subOpen && f1.items.includes('思考·关') && !f1.items.includes('思考·高'), JSON.stringify(f1.items));
+    ok('F1 点另一行箭头：浮窗切到该行（行 exp，内容仍是六档）',
+      f1.subOpen && f1.dsExp && f1.items.length === WANT_LV.length + 1, JSON.stringify(f1.items));
     await clickEl(t, dsExpr); // 桌面分支：已展开的行再点箭头 = 保持展开（不误收）
     await sleep(300);
     ok('F2 桌面上已展开行再点箭头保持展开', (await state(t)).subOpen, '');

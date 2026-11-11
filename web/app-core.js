@@ -1183,7 +1183,7 @@ function restoreHomeDraftLS() {
     homeDraft._fullFromMode = !!d._fullFromMode;
     homeDraft.provider = d.provider || '';
     homeDraft.model = d.model || '';
-    homeDraft.thinking = d.thinking || '';
+    homeDraft.thinking = normThinkLevel(d.thinking); // 老草稿的 enabled/disabled 等旧值归一（见 app-chat.js）
     homeDraft.tools = Array.isArray(d.tools) ? d.tools : [];
     homeDraft.planMode = !!d.planMode;
     homeDraft.goalMode = !!d.goalMode;

@@ -1030,14 +1030,13 @@ func (a *App) handleChatModes(w http.ResponseWriter, r *http.Request) {
 // handleModels 返回模型选择器用的扁平清单（含各提供方启停状态：停用的置灰展示）。
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	type modelItem struct {
-		ProviderID      string   `json:"providerId"`
-		ProviderName    string   `json:"providerName"`
-		ModelID         string   `json:"modelId"`
-		ModelName       string   `json:"modelName,omitempty"`
-		ContextWindow   int      `json:"contextWindow,omitempty"`
-		ReasoningLevels []string `json:"reasoningLevels,omitempty"`
-		ProviderOff     bool     `json:"providerOff,omitempty"` // 所属提供方已停用（手动或自动）
-		ProviderVia     string   `json:"providerVia,omitempty"` // 公司通道当前线路：lan=内网 / wan=外网（配了外网地址才有值）
+		ProviderID    string `json:"providerId"`
+		ProviderName  string `json:"providerName"`
+		ModelID       string `json:"modelId"`
+		ModelName     string `json:"modelName,omitempty"`
+		ContextWindow int    `json:"contextWindow,omitempty"`
+		ProviderOff   bool   `json:"providerOff,omitempty"` // 所属提供方已停用（手动或自动）
+		ProviderVia   string `json:"providerVia,omitempty"` // 公司通道当前线路：lan=内网 / wan=外网（配了外网地址才有值）
 	}
 	items := []modelItem{}
 	for _, p := range a.Cfg.Providers {
@@ -1050,10 +1049,8 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, m := range p.Models {
-			// 存储的档位若是旧版推断写死的（无手工编辑入口），跟随新版本刷新
-			//（推断按渠道协议+模型 ID，同一模型在不同协议下档位不同）
-			levels := effectiveReasoningLevels(p.Protocol, m.ID, m.ReasoningLevels)
-			items = append(items, modelItem{p.ID, p.Name, m.ID, m.Name, m.ContextWindow, levels, !p.IsSelectable(), via})
+			// 思考档位不随模型下发：全系统固定六档，前端任何模型都能展开同一套
+			items = append(items, modelItem{p.ID, p.Name, m.ID, m.Name, m.ContextWindow, !p.IsSelectable(), via})
 		}
 	}
 	t := a.DefaultTarget()
@@ -1172,10 +1169,6 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[mid] = true
 		m.ID = mid
-		// 思考档位未配置时按协议+ID 自动推断（添加/编辑模型即自动带上）
-		if len(m.ReasoningLevels) == 0 {
-			m.ReasoningLevels = guessReasoningLevels(protocol, mid)
-		}
 		models = append(models, m)
 	}
 	// 预置提供方未带模型目录时回落到模板清单：套餐端点（智谱 Coding 等）
@@ -2256,19 +2249,17 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.Thinking != nil {
-		// 合法档位枚举全集（不分协议：同一档位串在不同协议渠道由协议层各自
-		// 映射，见 llmproto.go；max 是 deepseek/Anthropic 的档位，漏了它会让
-		// 已有会话切到 max 被 400 拒绝）
-		switch t := strings.TrimSpace(*body.Thinking); t {
-		case "", "enabled", "disabled", "low", "medium", "high", "max":
-			old := m.Thinking
-			m.Thinking = t
-			if old != t {
-				notes = append(notes, ctxNote{ctxThinking, "思考档位：" + old + " → " + t})
-			}
-		default:
-			writeErr(w, 400, "thinking 档位必须是 enabled/disabled/low/medium/high/max 或空")
+		// 档位全系统固定六档（thinkingLevels），与模型/协议无关，只挡非法值；
+		// 老值兼容：disabled → none、enabled → 空（跟随服务端默认）。
+		lv, ok := normalizeThinkingLevel(*body.Thinking)
+		if !ok {
+			writeErr(w, 400, "thinking 档位必须是 none/low/medium/high/xhigh/max 或空")
 			return
+		}
+		old := m.Thinking
+		m.Thinking = lv
+		if old != lv {
+			notes = append(notes, ctxNote{ctxThinking, "思考档位：" + old + " → " + lv})
 		}
 	}
 	if body.PlanMode != nil {

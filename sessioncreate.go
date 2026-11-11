@@ -115,6 +115,11 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 	if p.CopyHistory && parent == nil {
 		return nil, createSessionErr(400, "复制父对话上下文需要同时指定 parent")
 	}
+	// 思考档位：固定六档 + 空（跟随服务端默认），老值 enabled/disabled 归一后接受
+	thinking, ok := normalizeThinkingLevel(p.Thinking)
+	if !ok {
+		return nil, createSessionErr(400, "思考档位无效：%s（可选 none/low/medium/high/xhigh/max 或空）", p.Thinking)
+	}
 	m := &SessionMeta{
 		ID:           newID(),
 		Title:        strings.TrimSpace(p.Title),
@@ -125,7 +130,7 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		Provider:     strings.TrimSpace(p.Provider),
 		Model:        strings.TrimSpace(p.Model),
 		Permission:   perm,
-		Thinking:     strings.TrimSpace(p.Thinking),
+		Thinking:     thinking,
 		PlanMode:     p.PlanMode,
 		GoalMode:     p.GoalMode,
 		GoalText:     truncateRunes(p.GoalText, 2000),
@@ -145,7 +150,7 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		m.Provider = parent.Provider
 		m.Model = parent.Model
 		m.Permission = parent.Permission
-		m.Thinking = parent.Thinking
+		m.Thinking, _ = normalizeThinkingLevel(parent.Thinking)
 		m.Tools = parent.Tools
 		if parent.Remote != nil {
 			r := *parent.Remote

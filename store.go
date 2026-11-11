@@ -332,6 +332,19 @@ var storeMigrations = []migration{
 			`ALTER TABLE sessions ADD COLUMN voice_used INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// 思考档位统一成固定六档（none/low/medium/high/xhigh/max）：老会话库
+		// 里的 disabled 归一到 none，enabled（只开关不指深浅）归一到空串=跟随
+		// 服务端默认；其余历史上存过的串也一并清空——档位不再按模型猜，读出来
+		// 就得是合法值。
+		id:       "0016_thinking_six_levels",
+		tolerant: true,
+		sql: []string{
+			`UPDATE sessions SET thinking='none' WHERE thinking='disabled'`,
+			`UPDATE sessions SET thinking='' WHERE thinking='enabled'`,
+			`UPDATE sessions SET thinking='' WHERE thinking NOT IN ('', 'none', 'low', 'medium', 'high', 'xhigh', 'max')`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

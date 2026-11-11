@@ -5955,6 +5955,7 @@ async function prepareSend(forceContent, view) {
           remote: homeDraft.remote || null,
           permission: homeDraft.permission,
           provider: homeDraft.provider,
+          providerKey: homeDraft.providerKey || '',
           model: homeDraft.model,
           thinking: homeDraft.thinking || '',
           planMode: homeDraft.planMode,
@@ -7204,19 +7205,26 @@ async function loadModels() {
   } catch (e) { state.models = []; }
 }
 
+// 模型菜单的 key：providerId|keyId|modelId —— 中间那段是「模型归属哪把 Key」
+// （自定义供应商多 Key 后，同名模型只能靠 Key 归属区分；单 Key 供应商为空）。
+function modelKeyOf(provider, providerKey, model) {
+  return provider + '|' + (providerKey || '') + '|' + model;
+}
+
 function currentModelKey(view) {
   const cur = (view || mainView).state.cur;
   if (cur) {
-    return cur.provider && cur.model ? cur.provider + '|' + cur.model : '__default__';
+    return cur.provider && cur.model ? modelKeyOf(cur.provider, cur.providerKey, cur.model) : '__default__';
   }
   return homeDraft.provider && homeDraft.model
-    ? homeDraft.provider + '|' + homeDraft.model : '__default__';
+    ? modelKeyOf(homeDraft.provider, homeDraft.providerKey, homeDraft.model) : '__default__';
 }
 
 function modelNameOf(key) {
   if (key === '__default__') return state.defaultModel || '默认模型';
-  const [pid, mid] = key.split('|');
-  const hit = (state.models || []).find((m) => m.providerId === pid && m.modelId === mid);
+  const [pid, kid, mid] = key.split('|');
+  const hit = (state.models || []).find((m) => m.providerId === pid && (m.keyId || '') === kid && m.modelId === mid)
+    || (state.models || []).find((m) => m.providerId === pid && m.modelId === mid);
   return (hit && (hit.modelName || hit.modelId)) || mid;
 }
 
@@ -7241,23 +7249,24 @@ function curThinking(view) {
   return cur ? (cur.thinking || '') : (homeDraft.thinking || '');
 }
 
+// pickModel 选中一个模型：会话 PATCH provider/providerKey/model，首页写进草稿。
+// providerKey 是模型归属的那把 Key——重名模型靠它落到正确的密钥上。
 async function pickModel(key, keepOpen, view) {
   view = view || mainView;
   if (!keepOpen) closePopovers();
-  const body = key === '__default__' ? { provider: '', model: '' } : {
-    provider: key.split('|')[0], model: key.split('|')[1],
-  };
+  const parts = key === '__default__' ? ['', '', ''] : key.split('|');
+  const provider = parts[0] || '', providerKey = parts[1] || '', model = parts[2] || '';
   if (view.state.cur) {
     try {
-      view.state.cur = await api('/api/sessions/' + view.state.cur.id, { method: 'PATCH', body: JSON.stringify(body) });
+      view.state.cur = await api('/api/sessions/' + view.state.cur.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ provider, providerKey, model }),
+      });
     } catch (e) { alert('切换模型失败：' + e.message); }
   } else if (view === mainView) {
-    if (key === '__default__') {
-      homeDraft.provider = ''; homeDraft.model = '';
-    } else {
-      homeDraft.provider = key.split('|')[0];
-      homeDraft.model = key.split('|')[1];
-    }
+    homeDraft.provider = provider;
+    homeDraft.providerKey = providerKey;
+    homeDraft.model = model;
   }
   syncComposer(view);
 }
@@ -7293,6 +7302,13 @@ function renderModelPop(view) {
   const companyQuota = state.companyQuota || null;
   const fmtPoints = (n) => (n || 0).toLocaleString('zh-CN');
   html += `<button class="pop-item model-item ${cur === '__default__' ? 'sel' : ''}${modelPopExpand === '__default__' ? ' exp' : ''}" data-key="__default__"><span>默认（${esc(state.defaultModel || '未配置')}）</span>${arrow}</button>`;
+  // 同一供应商内重名的模型（不同 Key 拉到同名模型）只给这几项加区分后缀，
+  // 不重名的一律不加标签——菜单保持干净，多 Key 是内部的事
+  const dupCount = {};
+  for (const m of state.models || []) {
+    const k = m.providerId + '|' + m.modelId;
+    dupCount[k] = (dupCount[k] || 0) + 1;
+  }
   let lastProv = '';
   for (const m of state.models || []) {
     if (m.providerId !== lastProv) {
@@ -7316,10 +7332,14 @@ function renderModelPop(view) {
       html += `<div class="pop-group">${esc(m.providerName)}${m.providerOff ? '（已停用）' : viaBadge}${quotaBadge}</div>`;
       lastProv = m.providerId;
     }
-    const k = m.providerId + '|' + m.modelId;
+    // 菜单 key 带 Key 归属（providerId|keyId|modelId）：重名模型各占一行、各选
+    // 各自那把 Key，选中后会话记住 providerKey
+    const k = modelKeyOf(m.providerId, m.keyId, m.modelId);
+    const dup = dupCount[m.providerId + '|' + m.modelId] > 1 && m.keyLabel;
+    const label = (m.modelName || m.modelId) + (dup ? '（' + m.keyLabel + '）' : '');
     // 停用服务商的模型置灰（公司通道出公司自动停用期间仍可见，点了也能选——
     // 会话解析时会自动回落到可用服务商，但选单里如实标注状态）
-    html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(m.modelName || m.modelId)}</span>${arrow}</button>`;
+    html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(label)}</span>${arrow}</button>`;
   }
   pop.innerHTML = html;
   pop.querySelectorAll('.model-item').forEach((b) => {

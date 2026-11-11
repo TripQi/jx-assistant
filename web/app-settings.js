@@ -109,6 +109,61 @@ async function openFeedbackForm(prefill, sessionId) {
   if (ta) ta.focus();
 }
 
+// 模型草稿（编辑期结构）：字段与后端 ModelCfg 一一对应，只有这些会提交。
+function modelDraftOf(m) {
+  return {
+    id: m.id || '', name: m.name || '',
+    contextWindow: m.contextWindow || 0, maxOutput: m.maxOutput || 0,
+    supportsImages: !!m.supportsImages,
+  };
+}
+
+// Key 草稿（编辑期结构）：一把 Key 自带分组备注名、密钥、协议覆盖与它自己拉到
+// 的模型。老单 Key 供应商（预置提供方、公司通道）加载时合成一把 id 为空的 Key
+// ——卡片只有一套渲染，保存时按供应商类型折算成单 Key 字段或 keys[]。
+function keyDraftOf(k) {
+  return {
+    id: k.id || '', label: k.label || '', protocol: k.protocol || '',
+    key: k.key || '', keyMasked: k.apiKeyMasked || '',
+    models: (k.models || []).map(modelDraftOf),
+  };
+}
+
+// 卡片内全部 Key 的模型总数（卡片头的「N 个模型」与保存校验用）
+function provModelCount(p) {
+  return (p.keys || []).reduce((n, k) => n + k.models.length, 0);
+}
+
+// 卡片是否配过密钥：任意一把 Key 有已保存的密钥或刚输入未保存的都算
+function provHasKey(p) {
+  return (p.keys || []).some((k) => !!k.key || !!k.keyMasked);
+}
+
+// 一把 Key 生效的协议：Key 级覆盖优先于供应商级（与后端 keyProtocol 同口径）。
+// 'chat' 是 Key 级的「显式 OpenAI 兼容」哨兵——Key 的 protocol 空串表示跟随
+// 供应商，没有哨兵就表达不出「供应商默认 anthropic、这把 Key 走 chat/completions」。
+function effKeyProtocol(p, kd) {
+  const v = (kd && kd.protocol) || '';
+  return v === 'chat' ? '' : (v || p.protocol || '');
+}
+
+// 渠道协议三选一（与后端 llmproto.go 的三个实现一一对应）；'chat' 见上
+const PROTOCOLS = [
+  ['', 'OpenAI 兼容 · chat/completions（默认）'],
+  ['anthropic', 'Anthropic 原生 · /v1/messages'],
+  ['responses', 'OpenAI Responses · /v1/responses'],
+];
+const KEY_PROTOCOLS = [
+  ['', '跟随供应商协议'],
+  ['chat', 'OpenAI 兼容 · chat/completions'],
+  ['anthropic', 'Anthropic 原生 · /v1/messages'],
+  ['responses', 'OpenAI Responses · /v1/responses'],
+];
+function protoLabel(v) {
+  const hit = PROTOCOLS.find((x) => x[0] === (v === 'chat' ? '' : v));
+  return hit ? hit[1] : v;
+}
+
 function loadProvDraft(c) {
   return (c.providers || []).map((p) => ({
     id: p.id,
@@ -116,19 +171,18 @@ function loadProvDraft(c) {
     presetURL: p.presetURL || '',
     name: p.name || '',
     baseURL: p.baseURL || '',
-    protocol: p.protocol || '',       // 渠道协议：''=OpenAI 兼容 / anthropic / responses
-    key: '', keyMasked: p.apiKeyMasked || '',
+    protocol: p.protocol || '',       // 渠道协议（供应商级默认）：''=OpenAI 兼容 / anthropic / responses
+    // 多 Key（多分组）：自定义供应商带 keys[]；预置提供方/公司通道没有多 Key
+    // 结构，合成一把（id 空、字段就是供应商级那套）——渲染与保存同一套代码
+    keys: ((p.keys && p.keys.length)
+      ? p.keys
+      : [{ id: '', label: '', protocol: '', apiKeyMasked: p.apiKeyMasked || '', models: p.models || [] }]).map(keyDraftOf),
     enabled: p.enabled !== false,   // 手动启停开关（服务商卡片头）
     autoDisabled: !!p.autoDisabled, // 公司通道自动停用（连不上服务端）
     company: !!p.company,           // 公司内部通道（删除提示/状态文案用）
     publicBaseURL: p.publicBaseURL || '', // 外网备用地址（服务端下发，只读展示）
     via: p.via || '',               // 公司通道当前线路：lan=内网 / wan=外网
     quota: p.quota || null,         // 公司通道额度快照（服务端随公告下发）
-    models: (p.models || []).map((m) => ({
-      id: m.id || '', name: m.name || '',
-      contextWindow: m.contextWindow || 0, maxOutput: m.maxOutput || 0,
-      supportsImages: !!m.supportsImages,
-    })),
   }));
 }
 
@@ -138,7 +192,8 @@ function provSig(p) {
   return JSON.stringify({
     id: p.id || '', presetId: p.presetId || '', name: p.name || '', baseURL: p.baseURL || '',
     protocol: p.protocol || '',
-    models: (p.models || []).map((m) => [m.id || '', m.name || '', m.contextWindow || 0, m.maxOutput || 0, !!m.supportsImages]),
+    keys: (p.keys || []).map((k) => [k.id || '', k.label || '', k.protocol || '',
+      k.models.map((m) => [m.id || '', m.name || '', m.contextWindow || 0, m.maxOutput || 0, !!m.supportsImages])]),
   });
 }
 
@@ -630,7 +685,7 @@ function buildProvCard(p, key) {
   // 预置提供方的名称实时取预置模板（模板改名后已保存的卡片跟着更新，
   // 不用存量用户重存一遍）
   const tp = p.presetId ? presetOf(p.presetId) : null;
-  const configured = !!(p.key || p.keyMasked);
+  const configured = provHasKey(p);
   const offTag = p.autoDisabled
     ? '<span class="pv-off-tag" title="连不上公司服务端时自动停用，恢复可达自动启用">已自动停用 · 服务端不可达</span>'
     : (p.enabled === false ? '<span class="pv-off-tag">已停用</span>' : '');
@@ -660,8 +715,8 @@ function buildProvCard(p, key) {
     `<span class="pv-dot ${configured ? 'ok' : 'no'}" title="${configured ? '密钥已配置' : '未配置密钥'}"></span>` +
     `<b class="pv-name">${esc((tp && tp.name) || p.name || '未命名提供方')}</b>` +
     offTag + viaTag + quotaChip +
-    `<span class="pv-meta">${p.models.length} 个模型</span>` +
-    (p.key ? '<span class="pv-dirty">密钥未保存</span>' : '');
+    `<span class="pv-meta">${provModelCount(p)} 个模型${(p.keys || []).length > 1 ? ' · ' + p.keys.length + ' 把 Key' : ''}</span>` +
+    ((p.keys || []).some((k) => k.key) ? '<span class="pv-dirty">密钥未保存</span>' : '');
   // 启停开关：停用的提供方不参与默认选择与会话解析（出了公司自动切到可用服务商
   // 就靠它）；公司通道另有「自动停用」，手动开启会一并清掉
   if (key !== 'new') {
@@ -696,7 +751,6 @@ function buildProvCard(p, key) {
       provOpenKey = null;
     } else {
       provOpenKey = key;
-      if (provModelOpen[key] === undefined) provModelOpen[key] = -1;
     }
     renderProvCards();
   };
@@ -734,14 +788,9 @@ function buildProvCard(p, key) {
   };
   form.appendChild(sel);
 
-  // 协议类型：决定同一套 agent 走哪种渠道协议（后端 llmproto.go 的三个实现）。
-  // 预置方跟随模板不可改；自定义渠道三选一，默认 OpenAI 兼容。
-  const PROTOCOLS = [
-    ['', 'OpenAI 兼容 · chat/completions（默认）'],
-    ['anthropic', 'Anthropic 原生 · /v1/messages'],
-    ['responses', 'OpenAI Responses · /v1/responses'],
-  ];
-  const protoLabel = (v) => { const hit = PROTOCOLS.find((x) => x[0] === v); return hit ? hit[1] : v; };
+  // 协议类型（供应商级默认）：决定同一套 agent 走哪种渠道协议（后端 llmproto.go
+  // 的三个实现）。预置方跟随模板不可改；自定义渠道三选一，默认 OpenAI 兼容；
+  // 多 Key 时每把 Key 还能各自覆盖（见 buildKeyBlock）。
   if (p.presetId) {
     if (p.protocol) {
       const lblProto = document.createElement('div');
@@ -873,14 +922,146 @@ function buildProvCard(p, key) {
     form.appendChild(refresh);
   }
 
-  // API 密钥：绝不回显，只标「已配置」，输入可替换
+  // Key 与模型目录：一把 Key 一块。自定义供应商可加多把（中转站按分组发 Key，
+  // 每个分组能看到的模型不同），每把 Key 各自拉模型、各自选协议；预置提供方与
+  // 公司通道只有一块，字段就是供应商级那套。
+  (p.keys || []).forEach((kd, ki) => form.appendChild(buildKeyBlock(p, kd, ki)));
+  if (!p.presetId && !p.company) {
+    const btnAddKey = document.createElement('button');
+    btnAddKey.className = 'mc-add';
+    btnAddKey.textContent = '＋ 添加 Key（另一个分组）';
+    btnAddKey.onclick = () => {
+      if (!p.keys) p.keys = [];
+      p.keys.push(keyDraftOf({}));
+      renderProvCards();
+      const boxes = $('prov-list').querySelectorAll('.pv-key');
+      const last = boxes[boxes.length - 1];
+      const inp = last && last.querySelector('input.pf-input');
+      if (inp) inp.focus();
+    };
+    form.appendChild(btnAddKey);
+  }
+
+  // 卡片操作区：删除 | 取消 | 保存
+  const acts = document.createElement('div');
+  acts.className = 'pf-actions';
+  if (key !== 'new') {
+    const delBtn = document.createElement('button');
+    delBtn.className = 'pf-del';
+    delBtn.textContent = '删除提供方';
+    delBtn.onclick = async () => {
+      const msg = p.company
+        ? '删除公司通道「' + (p.name || p.id) + '」？\n重新连上公司服务端后会按你的姓名自动重建（含密钥）；长期不用请改用卡片上的停用开关。'
+        : '删除提供方「' + (p.name || p.id) + '」？以后可重新添加。';
+      if (!confirm(msg)) return;
+      try {
+        await api('/api/providers/delete', { method: 'POST', body: JSON.stringify({ id: p.id }) });
+        reloadProviders();
+      } catch (e) { alert('删除失败：' + e.message); }
+    };
+    acts.appendChild(delBtn);
+  }
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'pf-cancel';
+  btnCancel.textContent = '取消';
+  btnCancel.onclick = () => {
+    if (key === 'new') { provNew = null; provOpenKey = null; renderProvCards(); }
+    else reloadProviders();
+  };
+  const btnSave = document.createElement('button');
+  btnSave.className = 'pf-save';
+  btnSave.textContent = '保存';
+  btnSave.onclick = async () => {
+    if (!p.presetId && !p.name.trim()) { alert('请填写名称'); return; }
+    if (!p.presetId && !p.baseURL.trim()) { alert('请填写 API 地址'); return; }
+    if (!provHasKey(p) && !confirm('尚未填写 API 密钥，确定保存？（本地服务如 Ollama 可不填）')) return;
+    try {
+      await putProvider(p, key);
+      reloadProviders();
+    } catch (e) { alert('保存失败：' + e.message); }
+  };
+  acts.appendChild(btnCancel);
+  acts.appendChild(btnSave);
+  form.appendChild(acts);
+
+  card.appendChild(form);
+  return card;
+}
+
+/* ---------- 模型页：一把 Key 的编辑块 ----------
+   一把 Key 自带：分组备注名（重名模型在对话菜单里的区分后缀）、密钥（绝不
+   回显，留空＝保持不变）、协议覆盖（Key 级优先于供应商级）、它自己拉到的模型
+   目录（拉取/测试/增删都只作用于这一把——中转站的不同分组能看到的模型不一样）。
+   预置提供方只有一把 Key 且协议由模板固定：备注名/协议/删除这些多 Key 才需要的
+   控件不渲染，其余共用同一套代码。 */
+function buildKeyBlock(p, kd, ki) {
+  // 多 Key 只给用户自定义的供应商：预置提供方由模板固定，公司通道由服务端
+  // 下发（密钥/模型每次同步都会被覆盖，多配的 Key 存不住）
+  const multi = !p.presetId && !p.company;
+  const cardKey = p.id || 'new';
+  // 测试结果与「展开编辑的模型行」的记忆键：卡片 + Key 归属（同一张卡里多把 Key
+  // 的模型行要各自独立，不能用同一个下标）
+  const sk = cardKey + '#' + (kd.id || 'idx' + ki);
+  const box = document.createElement('div');
+  box.className = 'pv-key';
+
+  if (multi) {
+    const head = document.createElement('div');
+    head.className = 'mc-head';
+    head.innerHTML = `<span class="mc-title">Key ${ki + 1}${kd.label ? '：' + esc(kd.label) : ''}</span>`;
+    const del = document.createElement('button');
+    del.className = 'mc-btn';
+    del.textContent = '删除该 Key';
+    del.disabled = (p.keys || []).length <= 1;
+    del.title = del.disabled ? '至少保留一把 Key' : '删除这把 Key 和它拉到的模型';
+    del.onclick = (e) => {
+      e.stopPropagation();
+      if ((p.keys || []).length <= 1) return;
+      if (!confirm('删除 Key ' + (ki + 1) + (kd.label ? '（' + kd.label + '）' : '') +
+        ' 及它的 ' + kd.models.length + ' 个模型？')) return;
+      p.keys.splice(ki, 1);
+      renderProvCards();
+    };
+    head.appendChild(del);
+    box.appendChild(head);
+
+    const two = document.createElement('div');
+    two.className = 'pf-two';
+    const cellLabel = document.createElement('div');
+    cellLabel.innerHTML = '<div class="pf-label">分组备注名（只给重名模型当区分后缀）</div>';
+    const inLabel = document.createElement('input');
+    inLabel.className = 'pf-input';
+    inLabel.placeholder = '如：默认分组 / Claude 分组';
+    inLabel.value = kd.label || '';
+    inLabel.oninput = () => { kd.label = inLabel.value; };
+    cellLabel.appendChild(inLabel);
+    two.appendChild(cellLabel);
+
+    const cellProto = document.createElement('div');
+    cellProto.innerHTML = '<div class="pf-label">这把 Key 的协议（同一中转站不同分组可能挂不同协议）</div>';
+    const selProto = document.createElement('select');
+    selProto.className = 'pf-input';
+    for (const [v, label] of KEY_PROTOCOLS) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v === '' ? label + '（' + protoLabel(p.protocol) + '）' : label;
+      selProto.appendChild(o);
+    }
+    selProto.value = kd.protocol || '';
+    selProto.onchange = () => { kd.protocol = selProto.value; renderProvCards(); };
+    cellProto.appendChild(selProto);
+    two.appendChild(cellProto);
+    box.appendChild(two);
+  }
+
+  // 密钥：绝不回显（只标「已配置」），输入可替换、留空即保持不变
   const lblKey = document.createElement('div');
   lblKey.className = 'pf-label';
-  lblKey.textContent = 'API 密钥';
-  form.appendChild(lblKey);
+  lblKey.textContent = multi ? '密钥' : 'API 密钥';
+  box.appendChild(lblKey);
   const keyRow = document.createElement('div');
   keyRow.className = 'key-row';
-  if (p.keyMasked) {
+  if (kd.keyMasked) {
     const chip = document.createElement('span');
     chip.className = 'key-chip';
     chip.textContent = '已配置';
@@ -890,18 +1071,19 @@ function buildProvCard(p, key) {
   inKey.className = 'pf-input';
   inKey.type = 'password';
   inKey.autocomplete = 'new-password';
-  inKey.placeholder = p.keyMasked ? '留空保持不变，输入可替换' : (p.presetId === 'ollama' ? '本地服务可留空' : '必填，如 sk-…');
-  inKey.value = p.key || ''; // 重渲染回填已输入但未保存的密钥，避免视觉上「消失」
-  inKey.oninput = () => { p.key = inKey.value; };
+  inKey.placeholder = kd.keyMasked ? '留空保持不变，输入可替换'
+    : (p.presetId === 'ollama' ? '本地服务可留空' : '必填，如 sk-…');
+  inKey.value = kd.key || ''; // 重渲染回填已输入但未保存的密钥，避免视觉上「消失」
+  inKey.oninput = () => { kd.key = inKey.value; };
   keyRow.appendChild(inKey);
-  form.appendChild(keyRow);
+  box.appendChild(keyRow);
 
-  // 模型目录
+  // 模型目录（这把 Key 拉到的）
   const cat = document.createElement('div');
   cat.className = 'model-cat';
   const catHead = document.createElement('div');
   catHead.className = 'mc-head';
-  catHead.innerHTML = '<span class="mc-title">模型目录</span>';
+  catHead.innerHTML = `<span class="mc-title">模型目录（${kd.models.length}）</span>`;
   const btnTest = document.createElement('button');
   btnTest.className = 'mc-btn';
   btnTest.textContent = '测试连通';
@@ -912,7 +1094,7 @@ function buildProvCard(p, key) {
   catHead.appendChild(btnFetch);
   cat.appendChild(catHead);
 
-  p.models.forEach((m, mi) => {
+  kd.models.forEach((m, mi) => {
     const row = document.createElement('div');
     row.className = 'model-row';
     const line = document.createElement('div');
@@ -928,21 +1110,21 @@ function buildProvCard(p, key) {
       `<span class="mr-chips">${esc(chips)}</span>` +
       `<button class="mr-x" title="删除该模型">删除</button>`;
     const testEl = line.querySelector('.mr-test');
-    const t = (provTest[key] || {})[m.id];
+    const t = (provTest[sk] || {})[m.id];
     if (t && t.state === 'run') { testEl.textContent = '测试中…'; testEl.className = 'mr-test run'; }
     else if (t && t.state === 'ok') { testEl.textContent = '✓ ' + t.ms + 'ms'; testEl.className = 'mr-test ok'; }
     else if (t && t.state === 'fail') { testEl.textContent = '✗ ' + t.err; testEl.title = t.err; testEl.className = 'mr-test fail'; }
     line.querySelector('.mr-x').onclick = (e) => {
       e.stopPropagation();
-      p.models.splice(mi, 1);
+      kd.models.splice(mi, 1);
       renderProvCards();
     };
     line.onclick = () => {
-      provModelOpen[key] = provModelOpen[key] === mi ? -1 : mi;
+      provModelOpen[sk] = provModelOpen[sk] === mi ? -1 : mi;
       renderProvCards();
     };
     row.appendChild(line);
-    if (provModelOpen[key] === mi) {
+    if (provModelOpen[sk] === mi) {
       const edit = document.createElement('div');
       edit.className = 'mr-edit';
       const mk = (labelText, inputEl, full) => {
@@ -996,7 +1178,7 @@ function buildProvCard(p, key) {
       const del = document.createElement('button');
       del.className = 'mr-del2';
       del.textContent = '删除该模型';
-      del.onclick = (e) => { e.stopPropagation(); p.models.splice(mi, 1); renderProvCards(); };
+      del.onclick = (e) => { e.stopPropagation(); kd.models.splice(mi, 1); renderProvCards(); };
       edit.appendChild(del);
       row.appendChild(edit);
     }
@@ -1007,131 +1189,105 @@ function buildProvCard(p, key) {
   btnAddModel.className = 'mc-add';
   btnAddModel.textContent = '＋ 添加模型';
   btnAddModel.onclick = () => {
-    p.models.push({ id: '', name: '', contextWindow: 0, maxOutput: 0, supportsImages: false });
-    provModelOpen[key] = p.models.length - 1;
+    kd.models.push(modelDraftOf({}));
+    provModelOpen[sk] = kd.models.length - 1;
     renderProvCards();
     const inputs = $('prov-list').querySelectorAll('.mr-edit input');
     if (inputs.length) inputs[inputs.length - 5 >= 0 ? inputs.length - 5 : 0].focus();
   };
   cat.appendChild(btnAddModel);
-  form.appendChild(cat);
+  box.appendChild(cat);
 
-  // 拉取模型：合并策略 —— 已有条目保留手工改过的元信息，新条目用后端猜的
-  btnFetch.onclick = async () => {
+  // 拉取模型：只拉这把 Key（keyId + 它生效的协议）。合并策略——已有条目保留
+  // 手工改过的元信息，新条目用后端猜的
+  btnFetch.onclick = async (e) => {
+    e.stopPropagation();
     btnFetch.disabled = true; btnFetch.textContent = '拉取中…';
     try {
       const d = await api('/api/providers/fetch', {
         method: 'POST',
-        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key, protocol: p.protocol || '' }),
+        body: JSON.stringify({
+          id: p.id || p.presetId || '', baseURL: effURL(p), keyId: kd.id || '',
+          apiKey: kd.key, protocol: effKeyProtocol(p, kd),
+        }),
       });
-      const oldMap = new Map(p.models.map((m) => [m.id, m]));
+      const oldMap = new Map(kd.models.map((m) => [m.id, m]));
       const merged = [];
       for (const fm of (d.models || [])) {
         const ex = oldMap.get(fm.id);
         if (ex) {
           oldMap.delete(fm.id);
           merged.push(ex); // 思考档位不随模型存档位（全系统固定六档，与模型无关）
+        } else {
+          merged.push(modelDraftOf(fm));
         }
-        else merged.push({
-          id: fm.id, name: fm.name || '', contextWindow: fm.contextWindow || 0,
-          maxOutput: fm.maxOutput || 0, supportsImages: !!fm.supportsImages,
-        });
       }
       for (const ex of oldMap.values()) merged.push(ex); // 手工添加的保留在末尾
-      p.models = merged;
-      provModelOpen[key] = -1;
+      kd.models = merged;
+      provModelOpen[sk] = -1;
       renderProvCards();
-    } catch (e) {
-      alert('拉取失败：' + e.message);
+    } catch (err) {
+      alert('拉取失败：' + err.message);
       btnFetch.disabled = false; btnFetch.textContent = '拉取模型';
     }
   };
 
-  // 测试连通：目录里的所有模型各发一个极小请求
-  btnTest.onclick = async () => {
-    const ids = p.models.map((m) => m.id).filter(Boolean);
+  // 测试连通：这把 Key 目录里的所有模型各发一个极小请求
+  btnTest.onclick = async (e) => {
+    e.stopPropagation();
+    const ids = kd.models.map((m) => m.id).filter(Boolean);
     if (!ids.length) { alert('目录里还没有模型，先「拉取模型」或「添加模型」'); return; }
-    provTest[key] = {};
-    ids.forEach((id) => { provTest[key][id] = { state: 'run' }; });
+    provTest[sk] = {};
+    ids.forEach((id) => { provTest[sk][id] = { state: 'run' }; });
     btnTest.disabled = true; btnTest.textContent = '测试中…';
     renderProvCards();
     try {
       const d = await api('/api/providers/test', {
         method: 'POST',
-        body: JSON.stringify({ id: p.id || p.presetId || '', baseURL: effURL(p), apiKey: p.key, protocol: p.protocol || '', models: ids }),
+        body: JSON.stringify({
+          id: p.id || p.presetId || '', baseURL: effURL(p), keyId: kd.id || '',
+          apiKey: kd.key, protocol: effKeyProtocol(p, kd), models: ids,
+        }),
       });
-      provTest[key] = {};
-      for (const r of (d.results || [])) provTest[key][r.id] = { state: r.ok ? 'ok' : 'fail', ms: r.ms, err: r.err || '失败' };
-    } catch (e) {
-      provTest[key] = {};
-      ids.forEach((id) => { provTest[key][id] = { state: 'fail', err: e.message }; });
+      provTest[sk] = {};
+      for (const r of (d.results || [])) provTest[sk][r.id] = { state: r.ok ? 'ok' : 'fail', ms: r.ms, err: r.err || '失败' };
+    } catch (err) {
+      provTest[sk] = {};
+      ids.forEach((id) => { provTest[sk][id] = { state: 'fail', err: err.message }; });
     }
     renderProvCards();
   };
 
-  // 卡片操作区：删除 | 取消 | 保存
-  const acts = document.createElement('div');
-  acts.className = 'pf-actions';
-  if (key !== 'new') {
-    const delBtn = document.createElement('button');
-    delBtn.className = 'pf-del';
-    delBtn.textContent = '删除提供方';
-    delBtn.onclick = async () => {
-      const msg = p.company
-        ? '删除公司通道「' + (p.name || p.id) + '」？\n重新连上公司服务端后会按你的姓名自动重建（含密钥）；长期不用请改用卡片上的停用开关。'
-        : '删除提供方「' + (p.name || p.id) + '」？以后可重新添加。';
-      if (!confirm(msg)) return;
-      try {
-        await api('/api/providers/delete', { method: 'POST', body: JSON.stringify({ id: p.id }) });
-        reloadProviders();
-      } catch (e) { alert('删除失败：' + e.message); }
-    };
-    acts.appendChild(delBtn);
-  }
-  const btnCancel = document.createElement('button');
-  btnCancel.className = 'pf-cancel';
-  btnCancel.textContent = '取消';
-  btnCancel.onclick = () => {
-    if (key === 'new') { provNew = null; provOpenKey = null; renderProvCards(); }
-    else reloadProviders();
-  };
-  const btnSave = document.createElement('button');
-  btnSave.className = 'pf-save';
-  btnSave.textContent = '保存';
-  btnSave.onclick = async () => {
-    if (!p.presetId && !p.name.trim()) { alert('请填写名称'); return; }
-    if (!p.presetId && !p.baseURL.trim()) { alert('请填写 API 地址'); return; }
-    if (!p.key && !p.keyMasked && !confirm('尚未填写 API 密钥，确定保存？（本地服务如 Ollama 可不填）')) return;
-    try {
-      await putProvider(p, key);
-      reloadProviders();
-    } catch (e) { alert('保存失败：' + e.message); }
-  };
-  acts.appendChild(btnCancel);
-  acts.appendChild(btnSave);
-  form.appendChild(acts);
-
-  card.appendChild(form);
-  return card;
+  return box;
 }
 
 // putProvider 提交单张提供方卡片。卡片内的「保存」与底部通用「保存」共用这一条
 // 路径（原来底部保存只写上下文页，模型页的密钥、增删模型点它不生效）。
 // apiKey 传空串＝后端沿用已保存的密钥，所以没改密钥的卡片提交也无副作用。
 async function putProvider(p, key) {
-  await api('/api/providers', {
-    method: 'POST',
-    body: JSON.stringify({
-      // 新卡片选了预置提供方时本地 id 还是空的：用预置 id 作为保存目标，
-      // 否则后端识别不出预置（baseURL 传空）会报「必须填写 API 地址」
-      id: p.id || p.presetId || '',
-      name: p.name,
-      baseURL: p.presetId ? '' : (p.baseURL || '').trim(),
-      apiKey: p.key,
-      protocol: p.presetId ? '' : (p.protocol || ''),
-      models: p.models,
-    }),
-  });
+  // 新卡片选了预置提供方时本地 id 还是空的：用预置 id 作为保存目标，
+  // 否则后端识别不出预置（baseURL 传空）会报「必须填写 API 地址」
+  const body = {
+    id: p.id || p.presetId || '',
+    name: p.name,
+    baseURL: p.presetId ? '' : (p.baseURL || '').trim(),
+    protocol: p.presetId ? '' : (p.protocol || ''),
+  };
+  const k0 = (p.keys || [])[0] || keyDraftOf({});
+  if (p.presetId || p.company) {
+    // 预置提供方与公司通道保持单 Key：折算成供应商级 apiKey/models 提交
+    // （后端对预置忽略 keys；公司通道的密钥/模型由服务端同步维护）
+    body.apiKey = k0.key;
+    body.models = k0.models;
+  } else {
+    // 自定义供应商提交完整 keys[]：每把 Key 各自的备注名/密钥/协议/模型。
+    // id 为空的是新加的那把，后端给它分配稳定归属 id（会话里的模型引用靠它）。
+    body.keys = (p.keys || []).map((k) => ({
+      id: k.id || '', label: k.label || '', protocol: k.protocol || '',
+      apiKey: k.key || '', models: k.models,
+    }));
+  }
+  await api('/api/providers', { method: 'POST', body: JSON.stringify(body) });
   if (key === 'new') provNew = null; // 草稿已保存转正：清掉常驻草稿卡片
   p.base = provSig(p);               // 已落盘：基线推进，重试时不重复提交
 }
@@ -1141,10 +1297,10 @@ async function putProvider(p, key) {
 async function saveProviderDrafts() {
   const targets = [];
   for (const p of provDraft) {
-    if (p.key || provSig(p) !== p.base) targets.push([p, p.id]);
+    if ((p.keys || []).some((k) => k.key) || provSig(p) !== p.base) targets.push([p, p.id]);
   }
   const nw = provNew;
-  if (nw && (nw.name.trim() || nw.baseURL.trim() || nw.key || nw.models.length)) targets.push([nw, 'new']);
+  if (nw && (nw.name.trim() || nw.baseURL.trim() || provHasKey(nw) || provModelCount(nw))) targets.push([nw, 'new']);
   if (!targets.length) return true; // 模型页没动过：不打扰用户
 
   for (const [p] of targets) {
@@ -1158,7 +1314,7 @@ async function saveProviderDrafts() {
       return false;
     }
   }
-  const noKey = targets.filter(([p]) => !p.key && !p.keyMasked).length;
+  const noKey = targets.filter(([p]) => !provHasKey(p)).length;
   if (noKey && !confirm('有 ' + noKey + ' 家提供方还没填 API 密钥（本地服务如 Ollama 可留空），仍要保存吗？')) return false;
 
   for (const [p, key] of targets) {
@@ -1780,7 +1936,7 @@ document.querySelectorAll('.set-nav-item').forEach((b) => {
 // 模型页：「添加提供方」= 插入一张展开的自定义卡片（已有未保存草稿则直接展开，不覆盖）
 $('prov-add-card').onclick = () => {
   if (!provNew) {
-    provNew = { id: '', presetId: null, presetURL: '', name: '', baseURL: '', protocol: '', key: '', keyMasked: '', models: [] };
+    provNew = { id: '', presetId: null, presetURL: '', name: '', baseURL: '', protocol: '', keys: [keyDraftOf({})] };
   }
   provOpenKey = 'new';
   provModelOpen['new'] = -1;

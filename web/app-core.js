@@ -1182,6 +1182,7 @@ function restoreHomeDraftLS() {
     // 恢复它，切换模式时才能识别「完全访问是联动自动设的」并随切换还原
     homeDraft._fullFromMode = !!d._fullFromMode;
     homeDraft.provider = d.provider || '';
+    homeDraft.providerKey = d.providerKey || ''; // 老草稿没有这一项：空＝按模型名找回 Key
     homeDraft.model = d.model || '';
     homeDraft.thinking = normThinkLevel(d.thinking); // 老草稿的 enabled/disabled 等旧值归一（见 app-chat.js）
     homeDraft.tools = Array.isArray(d.tools) ? d.tools : [];
@@ -1209,7 +1210,9 @@ const dotDone = {};     // 会话id -> 完成未查看（绿点）
 // tools 默认带 'browser'：权限档位＝修改工作区时默认开启「操作浏览器」（后端
 // perm.go 的 capDefaultsForMode 是同一策略的唯一权威）。芯片上默认就是勾选态，
 // 用户取消后前端显式传空数组，后端尊重用户、不再覆盖。
-const homeDraft = { mode: 'office', permission: 'workspace-write', provider: '', model: '', thinking: '', tools: ['browser'], planMode: false, goalMode: false, goalText: '', remote: null, quote: '' };
+// providerKey：模型归属的那把 Key（自定义供应商多 Key 后同名模型靠它定位；
+// 单 Key 供应商为空）。
+const homeDraft = { mode: 'office', permission: 'workspace-write', provider: '', providerKey: '', model: '', thinking: '', tools: ['browser'], planMode: false, goalMode: false, goalText: '', remote: null, quote: '' };
 
 // 模型菜单里展开思考档位浮窗的模型 key（app-chat.js 的模型菜单在用）。
 // 放这半边是因为它属于弹层开合状态：任何关闭路径（Esc / 点外面 / 切别的

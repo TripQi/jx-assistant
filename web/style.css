@@ -2597,6 +2597,10 @@ body.bin-mode #wst-view, body.bin-mode #wst-add { display: none; } /* 回收站�
   border-radius: 999px; padding: 0 8px; line-height: 18px;
 }
 
+/* 一把 Key 一块（自定义供应商多 Key）：块与块之间留白，块内自带备注名/密钥/
+   协议/模型目录；单 Key 供应商只有一块，视觉上就是原来的那张卡片 */
+.pv-key { border: 1px solid var(--border); border-radius: 10px; margin-top: 12px; padding: 0 10px 10px; }
+.pv-key > .mc-head { margin: 0 -10px; border-radius: 10px 10px 0 0; }
 .model-cat { border: 1px solid var(--border); border-radius: 10px; margin-top: 14px; overflow: hidden; }
 .mc-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--chip); }
 .mc-title { font-size: 12px; font-weight: 600; margin-right: auto; }

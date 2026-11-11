@@ -1,0 +1,409 @@
+/* 组件 usage-stats「用量统计」的样式：设置 → 用量 页。
+   只吃全站 CSS 变量（--bg/--border/--text-2/--chip/--accent/--danger/--green），
+   深浅色主题自动跟随；窄视口（手机/窄右栏）靠 flex-wrap 与 100% 宽度表格滚动兜住。 */
+
+/* ---------- 设置页骨架 ---------- */
+
+.us-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.us-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+.us-note b {
+  color: var(--text-2);
+}
+
+.us-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.us-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.us-filters select,
+.us-filters input[type="date"],
+.us-filters input[type="text"] {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 240px;
+}
+
+.us-filters select:focus,
+.us-filters input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.us-btn {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.us-btn:hover {
+  background: var(--hover);
+}
+
+.us-btn.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.us-btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.us-btn:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+/* KPI 卡片行 */
+.us-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.us-kpi {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+.us-kpi .k-label {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.us-kpi .k-val {
+  margin-top: 3px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.us-kpi .k-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+.us-kpi.alert .k-val {
+  color: var(--danger);
+}
+
+/* 卡片 */
+.us-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+.us-card h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.us-card h4 .h-sub {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.us-grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .us-grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 表格 */
+.us-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.us-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.us-table th,
+.us-table td {
+  padding: 6px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--border-2, var(--border));
+}
+
+.us-table th {
+  color: var(--text-3);
+  font-weight: 500;
+  background: var(--chip);
+  position: sticky;
+  top: 0;
+}
+
+.us-table th:first-child,
+.us-table td:first-child,
+.us-table th.l,
+.us-table td.l {
+  text-align: left;
+}
+
+.us-table td.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.us-table tr:hover td {
+  background: var(--hover);
+}
+
+.us-table .muted {
+  color: var(--text-3);
+}
+
+.us-table .ok {
+  color: var(--green);
+}
+
+.us-table .bad {
+  color: var(--danger);
+}
+
+.us-empty {
+  padding: 18px 4px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* 分页 */
+.us-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+  flex-wrap: wrap;
+}
+
+/* 趋势图 */
+.us-chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.us-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-2);
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.us-legend i {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+
+/* 环形图 */
+.us-donut {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.us-donut svg {
+  width: 132px;
+  height: 132px;
+  flex: 0 0 auto;
+}
+
+.us-donut-list {
+  flex: 1 1 150px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.us-donut-list .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.us-donut-list .row i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.us-donut-list .row .nm {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.us-donut-list .row .vl {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 单价与倍率 */
+.us-price-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.us-price-table input {
+  width: 88px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: right;
+}
+
+.us-price-table input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.us-price-table td.l input {
+  text-align: left;
+  width: 150px;
+}
+
+.us-mul-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.us-mul-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  flex-wrap: wrap;
+}
+
+.us-mul-row .nm {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.us-mul-row input {
+  width: 74px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: right;
+}
+
+.us-status {
+  font-size: 12px;
+  min-height: 16px;
+}
+
+.us-status.err {
+  color: var(--danger);
+}
+
+.us-status.ok {
+  color: var(--green);
+}
+
+.us-danger-zone {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+@media (max-width: 560px) {
+  .us-kpi .k-val {
+    font-size: 15px;
+  }
+
+  .us-card {
+    padding: 10px;
+  }
+}

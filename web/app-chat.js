@@ -5291,16 +5291,25 @@ function handleEvent(ev, view) {
       // 停止后队列保留不自动续：横幅给「继续发送」入口（队列空则无事发生）
       view.state.queueHeld = (view.state.pendingQueue || []).length > 0;
       if (view.state.attached) reloadMessages(view);
+      JX.emit('chat:stream-end', { view: view.key, reason: 'stopped' });
       break;
     case 'delta':
       view.state.streamText += ev.delta;
       liveRender(view);
       if (view === mainView && state.cur && state.cur.mode === 'assistant') setFace('thinking');
+      // 吐字通知（组件用：输入框下方的实时速度条。没人监听时零开销）
+      JX.emit('chat:stream', { view: view.key, text: ev.delta });
       break;
     case 'reasoning': // 思考增量：实时显示在折叠块里
       view.state.streamThinking = (view.state.streamThinking || '') + ev.delta;
       liveRender(view);
       if (view === mainView && state.cur && state.cur.mode === 'assistant') setFace('thinking');
+      JX.emit('chat:stream', { view: view.key, text: ev.delta });
+      break;
+    case 'usage':
+      // 本步流尾的真实用量（后端 Event{Type:"usage"}）：输入框下方的速度条用它
+      // 把估算值定格成真实值。不属于对话内容，不渲染、不落库
+      JX.emit('chat:usage', { view: view.key, data: ev.data || {} });
       break;
     case 'tool_start':
       break;
@@ -5336,6 +5345,7 @@ function handleEvent(ev, view) {
       removeLive(view);
       showRunError(view, ev.error);
       view.state.queueHeld = (view.state.pendingQueue || []).length > 0; // 出错后队列保留
+      JX.emit('chat:stream-end', { view: view.key, reason: 'error' });
       break;
     case 'retry':
       // 重试即将开始（人工点重试 / 网络失败自动重试）：本步已流出的半截作废——
@@ -5355,6 +5365,7 @@ function handleEvent(ev, view) {
       // 正常收尾但队列仍有保留 = 暂停生效（排水循环被暂停门挡下）：横幅走暂停分支
       view.state.queueHeld = (view.state.pendingQueue || []).length > 0;
       if (view === mainView && state.cur && state.cur.mode === 'assistant') setFace('done', 4000);
+      JX.emit('chat:stream-end', { view: view.key, reason: 'done' });
       break;
   }
 }

@@ -2,10 +2,14 @@
 //   1. 设置 → 用量 独立页（CX.registerSettings 带 pane）：渠道/日期筛选、
 //      KPI 卡片、每日趋势（手写 SVG 折线）、模型占比（环形图）、按模型消耗表、
 //      用量明细分页表、单价与倍率配置、按日期范围清理；
+//   2. 输入框下方的实时输出速度条：`↑ 42.3 tok/s · 本轮 1.2k tok`——流式过程中
+//      按已收字符估 token（与后端 estimateTokens 同一启发式 3/4），每步结束后用
+//      后端推来的真实 usage 定格，定格约 3 秒淡出。首字延迟不在这里显示（在
+//      用量记录表的「首字延迟」列里），这是用户定的口径。
 //
 // 数据来自主程序的 /api/usage/*（usageapi.go）。采集本身在主程序（usagestats.go），
-// 由本组件的开关控制：关掉即停记、已有数据保留、页面随之消失——所以 dispose
-// 必须把自己注册的设置页摘干净。
+// 由本组件的开关控制：关掉即停记、已有数据保留、页面与速度条一起消失——所以
+// dispose 必须把自己造的元素与监听摘干净。
 // 设置页的 DOM 全部用全站类名 + 本组件 client.css 的 us-* 类，深浅色主题与
 // 窄视口随全站变量自适应，不依赖其它组件的样式。
 (function () {
@@ -855,12 +859,190 @@
     btnSave2.onclick = doSave;
   }
 
+  /* ================= 输入框下方的实时速度条 ================= */
+
+  // speed 状态按视图分开（主对话 / 右栏子对话各一条）
+  var speed = {
+    main: null,
+    sub: null,
+  };
+
+  function hostFor(view) {
+    // 速度条挂在该视图输入卡的正下方（与「输入框下方」的需求一致）：
+    // 主对话是 #composer 之后，右栏子对话是 #sub-composer 之后
+    return view === 'sub' ? document.getElementById('sub-composer') : document.getElementById('composer');
+  }
+
+  function ensureBar(view) {
+    var host = hostFor(view);
+    if (!host || !host.parentNode) return null;
+    var id = 'us-speed-' + view;
+    var bar = document.getElementById(id);
+    if (!bar) {
+      bar = el('div', 'us-speed hidden');
+      bar.id = id;
+      bar.dataset.usSpeed = view;
+      bar.innerHTML = '<span class="us-arrow">↑</span><span class="us-tps">0.0 tok/s</span>' +
+        '<span class="us-dot">·</span><span class="us-total">本轮 0 tok</span>';
+      host.parentNode.insertBefore(bar, host.nextSibling);
+    }
+    return bar;
+  }
+
+  function speedState(view) {
+    if (!speed[view]) {
+      speed[view] = {
+        chars: 0,       // 流式过程中已收到的字符数（估算 token 用）
+        firstAt: 0,     // 首个输出增量的时刻
+        lastAt: 0,
+        realTokens: 0,  // 本步真实输出 tokens（后端 usage）
+        realTps: 0,
+        frozen: false,  // 已定格（等淡出）
+        timer: 0,
+        raf: 0,
+      };
+    }
+    return speed[view];
+  }
+
+  // estimateTokensOf 与后端 estimateTokens 同一启发式（中文为主：字符 × 3/4）
+  function estimateTokensOf(chars) {
+    return Math.round((chars * 3) / 4);
+  }
+
+  function prettyTok(n) {
+    n = Number(n) || 0;
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(Math.round(n));
+  }
+
+  function renderSpeed(view) {
+    var st = speedState(view);
+    var bar = ensureBar(view);
+    if (!bar) return;
+    var tps, total;
+    if (st.frozen) {
+      tps = st.realTps;
+      total = st.realTokens || estimateTokensOf(st.chars);
+    } else {
+      var span = (Date.now() - st.firstAt) / 1000;
+      var est = estimateTokensOf(st.chars);
+      // 首字刚到时分母太小会把速度算爆：至少按 0.3 秒算
+      tps = est / Math.max(0.3, span);
+      total = est;
+    }
+    bar.querySelector('.us-tps').textContent = tps.toFixed(1) + ' tok/s';
+    bar.querySelector('.us-total').textContent = '本轮 ' + prettyTok(total) + ' tok';
+    bar.classList.remove('hidden', 'fade');
+  }
+
+  function scheduleRender(view) {
+    var st = speedState(view);
+    if (st.raf) return;
+    st.raf = setTimeout(function () {
+      st.raf = 0;
+      renderSpeed(view);
+    }, 100); // 每 100ms 刷一次，够顺滑又不跟流式事件抢主线程
+  }
+
+  function onStream(payload) {
+    if (!payload || !payload.text) return;
+    var view = payload.view === 'sub' ? 'sub' : 'main';
+    var st = speedState(view);
+    if (!st.firstAt) st.firstAt = Date.now();
+    st.lastAt = Date.now();
+    st.chars += String(payload.text).length;
+    st.frozen = false;
+    st.realTps = 0;
+    st.realTokens = 0;
+    if (st.timer) { clearTimeout(st.timer); st.timer = 0; }
+    scheduleRender(view);
+  }
+
+  function onUsage(payload) {
+    if (!payload) return;
+    var view = payload.view === 'sub' ? 'sub' : 'main';
+    var st = speedState(view);
+    var d = payload.data || {};
+    var out = Number(d.outputTokens) || 0;
+    if (!out && !st.chars) return; // 没输出也没记录：不打扰
+    var durMs = Number(d.durationMs) || 0;
+    var ttftMs = Number(d.ttftMs) || 0;
+    var windowMs = durMs - ttftMs;
+    st.realTokens = out;
+    // 吐字速度按「首字之后的输出窗口」算：总耗时里混着排队与思考启动会把速度压低
+    st.realTps = windowMs > 0 ? (out * 1000) / windowMs : 0;
+    st.frozen = true;
+    var bar = ensureBar(view);
+    if (bar) {
+      bar.querySelector('.us-tps').textContent = st.realTps.toFixed(1) + ' tok/s';
+      bar.querySelector('.us-total').textContent = '本轮 ' + prettyTok(out) + ' tok';
+      bar.classList.remove('hidden', 'fade');
+    }
+    startFade(view);
+  }
+
+  // startFade 定格约 3 秒后淡出；期间又来新的输出会取消淡出（onStream 已清 timer）
+  function startFade(view) {
+    var st = speedState(view);
+    if (st.timer) clearTimeout(st.timer);
+    st.timer = setTimeout(function () {
+      st.timer = 0;
+      var bar = ensureBar(view);
+      if (!bar) return;
+      bar.classList.add('fade');
+      st.timer = setTimeout(function () {
+        st.timer = 0;
+        var b2 = ensureBar(view);
+        if (!b2) return;
+        b2.classList.add('hidden');
+        b2.classList.remove('fade');
+        st.chars = 0;
+        st.firstAt = 0;
+        st.frozen = false;
+        st.realTokens = 0;
+        st.realTps = 0;
+      }, SPEED_FADE_ANIM);
+    }, SPEED_FADE_MS);
+  }
+
+  function onStreamEnd(payload) {
+    var view = payload && payload.view === 'sub' ? 'sub' : 'main';
+    var st = speedState(view);
+    if (!st.firstAt) return; // 本轮没吐过字（工具轮/纯思考被折叠）：不显示
+    if (st.frozen) return;   // 已由 usage 定格
+    // 没有 usage（如失败/取消）：把估算值定格，同样 3 秒后淡出
+    st.frozen = true;
+    st.realTokens = estimateTokensOf(st.chars);
+    var span = (st.lastAt - st.firstAt) / 1000;
+    st.realTps = span > 0 ? st.realTokens / Math.max(0.3, span) : 0;
+    renderSpeed(view);
+    startFade(view);
+  }
+
+  // teardownSpeed 组件关闭时把速度条与定时器全部摘掉（界面恢复原样）
+  function teardownSpeed() {
+    ['main', 'sub'].forEach(function (view) {
+      var st = speed[view];
+      if (st && st.timer) clearTimeout(st.timer);
+      if (st && st.raf) clearTimeout(st.raf);
+      var bar = document.getElementById('us-speed-' + view);
+      if (bar) bar.remove();
+    });
+    speed.main = null;
+    speed.sub = null;
+  }
+
   /* ================= 注册 ================= */
 
   CX.register({
     id: ID,
 
     init() {
+      JX.on('chat:stream', onStream);
+      JX.on('chat:usage', onUsage);
+      JX.on('chat:stream-end', onStreamEnd);
+
       CX.registerSettings({
         id: ID,
         title: '用量统计',
@@ -873,7 +1055,11 @@
     },
 
     dispose() {
+      JX.off('chat:stream', onStream);
+      JX.off('chat:usage', onUsage);
+      JX.off('chat:stream-end', onStreamEnd);
       CX.unregisterSettings(ID);
+      teardownSpeed();
     },
   });
 })();

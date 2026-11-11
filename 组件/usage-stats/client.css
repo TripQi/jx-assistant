@@ -1,4 +1,4 @@
-/* 组件 usage-stats「用量统计」的样式：设置 → 用量 页。
+/* 组件 usage-stats「用量统计」的样式：设置 → 用量 页 + 输入框下方的实时速度条。
    只吃全站 CSS 变量（--bg/--border/--text-2/--chip/--accent/--danger/--green），
    深浅色主题自动跟随；窄视口（手机/窄右栏）靠 flex-wrap 与 100% 宽度表格滚动兜住。 */
 
@@ -396,6 +396,45 @@
 
 .us-danger-zone {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+/* ---------- 输入框下方的实时速度条 ---------- */
+
+.us-speed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  margin: 2px 0 0;
+  padding: 0 4px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  opacity: 1;
+  transition: opacity .5s ease;
+  pointer-events: none;
+  user-select: none;
+}
+
+.us-speed.hidden {
+  display: none;
+}
+
+.us-speed.fade {
+  opacity: 0;
+}
+
+.us-speed .us-arrow {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.us-speed .us-tps {
+  color: var(--text-2);
+}
+
+.us-speed .us-dot {
+  opacity: .5;
 }
 
 @media (max-width: 560px) {

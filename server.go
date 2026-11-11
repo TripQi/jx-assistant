@@ -999,8 +999,10 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"enabled":   ra.Enabled,
 			"connected": remoteConnected.Load(),
 		},
-		// 更新横幅的数据源：客户端打开时先查这里（SSE 无回放，在线推送靠事件流）
-		"update": updateSnapshot(),
+		// 更新横幅的数据源：客户端打开时先查这里（SSE 无回放，在线推送靠事件流）。
+		// 二开版本走 statusUpdateSnapshot：available/pendingRestart 恒空，前端横幅、
+		// 胶囊、待重启提示自然不出现。
+		"update": statusUpdateSnapshot(),
 	})
 }
 

@@ -235,8 +235,8 @@ func (a *App) applyBlocksPlan(blocks *updateBlocks, rel releaseInfo, sourceURL s
 	if len(blocks.Components) > 0 {
 		a.applyComponentBlocks(blocks.Components, rel, sourceURL)
 	}
-	// engine 块：待生效版本已是目标则不重复下载交换
-	if e := blocks.Engine; e != nil && e.Version != "" && versionCompare(e.Version, appVersion) > 0 {
+	// engine 块：二开版本绝不替换本程序 exe（其余块照旧处理）
+	if e := blocks.Engine; e != nil && !SelfUpdateDisabled && e.Version != "" && versionCompare(e.Version, appVersion) > 0 {
 		st := a.loadUpdateBlockState()
 		if st.EnginePending != "" && versionCompare(e.Version, st.EnginePending) <= 0 {
 			a.syncPendingToState() // 已交换过（等重启），只补横幅状态
@@ -256,6 +256,10 @@ func (a *App) applyBlocksPlan(blocks *updateBlocks, rel releaseInfo, sourceURL s
 
 // applyEngineBlock 下载 engine zip → 校验 → 解出 exe 暂存 exe.new → 原地交换。
 func (a *App) applyEngineBlock(b updateBlock, rel releaseInfo, sourceURL string) error {
+	if SelfUpdateDisabled {
+		// 二开版本的最后一道闸：任何路径走到「换掉本程序」都在这里被拒
+		return fmt.Errorf("%s", selfUpdateBlockedMsg)
+	}
 	url := findReleaseAssetURL(rel.Assets, b.File, sourceURL)
 	if url == "" {
 		return fmt.Errorf("附件里找不到 %s", b.File)
@@ -530,6 +534,11 @@ func (a *App) applyComponentBlock(id string, b updateBlock, rel releaseInfo, sou
 // 轮询）。检查在后台跑（含大块下载），响应只是「已开始」；结果经事件流与
 // /api/status 到达。
 func (a *App) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if SelfUpdateDisabled {
+		// 二开版本：手动「立即检查更新」也不联网，直接说明已禁用
+		writeErr(w, http.StatusBadRequest, selfUpdateBlockedMsg)
+		return
+	}
 	url := strings.TrimSpace(a.Cfg.UpdateURL)
 	if url == "" || url == "off" {
 		writeErr(w, http.StatusBadRequest, "更新检查已关闭（更新检查源为 off）")
@@ -542,6 +551,11 @@ func (a *App) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 // handleUpdateRestart POST /api/update/restart：engine 已交换待生效时，拉起
 // 重启助手并整体退出（助手等本进程退出后按原启动参数拉起新 exe）。
 func (a *App) handleUpdateRestart(w http.ResponseWriter, r *http.Request) {
+	if SelfUpdateDisabled {
+		// 二开版本：没有「待重启生效的更新」这种事，重启接力一并关闭
+		writeErr(w, http.StatusBadRequest, selfUpdateBlockedMsg)
+		return
+	}
 	st := a.loadUpdateBlockState()
 	if st.EnginePending == "" || versionCompare(st.EnginePending, appVersion) <= 0 {
 		writeErr(w, http.StatusBadRequest, "当前没有待重启生效的更新")

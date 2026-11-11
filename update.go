@@ -21,8 +21,37 @@ import (
 	"time"
 )
 
+// SelfUpdateDisabled 二开版本专用开关：屏蔽「上游发布把本程序（引擎 exe / 完整
+// 安装包）顶掉」的整条路。
+//
+// 为什么要这个开关：本仓库是二开版本，程序本身带着我们的改动。照上游的更新检查
+// 走，上游一发新版就会换来路不明的 exe、或用完整安装包把我们的版本整体覆盖，
+// 二开成果当场被顶掉且不可逆。
+//
+// 为真时（下面各处守卫协同，逐条可读）：
+//   - 启动首查与每小时轮询都不拉发布源（StartUpdateChecker）；
+//   - checkUpdateOnce 只放行市场技能包那条异步任务，随即返回——一个发布源请求
+//     都不发；
+//   - POST /api/update/check 直接回「已禁用」，不联网；
+//   - /api/status 的 update 恒为「没有可更新版本」，前端更新横幅/胶囊/待重启
+//     提示因此一律不出现；
+//   - 整包下载运行、engine 分块交换、待重启接力（能替换程序本体的三条路）
+//     全部早退。
+//
+// 只关「程序自身」这一块：技能市场（marketURL）、内置组件、便携 Python 运行时、
+// 组件块这些更新通道的代码原样保留（它们与引擎更新共用发布源检查，检查一停自然
+// 也不跑，但没有任何一行是为这个开关而改坏的）。
+//
+// 想恢复上游行为：把它改回 false，其余一行都不用动。
+const SelfUpdateDisabled = true
+
+// selfUpdateBlockedMsg 二开版本拒绝「程序自身更新」动作时的统一提示（接口回包
+// 与错误信息共用，用户可读）。
+const selfUpdateBlockedMsg = "二开版本已禁用程序自身更新（上游发布不会覆盖本版本）"
+
 // UpdateState 最近一次检查到的发布信息（内存态，/api/status 直接引用）。
 type UpdateState struct {
+	Disabled    bool   `json:"disabled,omitempty"`    // 二开版本：程序自身更新被源码级开关屏蔽（前端据此收起「软件更新」区）
 	Available   bool   `json:"available"`             // 最新版本比当前新
 	Latest      string `json:"latest,omitempty"`      // 最新版本号（tag_name，去 v 前缀）
 	Notes       string `json:"notes,omitempty"`       // 发布说明（body 截断）
@@ -119,10 +148,22 @@ func parseDateVersion(s string) (date, serial int64, ok bool) {
 // StartUpdateChecker 启动后台轮询：启动 30s 后首查（不拖慢启动），之后每小时一次
 // （原来是 6h，用户要求「更新提示改每小时检查」：发版当天客户端一小时内就能看到横幅）。
 func StartUpdateChecker(a *App) {
+	if SelfUpdateDisabled {
+		// 二开版本：程序自身的更新检查一次都不发（url 传空串，checkUpdateOnce
+		// 见到开关即早退）。仍留一条同节奏的轮询，只为「企业技能包/工作流自动
+		// 更新」——那是市场的事，不属于程序本体更新，不该被这个开关连坐停掉。
+		a.startUpdatePolling("")
+		return
+	}
 	url := a.Cfg.UpdateURL
 	if url == "" || url == "off" {
 		return
 	}
+	a.startUpdatePolling(url)
+}
+
+// startUpdatePolling 轮询主体：30s 后首跑，此后每小时一次，直到 StopUpdateChecker。
+func (a *App) startUpdatePolling(url string) {
 	updateStop = make(chan struct{})
 	go func() {
 		select {
@@ -218,6 +259,11 @@ func (a *App) checkUpdateOnce(url string) {
 	// 顺带检查企业技能包 / 工作流更新（market.go）：发布源检查与技能包更新互不依赖，
 	// 异步跑——发布源不可达时技能包更新照常进行，反之亦然
 	go a.autoUpdateMarketSkills()
+	if SelfUpdateDisabled {
+		// 二开版本：到此为止，不拉发布源、不查程序自身更新（market 那条已在上面
+		// 异步起跑，市场不受影响）。整包/分块那套也就永远拿不到发布信息。
+		return
+	}
 	// 检查更新即清理：旧的整包安装包在这时删掉（启动 30s 首查 + 每小时轮询
 	// 天然就是清理时机，见 handleUpdateInstaller 的说明）。下载进行中跳过。
 	go cleanupInstallerCache(installerCacheDir(a))
@@ -275,6 +321,17 @@ func setUpdateError(msg string) {
 	if msg == "" {
 		updateState.CheckedAt = time.Now().Format("2006-01-02 15:04")
 	}
+}
+
+// statusUpdateSnapshot /api/status 对外报的更新状态。二开版本恒定「没有可更新
+// 版本」：前端的置顶更新横幅、左下角更新胶囊、待重启提示都只看 available /
+// pendingRestart，这里全空即一律不出现，也不需要前端各自加开关。
+// 内部状态（updateSnapshot）不在这里改，免得把已有的状态机搅乱。
+func statusUpdateSnapshot() UpdateState {
+	if SelfUpdateDisabled {
+		return UpdateState{Current: appVersion, Disabled: true}
+	}
+	return updateSnapshot()
 }
 
 func applyUpdateInfo(a *App, rel releaseInfo, sourceURL string, suppressBanner bool) {
@@ -359,6 +416,11 @@ func cleanupInstallerCache(dir string) {
 // 安装包并运行。响应只是「已开始」，进度与结果经 update_installer 事件到达
 // （data: {stage: downloading|launched|error, text}）。
 func (a *App) handleUpdateInstaller(w http.ResponseWriter, r *http.Request) {
+	if SelfUpdateDisabled {
+		// 二开版本：整包安装会覆盖掉我们自己的 exe，这条路整个不开放
+		writeErr(w, http.StatusBadRequest, selfUpdateBlockedMsg)
+		return
+	}
 	updateMu.Lock()
 	dl := updateState.DownloadURL
 	updateMu.Unlock()
@@ -383,6 +445,10 @@ func (a *App) handleUpdateInstaller(w http.ResponseWriter, r *http.Request) {
 // downloadAndRunInstaller 下载发布附件到缓存目录（.part 落盘后改名，防半截
 // 文件被运行）并交给系统默认程序运行（安装包 exe 即安装器接管）。
 func (a *App) downloadAndRunInstaller(dl string) error {
+	if SelfUpdateDisabled {
+		// 兜底：不管上游调用方从哪进来，二开版本都不下载/不运行会覆盖本程序的包
+		return fmt.Errorf("%s", selfUpdateBlockedMsg)
+	}
 	dir := installerCacheDir(a)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err

@@ -199,7 +199,7 @@ func (a *App) createAssistantVersion() (*AssistantVersion, error) {
 	}
 	if cur := a.currentAssistant(); cur != nil {
 		p.Workspace = cur.Workspace
-		p.Provider, p.Model = cur.Provider, cur.Model
+		p.Provider, p.Model, p.ProviderKey = cur.Provider, cur.Model, cur.ProviderKey
 		p.Permission, p.Thinking, p.Tools = cur.Permission, cur.Thinking, cur.Tools
 		if cur.Remote != nil {
 			r := *cur.Remote

@@ -67,22 +67,22 @@ func TestDispatchExtrasInheritsParentModel(t *testing.T) {
 	main.Provider, main.Model = "zhipu", "glm-5.3"
 	tc := dispatchCtx(a, main)
 
-	// 无模型参数：继承主会话手选
-	provider, mdl, err := tc.dispatchModelChoice("")
-	if err != nil || provider != "zhipu" || mdl != "glm-5.3" {
-		t.Fatalf("未指定模型应继承主会话: %v %v %v", provider, mdl, err)
+	// 无模型参数：继承主会话手选（多 Key 供应商连 Key 归属一起继承）
+	provider, providerKey, mdl, err := tc.dispatchModelChoice("")
+	if err != nil || provider != "zhipu" || mdl != "glm-5.3" || providerKey != "" {
+		t.Fatalf("未指定模型应继承主会话: %v %v %v %v", provider, providerKey, mdl, err)
 	}
 
-	// 显式参数优先
-	provider, mdl, err = tc.dispatchModelChoice("zhipu/glm-5.3-flash")
-	if err != nil || provider != "zhipu" || mdl != "glm-5.3-flash" {
-		t.Fatalf("显式参数应优先: %v %v %v", provider, mdl, err)
+	// 显式参数优先（不带 Key 归属：由 resolveKey 按模型名找回）
+	provider, providerKey, mdl, err = tc.dispatchModelChoice("zhipu/glm-5.3-flash")
+	if err != nil || provider != "zhipu" || mdl != "glm-5.3-flash" || providerKey != "" {
+		t.Fatalf("显式参数应优先: %v %v %v %v", provider, providerKey, mdl, err)
 	}
 
 	// 主会话跟随全局默认（未手选）：子会话同样走全局默认（空）
 	main.Provider, main.Model = "", ""
-	provider, mdl, err = tc.dispatchModelChoice("")
-	if err != nil || provider != "" || mdl != "" {
-		t.Fatalf("主会话未手选时子会话应走全局默认: %v %v %v", provider, mdl, err)
+	provider, providerKey, mdl, err = tc.dispatchModelChoice("")
+	if err != nil || provider != "" || mdl != "" || providerKey != "" {
+		t.Fatalf("主会话未手选时子会话应走全局默认: %v %v %v %v", provider, providerKey, mdl, err)
 	}
 }

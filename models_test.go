@@ -78,7 +78,7 @@ func TestFetchModelsIgnoresServerLevels(t *testing.T) {
 	}))
 	defer srv.Close()
 	a := &App{}
-	models, err := a.FetchModels(&ProviderCfg{ID: "x", BaseURL: srv.URL})
+	models, err := a.FetchModels(&ProviderCfg{ID: "x", BaseURL: srv.URL}, "")
 	if err != nil {
 		t.Fatalf("FetchModels: %v", err)
 	}

@@ -345,6 +345,17 @@ var storeMigrations = []migration{
 			`UPDATE sessions SET thinking='' WHERE thinking NOT IN ('', 'none', 'low', 'medium', 'high', 'xhigh', 'max')`,
 		},
 	},
+	{
+		// 会话记住「模型归属哪把 Key」：自定义供应商支持多 Key（多分组）后，
+		// 同一供应商下不同 Key 可能拉到同名模型，光有 provider/model 还原不出
+		// 该用哪把密钥。空值＝老会话（按模型名找回 Key，找不到用该供应商第一
+		// 把可用 Key，见 models.go 的 resolveKey）。
+		id:       "0017_session_provider_key",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE sessions ADD COLUMN provider_key TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，
@@ -711,7 +722,7 @@ func (s *Store) ClearStopPending(id string) error {
 
 // ---------- 会话 ----------
 
-const sessionCols = `id, title, mode, workspace, parent_id, provider, model, permission, plan_mode, goal_mode, tools, remote, archived, unread, status, created_at, updated_at, thinking, goal_text, goal_status, goal_rounds, usage_prompt, usage_cache_hit, usage_output, usage_calls, origin, dispatched_by, expert, voice_used`
+const sessionCols = `id, title, mode, workspace, parent_id, provider, model, permission, plan_mode, goal_mode, tools, remote, archived, unread, status, created_at, updated_at, thinking, goal_text, goal_status, goal_rounds, usage_prompt, usage_cache_hit, usage_output, usage_calls, origin, dispatched_by, expert, voice_used, provider_key`
 
 func (s *Store) Create(m *SessionMeta) error { return s.SaveMeta(m) }
 
@@ -742,7 +753,7 @@ func (s *Store) SaveMeta(m *SessionMeta) error {
 			remote = string(b)
 		}
 	}
-	_, err := s.db.Exec(`INSERT INTO sessions(`+sessionCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.Exec(`INSERT INTO sessions(`+sessionCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET title=excluded.title, mode=excluded.mode,
 		workspace=excluded.workspace, parent_id=excluded.parent_id, provider=excluded.provider,
 		model=excluded.model, permission=excluded.permission, plan_mode=excluded.plan_mode,
@@ -752,12 +763,13 @@ func (s *Store) SaveMeta(m *SessionMeta) error {
 		goal_text=excluded.goal_text, goal_status=excluded.goal_status, goal_rounds=excluded.goal_rounds,
 		usage_prompt=excluded.usage_prompt, usage_cache_hit=excluded.usage_cache_hit,
 		usage_output=excluded.usage_output, usage_calls=excluded.usage_calls, origin=excluded.origin,
-		dispatched_by=excluded.dispatched_by, expert=excluded.expert`,
+		dispatched_by=excluded.dispatched_by, expert=excluded.expert,
+		provider_key=excluded.provider_key`,
 		m.ID, m.Title, m.Mode, m.Workspace, m.ParentID, m.Provider, m.Model,
 		permOf(m), boolInt(m.PlanMode), boolInt(m.GoalMode), tools, remote,
 		boolInt(m.Archived), boolInt(m.Unread), m.Status, m.CreatedAt, m.UpdatedAt, m.Thinking,
 		m.GoalText, m.GoalStatus, m.GoalRounds, m.UsagePrompt, m.UsageCacheHit, m.UsageOutput, m.UsageCalls,
-		m.Origin, m.DispatchedBy, m.Expert, boolInt(m.VoiceUsed))
+		m.Origin, m.DispatchedBy, m.Expert, boolInt(m.VoiceUsed), m.ProviderKey)
 	return err
 }
 
@@ -799,7 +811,7 @@ func scanSession(sc interface{ Scan(dest ...any) error }) (*SessionMeta, error) 
 		&m.Provider, &m.Model, &perm, &plan, &goal, &tools, &remote,
 		&arch, &unread, &m.Status, &m.CreatedAt, &m.UpdatedAt, &m.Thinking,
 		&m.GoalText, &m.GoalStatus, &m.GoalRounds, &m.UsagePrompt, &m.UsageCacheHit, &m.UsageOutput, &m.UsageCalls,
-		&m.Origin, &m.DispatchedBy, &m.Expert, &vu)
+		&m.Origin, &m.DispatchedBy, &m.Expert, &vu, &m.ProviderKey)
 	if err != nil {
 		return nil, err
 	}

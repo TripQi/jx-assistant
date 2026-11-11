@@ -150,13 +150,16 @@ func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) string {
 
 // dispatchModelChoice 解析派发工具的模型参数：先经 resolveDispatchModel 校验
 //（裸模型名走错渠道在建会话之前被拒，见该函数注释），再返回应落到新会话上的
-// (provider, model)。无参数时继承派发方会话手选的服务商/模型——用户在主对话
-// 选了什么，派出去的子对话/工作任务就用什么；主会话跟着全局默认（未手选）
-// 时返回空，子会话同样走全局默认。
-func (t *toolContext) dispatchModelChoice(model string) (provider, mdl string, err error) {
+// (provider, providerKey, model)。无参数时继承派发方会话手选的服务商/模型——
+// 用户在主对话选了什么，派出去的子对话/工作任务就用什么（多 Key 供应商连
+// 「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上）；主会话跟着全局默认
+//（未手选）时返回空，子会话同样走全局默认。
+// 显式指定 providerId/modelId 时不带 Key 归属：由 resolveKey 按模型名找回该
+// 供应商下提供这个模型的那把 Key（同名模型多把 Key 都有时取第一把）。
+func (t *toolContext) dispatchModelChoice(model string) (provider, providerKey, mdl string, err error) {
 	m, err := t.resolveDispatchModel(model)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if m != "" {
 		provider, mdl = "", m
@@ -164,11 +167,11 @@ func (t *toolContext) dispatchModelChoice(model string) (provider, mdl string, e
 			provider, mdl = m[:i], m[i+1:]
 		}
 		if t.app.providerByID(provider) != nil {
-			return provider, mdl, nil
+			return provider, "", mdl, nil
 		}
-		return "", mdl, nil // 完整格式但渠道未配置：模型名保留，渠道走会话默认
+		return "", "", mdl, nil // 完整格式但渠道未配置：模型名保留，渠道走会话默认
 	}
-	return t.sess.Provider, t.sess.Model, nil
+	return t.sess.Provider, t.sess.ProviderKey, t.sess.Model, nil
 }
 // providerLabel 渠道的中文名（没配名字时回退 id）。
 func providerLabel(a *App, id string) string {
@@ -437,7 +440,7 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 	if model == "" {
 		model = strings.TrimSpace(ex.Model)
 	}
-	provider, mdl, err := t.dispatchModelChoice(model)
+	provider, providerKey, mdl, err := t.dispatchModelChoice(model)
 	if err != nil {
 		return "", err
 	}
@@ -456,7 +459,7 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 		ParentID:   t.sess.ID, // 子对话挂在当前会话下；回报链走 parent_id
 		Permission: perm,      // 只能同等或降权，绝不允许增权（dispatchPermission）
 		Expert:     strings.TrimSpace(ex.Name),
-		Provider:   provider, Model: mdl,
+		Provider:   provider, Model: mdl, ProviderKey: providerKey,
 		CopyHistory: ex.InheritContext, // 预设要继承时复制本会话完整历史（task 排在继承块之后）
 	}
 	switch {
@@ -535,7 +538,7 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	provider, mdl, err := t.dispatchModelChoice(p.Model)
+	provider, providerKey, mdl, err := t.dispatchModelChoice(p.Model)
 	if err != nil {
 		return "", err
 	}
@@ -564,7 +567,7 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 		Permission:   perm,       // 只能同等或降权，绝不允许增权（dispatchPermission）
 		PlanMode:     p.PlanMode, // 与人工建会话勾选「计划模式」一致
 		DispatchedBy: t.sess.ID,  // 派发的是顶层工作任务（左侧列表可见）；回报链走 dispatched_by，不走 parent_id
-		Provider:     provider, Model: mdl,
+		Provider:     provider, Model: mdl, ProviderKey: providerKey,
 	}
 	switch {
 	case dispRemote != nil:

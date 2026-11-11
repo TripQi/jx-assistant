@@ -16,6 +16,12 @@ import (
 //（各家 DeepSeek/智谱/Kimi/通义/OpenAI/Ollama 本地都有兼容端点）、anthropic＝
 // Anthropic 原生 /v1/messages、responses＝OpenAI Responses /v1/responses。
 // 协议实现见 llmproto.go（与 StreamChat 同接口），这里只存类型，调用层零感知。
+//
+// 自定义供应商支持多把 Key（ProviderCfg.Keys，见 ProviderKeyCfg）：中转站按
+// 分组发 Key，一把 Key 只看得到它那个分组的模型；一个供应商卡片里收多把 Key，
+// 每把各自拉模型、各自选协议（同一中转站不同分组可能挂不同协议），菜单里那些
+// 模型平铺在同一个供应商分组下。模型的重名靠「Key 归属 + 模型 ID」唯一定位
+//（会话存 SessionMeta.ProviderKey，见 store.go）。
 
 // ModelCfg 是一个可选模型的定义；ContextWindow 为 0 表示未知，按默认处理。
 // 思考档位不在这里：档位与模型彻底解绑，全系统一套（见 thinkingLevels）。
@@ -27,6 +33,24 @@ type ModelCfg struct {
 	SupportsImages bool   `json:"supportsImages,omitempty"`
 }
 
+// ProviderKeyCfg 是供应商下的一把 Key（对应中转站的一个分组）。
+// 同一个 BaseURL 共用一个供应商卡片，每把 Key 各自拉模型、各自选协议。
+type ProviderKeyCfg struct {
+	// ID 是 Key 的稳定归属标识（会话/草稿里的模型引用靠它还原该用哪把密钥，
+	// 也是重名模型唯一的区分依据）。空串＝老单 Key 结构合成的隐含 Key。
+	ID string `json:"id,omitempty"`
+	// Label 分组备注名（如「默认分组」「Claude 分组」）：只在模型重名时作为
+	// 界面上最小的区分后缀，不参与调用。
+	Label string `json:"label,omitempty"`
+	// APIKey 密钥本身：任何接口都只回脱敏后的掩码（server.go providerView）。
+	APIKey string `json:"apiKey,omitempty"`
+	// Protocol 是该 Key 的协议覆盖：空串＝跟随供应商级 Protocol（Key 级优先）；
+	// "chat"＝显式 OpenAI 兼容（与空串的「跟随」区分开，见 keyProtocol）。
+	Protocol string `json:"protocol,omitempty"`
+	// Models 是这把 Key 自己拉到/填好的模型清单（同 Key 内不重名）。
+	Models []ModelCfg `json:"models"`
+}
+
 // ProviderCfg 是一个模型服务提供方。
 type ProviderCfg struct {
 	ID      string     `json:"id"`
@@ -34,9 +58,15 @@ type ProviderCfg struct {
 	BaseURL string     `json:"baseURL"`
 	APIKey  string     `json:"apiKey,omitempty"`
 	Models  []ModelCfg `json:"models"`
+	// Keys 是自定义供应商的多 Key（多分组）结构：非空时它才是密钥与模型的
+	// 真实来源，供应商级 APIKey/Models 只作向下兼容的镜像（保存时由第一把
+	// Key 派生，老版本 exe 回退时仍读得到）。预置提供方与公司内部通道保持
+	// 供应商级单 Key 结构不变（它们由系统/服务端维护，不需要分组）。
+	Keys []ProviderKeyCfg `json:"keys,omitempty"`
 	// Protocol 渠道协议类型：空串＝OpenAI 兼容 chat/completions（默认，存量
 	// 配置全是它）、anthropic＝/v1/messages（x-api-key 鉴权）、responses＝
-	// /v1/responses。设置页渠道卡片「协议类型」选择，调用层经 LLMTarget 透传。
+	// /v1/responses。设置页渠道卡片「协议类型」选择，调用层经 LLMTarget 透传；
+	// 多 Key 结构下它是「默认协议」，每把 Key 可各自覆盖（keyProtocol）。
 	Protocol string `json:"protocol,omitempty"`
 	// Enabled 手动启停开关：nil＝启用（旧配置没写过这一键），显式 false＝停用
 	//（不参与默认选择与会话解析；卡片置灰）。手动停用不会被自动恢复打开。
@@ -50,6 +80,107 @@ type ProviderCfg struct {
 	// Note 是预置提供方的备注（计费方式、Key 获取方式等），仅设置页展示，
 	// 不参与调用；已保存的提供方以预置模板为准实时取，不落盘。
 	Note string `json:"note,omitempty"`
+}
+
+// KeyList 返回该供应商的有效 Key 清单：多 Key 结构直接用；老的供应商级单 Key
+//（预置提供方、公司内部通道）合成一把没有 ID 的隐含 Key——调用链、接口、菜单
+// 因此只有一套解析路径，不必到处分支「是不是多 Key」。
+func (p *ProviderCfg) KeyList() []ProviderKeyCfg {
+	if len(p.Keys) > 0 {
+		return p.Keys
+	}
+	return []ProviderKeyCfg{{APIKey: p.APIKey, Models: p.Models}}
+}
+
+// keyProtocol 返回一把 Key 生效的协议：Key 级覆盖优先于供应商级默认。
+// Key 级的 "chat" 是「显式 OpenAI 兼容」的哨兵——Key 的 Protocol 空串表示跟随
+// 供应商，没有它就表达不出「供应商默认 anthropic、这把 Key 走 chat/completions」。
+func (p *ProviderCfg) keyProtocol(k ProviderKeyCfg) string {
+	switch v := strings.TrimSpace(k.Protocol); v {
+	case "":
+		return p.Protocol
+	case "chat":
+		return ""
+	default:
+		return v
+	}
+}
+
+// resolveKey 定位模型归属的那把 Key（重名模型能用哪把密钥全靠它）：
+//  1. keyID 命中现有 Key 就直接用它——会话里存下的归属是权威，即使该 Key 的
+//     模型清单后来被手工改过（用户可能删了模型条目但仍想用这把 Key）；
+//  2. 否则找模型清单里有这个模型的 Key（老会话只存了模型名，或用户手工填了
+//     一个没在清单里的模型名之外的场景）；
+//  3. 都找不到 → 第一把可用的 Key（有密钥的那把；全都没密钥就第一把）——
+//     落不到具体归属时也别把调用搞挂。
+func (p *ProviderCfg) resolveKey(keyID, modelID string) ProviderKeyCfg {
+	keys := p.KeyList()
+	if id := strings.TrimSpace(keyID); id != "" {
+		for _, k := range keys {
+			if k.ID == id {
+				return k
+			}
+		}
+	}
+	if modelID = strings.TrimSpace(modelID); modelID != "" {
+		for _, k := range keys {
+			for _, m := range k.Models {
+				if m.ID == modelID {
+					return k
+				}
+			}
+		}
+	}
+	for _, k := range keys {
+		if strings.TrimSpace(k.APIKey) != "" {
+			return k
+		}
+	}
+	return keys[0]
+}
+
+// ProviderModel 是平铺后的一个模型条目：模型本身 + 它的 Key 归属。
+// 模型菜单要在一个供应商分组下平铺所有 Key 的模型，重名时靠 Key 归属区分。
+type ProviderModel struct {
+	Model ModelCfg
+	Key   ProviderKeyCfg
+}
+
+// AllModels 平铺全部 Key 的模型（按 Key 顺序，Key 内保持原序）。
+// 模型菜单、启停校验、派发模型校验都看这份清单——单 Key 结构自然只有一份。
+func (p *ProviderCfg) AllModels() []ProviderModel {
+	keys := p.KeyList()
+	out := make([]ProviderModel, 0, len(keys))
+	for _, k := range keys {
+		for _, m := range k.Models {
+			out = append(out, ProviderModel{Model: m, Key: k})
+		}
+	}
+	return out
+}
+
+// hasModel 该供应商（任意一把 Key）是否提供这个模型。
+func (p *ProviderCfg) hasModel(id string) bool {
+	for _, k := range p.KeyList() {
+		for _, m := range k.Models {
+			if m.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SetPrimaryKey 写「第一把 Key 的密钥与模型」：多 Key 结构改 Keys[0]，老单 Key
+// 结构改供应商级字段。公司通道（wizard.go / sync.go）这类由系统维护的通道走它，
+// 不用关心结构形态。
+func (p *ProviderCfg) SetPrimaryKey(apiKey string, models []ModelCfg) {
+	if len(p.Keys) > 0 {
+		p.Keys[0].APIKey = apiKey
+		p.Keys[0].Models = models
+	}
+	p.APIKey = apiKey
+	p.Models = models
 }
 
 // IsSelectable 该提供方当前是否参与选模型：手动启用且未被自动停用。
@@ -189,6 +320,8 @@ func (a *App) DefaultTarget() LLMTarget {
 // resolveTarget 按会话解析调用目标：会话指定了 provider/model 就用会话的，
 // 否则跟随全局默认（第一个可用 provider）；会话指定的 provider 已停用时也回落
 // 默认——否则出公司后旧会话仍钉死在已停用的公司通道上。
+// sess.ProviderKey 是模型归属的那把 Key：老会话没有这一项，targetOf 会按模型
+// 名找回它的 Key（找不到用第一把可用 Key），所以老会话/老草稿照常可用。
 func (a *App) resolveTarget(sess *SessionMeta) LLMTarget {
 	p := a.providerByID(sess.Provider)
 	if p != nil && !p.IsSelectable() {
@@ -200,21 +333,24 @@ func (a *App) resolveTarget(sess *SessionMeta) LLMTarget {
 			return LLMTarget{BaseURL: a.Cfg.BaseURL, APIKey: a.Cfg.APIKey, Model: sess.Model, ContextWindow: DefaultContextWindow}
 		}
 		// 回落到了别的提供方：原会话模型不在它目录里就不带过去（换用其默认模型）
-		if sess.Provider != "" && p.ID != sess.Provider && !providerHasModel(p, sess.Model) {
+		if sess.Provider != "" && p.ID != sess.Provider && !p.hasModel(sess.Model) {
 			return a.targetOf(p, "", "")
 		}
 	}
-	return a.targetOf(p, sess.Provider, sess.Model)
+	return a.targetOf(p, sess.ProviderKey, sess.Model)
 }
 
-func (a *App) targetOf(p *ProviderCfg, _, modelID string) LLMTarget {
-	t := LLMTarget{BaseURL: p.BaseURL, APIKey: p.APIKey, ContextWindow: DefaultContextWindow,
-		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL, Protocol: p.Protocol}
+// targetOf 解析「某供应商 + 某把 Key（空=按模型归属找回/第一把可用）+ 某模型」
+// 的调用目标；BaseURL 是供应商级的，密钥与协议（Key 级覆盖优先）来自那把 Key。
+func (a *App) targetOf(p *ProviderCfg, keyID, modelID string) LLMTarget {
+	k := p.resolveKey(keyID, modelID)
+	t := LLMTarget{BaseURL: p.BaseURL, APIKey: k.APIKey, ContextWindow: DefaultContextWindow,
+		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL, Protocol: p.keyProtocol(k)}
 	t.Model = modelID
-	if t.Model == "" && len(p.Models) > 0 {
-		t.Model = p.Models[0].ID
+	if t.Model == "" && len(k.Models) > 0 {
+		t.Model = k.Models[0].ID
 	}
-	for _, m := range p.Models {
+	for _, m := range k.Models {
 		if m.ID == t.Model {
 			if m.ContextWindow > 0 {
 				t.ContextWindow = m.ContextWindow
@@ -350,11 +486,13 @@ type ModelTestResult struct {
 	Err string `json:"err,omitempty"`
 }
 
-// TestProviderModels 对目录里每个模型发一个 1 token 的极小请求测连通，
-// 限 4 路并发，单请求 30 秒超时。ids 为空时测整个目录。
-func TestProviderModels(p *ProviderCfg, ids []string) []ModelTestResult {
+// TestProviderModels 对某把 Key 目录里的每个模型发一个 1 token 的极小请求测
+// 连通，限 4 路并发，单请求 30 秒超时。ids 为空时测该 Key 的整个目录；
+// keyID 指定用哪把 Key（不同分组的 Key 能调的模型不同，测试必须按 Key 走）。
+func TestProviderModels(p *ProviderCfg, keyID string, ids []string) []ModelTestResult {
+	k := p.resolveKey(keyID, "")
 	if len(ids) == 0 {
-		for _, m := range p.Models {
+		for _, m := range k.Models {
 			ids = append(ids, m.ID)
 		}
 	}
@@ -369,7 +507,7 @@ func TestProviderModels(p *ProviderCfg, ids []string) []ModelTestResult {
 			defer func() { <-sem }()
 			res := ModelTestResult{ID: id}
 			start := time.Now()
-			if err := pingModel(p, id); err != nil {
+			if err := pingModel(p, k, id); err != nil {
 				res.Err = truncateRunes(err.Error(), 160)
 			} else {
 				res.OK = true
@@ -382,9 +520,10 @@ func TestProviderModels(p *ProviderCfg, ids []string) []ModelTestResult {
 	return results
 }
 
-// pingModel 发一次最小化的协议请求，能通即可（按渠道协议选端点与鉴权头）。
-func pingModel(p *ProviderCfg, model string) error {
+// pingModel 发一次最小化的协议请求，能通即可（按该 Key 生效的协议选端点与鉴权头）。
+func pingModel(p *ProviderCfg, k ProviderKeyCfg, model string) error {
 	base := strings.TrimRight(p.BaseURL, "/")
+	key := k.APIKey
 	url := base + "/chat/completions"
 	payload := map[string]any{
 		"model":      model,
@@ -393,11 +532,11 @@ func pingModel(p *ProviderCfg, model string) error {
 		"stream":     false,
 	}
 	setAuth := func(req *http.Request) {
-		if p.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
 	}
-	switch p.Protocol {
+	switch p.keyProtocol(k) {
 	case "anthropic":
 		url = base + "/messages"
 		payload = map[string]any{
@@ -408,8 +547,8 @@ func pingModel(p *ProviderCfg, model string) error {
 		}
 		setAuth = func(req *http.Request) {
 			req.Header.Set("anthropic-version", anthropicVersionHeader)
-			if p.APIKey != "" {
-				req.Header.Set("x-api-key", p.APIKey)
+			if key != "" {
+				req.Header.Set("x-api-key", key)
 			}
 		}
 	case "responses":
@@ -442,27 +581,35 @@ func pingModel(p *ProviderCfg, model string) error {
 	return nil
 }
 
-// FetchModels 从提供方拉取可用模型清单（GET {baseURL}/models），
+// FetchModels 用供应商下某把 Key 拉取可用模型清单（GET {baseURL}/models）。
+// keyID 为空时按「模型归属→第一把可用 Key」解析：单 Key 结构自然只有一把。
 // 新条目按 ID 猜测上下文窗口与图片能力自动填好。DeepSeek 等较新的兼容端
 // 会在清单里直接给出 context_window / max_output_tokens / input_modalities——
 // 这些真实字段优先；只返回 id 的老式端点回退到按 ID 猜测。服务端的
 // effort.supported_levels 不采用：档位全系统固定六档（thinkingLevels），
 // 未知档位透传到前端只会变成「能选、后端 400」。
-func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
+func (a *App) FetchModels(p *ProviderCfg, keyID string) ([]ModelCfg, error) {
+	return fetchModelsWith(p, p.resolveKey(keyID, ""))
+}
+
+// fetchModelsWith 用一把具体 Key（密钥 + 它生效的协议）拉模型：中转站的不同
+// 分组能看到的模型清单不一样，必须逐把 Key 各拉一次。
+func fetchModelsWith(p *ProviderCfg, k ProviderKeyCfg) ([]ModelCfg, error) {
+	key := k.APIKey
 	url := strings.TrimRight(p.BaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	if p.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
-	}
-	if p.Protocol == "anthropic" {
-		// Anthropic 的 /v1/models 用 x-api-key + anthropic-version 鉴权
+	if p.keyProtocol(k) == "anthropic" {
+		// Anthropic 的 /v1/models 用 x-api-key + anthropic-version 鉴权（官方口径，
+		// 与调用链 llmproto.go 的 anthropicProtocol 同一组头，不发 Bearer）
 		req.Header.Set("anthropic-version", anthropicVersionHeader)
-		if p.APIKey != "" {
-			req.Header.Set("x-api-key", p.APIKey)
+		if key != "" {
+			req.Header.Set("x-api-key", key)
 		}
+	} else if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	client := newCompanyHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)

@@ -1421,7 +1421,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			if !modelFallback && sess.Expert != "" && isModelUnavailableErr(err) {
 				if def := a.DefaultTarget(); def.Model != target.Model || def.BaseURL != target.BaseURL {
 					from := target.Model + " @ " + target.BaseURL
-					sess.Provider, sess.Model = "", ""
+					sess.Provider, sess.Model, sess.ProviderKey = "", "", ""
 					_ = a.Store.SaveMeta(sess)
 					target = a.resolveTarget(sess)
 					modelFallback = true

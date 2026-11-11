@@ -23,23 +23,26 @@ import (
 // 档位时自动取消）
 // remote 非空时会话挂载 SSH 远程工作区：文件工具走 SFTP、命令走远程 shell。
 type SessionMeta struct {
-	ID         string           `json:"id"`
-	Title      string           `json:"title"`
-	Mode       string           `json:"mode"`
-	Workspace  string           `json:"workspace"`
-	Remote     *RemoteWorkspace `json:"remote,omitempty"`
-	ParentID   string           `json:"parentId,omitempty"`
-	Provider   string           `json:"provider,omitempty"`
-	Model      string           `json:"model,omitempty"`
-	Permission string           `json:"permission,omitempty"`
-	Thinking   string           `json:"thinking,omitempty"` // 思考档位：none/low/medium/high/xhigh/max，空=跟随服务端默认（六档与模型无关）
-	PlanMode   bool             `json:"planMode,omitempty"`
-	GoalMode   bool             `json:"goalMode,omitempty"`
-	GoalText   string           `json:"goalText,omitempty"`   // 目标模式的当前目标
-	GoalStatus string           `json:"goalStatus,omitempty"` // active=推进中 complete=已达成 blocked=受阻
-	GoalRounds int              `json:"goalRounds,omitempty"` // 自动续跑已用轮数
-	Tools      []string         `json:"tools,omitempty"`
-	Origin     string           `json:"origin,omitempty"` // 来源：human=人工建的子对话（右栏标记 + 划选送子对话复用判定）
+	ID        string           `json:"id"`
+	Title     string           `json:"title"`
+	Mode      string           `json:"mode"`
+	Workspace string           `json:"workspace"`
+	Remote    *RemoteWorkspace `json:"remote,omitempty"`
+	ParentID  string           `json:"parentId,omitempty"`
+	Provider  string           `json:"provider,omitempty"`
+	Model     string           `json:"model,omitempty"`
+	// ProviderKey 是模型归属的那把 Key（自定义供应商多 Key 后，同名模型靠它
+	// 唯一确定该用哪把密钥；空＝老会话或单 Key 供应商，解析时按模型名找回）。
+	ProviderKey string   `json:"providerKey,omitempty"`
+	Permission  string   `json:"permission,omitempty"`
+	Thinking    string   `json:"thinking,omitempty"` // 思考档位：none/low/medium/high/xhigh/max，空=跟随服务端默认（六档与模型无关）
+	PlanMode    bool     `json:"planMode,omitempty"`
+	GoalMode    bool     `json:"goalMode,omitempty"`
+	GoalText    string   `json:"goalText,omitempty"`   // 目标模式的当前目标
+	GoalStatus  string   `json:"goalStatus,omitempty"` // active=推进中 complete=已达成 blocked=受阻
+	GoalRounds  int      `json:"goalRounds,omitempty"` // 自动续跑已用轮数
+	Tools       []string `json:"tools,omitempty"`
+	Origin      string   `json:"origin,omitempty"` // 来源：human=人工建的子对话（右栏标记 + 划选送子对话复用判定）
 	// 子对话专家名（dispatch_sub 的 expert 预设）：只记名字，系统提示词构建时
 	// 按名解析追加（专家被删改后该段随之变化；名字解析不到则静默无追加段）
 	Expert string `json:"expert,omitempty"`
@@ -49,10 +52,10 @@ type SessionMeta struct {
 	// 本对话内用户用过语音听写（消息含转写文字）：置位后永久保持、不再撤下
 	//（后续轮次改打字也不清——环境快照据此稳定注入同音错字提示）。
 	// 消息级来源是前端随 chat 请求上报的 voiceUsed（组件听写落框时打标记）。
-	VoiceUsed bool `json:"voiceUsed,omitempty"`
-	Archived     bool   `json:"archived,omitempty"` // 归档：不进侧栏列表，记录保留
-	Unread       bool   `json:"unread,omitempty"`   // 标为未读：侧栏红点
-	Status       string `json:"status,omitempty"`   // idle | running
+	VoiceUsed bool   `json:"voiceUsed,omitempty"`
+	Archived  bool   `json:"archived,omitempty"` // 归档：不进侧栏列表，记录保留
+	Unread    bool   `json:"unread,omitempty"`   // 标为未读：侧栏红点
+	Status    string `json:"status,omitempty"`   // idle | running
 	// 最近一轮异常中断的类型（step=达到步数上限 / error=执行失败 / restart=服务在
 	// 执行期间重启，空=正常收口）：左侧栏把时间位换成「⚠ 已中断」提醒，与
 	// 「⟳ 运行中」同槽、天然互斥。值存在 meta 表（Store.SetLastStop），只由会话

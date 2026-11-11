@@ -1028,6 +1028,9 @@ func (a *App) handleChatModes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModels 返回模型选择器用的扁平清单（含各提供方启停状态：停用的置灰展示）。
+// 多 Key 供应商的模型在这里就拍平：同一个供应商分组下平铺它所有 Key 的模型，
+// 条目带 keyId/keyLabel——前端只对「同供应商内重名」的模型加 keyLabel 后缀区分，
+// 不重名的不加任何标签。
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	type modelItem struct {
 		ProviderID    string `json:"providerId"`
@@ -1037,6 +1040,8 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		ContextWindow int    `json:"contextWindow,omitempty"`
 		ProviderOff   bool   `json:"providerOff,omitempty"` // 所属提供方已停用（手动或自动）
 		ProviderVia   string `json:"providerVia,omitempty"` // 公司通道当前线路：lan=内网 / wan=外网（配了外网地址才有值）
+		KeyID         string `json:"keyId,omitempty"`       // 模型归属哪把 Key（选择时随会话保存，重名模型靠它定位）
+		KeyLabel      string `json:"keyLabel,omitempty"`    // 该 Key 的分组备注名（重名时前端拿它当区分后缀）
 	}
 	items := []modelItem{}
 	for _, p := range a.Cfg.Providers {
@@ -1048,9 +1053,17 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 				via = "lan"
 			}
 		}
-		for _, m := range p.Models {
-			// 思考档位不随模型下发：全系统固定六档，前端任何模型都能展开同一套
-			items = append(items, modelItem{p.ID, p.Name, m.ID, m.Name, m.ContextWindow, !p.IsSelectable(), via})
+		keys := p.KeyList()
+		for ki, k := range keys {
+			label := strings.TrimSpace(k.Label)
+			if label == "" && len(keys) > 1 {
+				// 没写分组备注名：多 Key 的供应商给个保底称呼，重名时至少能分辨
+				label = fmt.Sprintf("Key %d", ki+1)
+			}
+			for _, m := range k.Models {
+				// 思考档位不随模型下发：全系统固定六档，前端任何模型都能展开同一套
+				items = append(items, modelItem{p.ID, p.Name, m.ID, m.Name, m.ContextWindow, !p.IsSelectable(), via, k.ID, label})
+			}
 		}
 	}
 	t := a.DefaultTarget()
@@ -1063,10 +1076,13 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveProviderDraft 把请求里的 id/baseURL/apiKey/protocol 折算成一个可用的
-// 提供方：没存过的 id（或新增卡片）直接用请求里带来的地址与密钥，便于未保存
-// 先拉取/测试；预置模板的协议（如 Anthropic）在 id 命中预置时自动带上。
-func (a *App) resolveProviderDraft(id, baseURL, apiKey, protocol string) (*ProviderCfg, error) {
+// resolveProviderDraft 把请求里的 id/baseURL/apiKey/protocol/keyID 折算成一个
+// 可用的临时提供方：没存过的 id（或新增卡片）直接用请求里带来的地址与密钥，
+// 便于未保存先拉取/测试；预置模板的协议（如 Anthropic）在 id 命中预置时自动带上。
+// 结果是「只含一把 Key」的提供方（多 Key 供应商的拉取/测试都按单把 Key 走）：
+// keyID 命中已保存的 Key 就用它的密钥与协议，请求里带了 apiKey/protocol 的覆盖它
+// （前端不回传已有密钥，留空＝沿用）。
+func (a *App) resolveProviderDraft(id, baseURL, apiKey, protocol, keyID string) (*ProviderCfg, error) {
 	eff := &ProviderCfg{}
 	if p := a.providerByID(strings.TrimSpace(id)); p != nil {
 		*eff = *p
@@ -1076,41 +1092,138 @@ func (a *App) resolveProviderDraft(id, baseURL, apiKey, protocol string) (*Provi
 	if u := strings.TrimSpace(baseURL); u != "" {
 		eff.BaseURL = u
 	}
-	if k := strings.TrimSpace(apiKey); k != "" {
-		eff.APIKey = k
-	}
-	if v := strings.TrimSpace(protocol); v != "" {
-		eff.Protocol = v
-	}
 	if strings.TrimSpace(eff.BaseURL) == "" {
 		return nil, fmt.Errorf("缺少 API 地址")
 	}
+	k := eff.resolveKey(keyID, "")
+	if v := strings.TrimSpace(protocol); v != "" {
+		k.Protocol = v
+	}
+	if s := strings.TrimSpace(apiKey); s != "" {
+		k.APIKey = s
+	}
+	eff.Keys = []ProviderKeyCfg{k} // 只留这一把：拉取/测试都只针对它
+	eff.APIKey, eff.Models = "", nil
 	return eff, nil
 }
 
 // handleFetchModels 从提供方服务拉取可用模型清单（服务端代理，避开浏览器跨域）。
+// keyID 指明用哪把 Key：中转站按分组发 Key，不同分组能看到的模型不一样。
 func (a *App) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID       string `json:"id"`
 		BaseURL  string `json:"baseURL"`
 		APIKey   string `json:"apiKey"`
 		Protocol string `json:"protocol"`
+		KeyID    string `json:"keyId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	p, err := a.resolveProviderDraft(body.ID, body.BaseURL, body.APIKey, body.Protocol)
+	p, err := a.resolveProviderDraft(body.ID, body.BaseURL, body.APIKey, body.Protocol, body.KeyID)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	models, err := a.FetchModels(p)
+	models, err := a.FetchModels(p, body.KeyID)
 	if err != nil {
 		writeErr(w, 502, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"models": models})
+}
+
+// sanitizeModels 规整一份模型清单：去空白、按 id 去重（空 id 的丢掉）。
+func sanitizeModels(in []ModelCfg) []ModelCfg {
+	out := []ModelCfg{}
+	seen := map[string]bool{}
+	for _, m := range in {
+		mid := strings.TrimSpace(m.ID)
+		if mid == "" || seen[mid] {
+			continue
+		}
+		seen[mid] = true
+		m.ID = mid
+		out = append(out, m)
+	}
+	return out
+}
+
+// providerProtocolOK 渠道协议白名单：空串＝OpenAI 兼容（默认）、anthropic、
+// responses——与 llmproto.go 的三个实现一一对应。额外允许 Key 级的 "chat"
+// 哨兵（显式 OpenAI 兼容，与空串的「跟随供应商」区分，见 models.go keyProtocol）。
+func providerProtocolOK(v string) bool {
+	switch v {
+	case "", "chat", "anthropic", "responses":
+		return true
+	}
+	return false
+}
+
+// normalizeProviderKeys 校验并规整请求带来的多 Key 清单：
+//   - 归属 id 空（前端刚加的那把）就生成一个稳定的新 id，已保存的 id 原样保留
+//     ——会话/草稿里的模型引用靠它定位，id 一旦发出去就不能再变；
+//   - 协议必须是白名单值（空＝跟随供应商级）；
+//   - 密钥留空＝沿用同 id 已保存的密钥（前端不回传密钥，与供应商级同口径）；
+//   - 同一把 Key 内模型按 id 去重；
+//   - 彻底空的 Key（没密钥、没备注名、没模型）直接丢掉，不留空壳。
+func normalizeProviderKeys(in []ProviderKeyCfg, old *ProviderCfg) ([]ProviderKeyCfg, error) {
+	oldKeys := map[string]ProviderKeyCfg{}
+	used := map[string]bool{}
+	if old != nil {
+		for _, k := range old.Keys {
+			oldKeys[k.ID] = k
+			used[k.ID] = true
+		}
+	}
+	newKeyID := func() string {
+		for i := 1; ; i++ {
+			id := fmt.Sprintf("k%d", i)
+			if !used[id] {
+				used[id] = true
+				return id
+			}
+		}
+	}
+	out := make([]ProviderKeyCfg, 0, len(in))
+	claimed := map[string]bool{}
+	for _, k := range in {
+		k.ID = strings.TrimSpace(k.ID)
+		k.Label = strings.TrimSpace(k.Label)
+		k.APIKey = strings.TrimSpace(k.APIKey)
+		k.Protocol = strings.TrimSpace(k.Protocol)
+		if !providerProtocolOK(k.Protocol) {
+			return nil, fmt.Errorf("Key「%s」的协议类型未知：%s", keyLabelForErr(k), k.Protocol)
+		}
+		if k.APIKey == "" {
+			if o, ok := oldKeys[k.ID]; ok {
+				k.APIKey = o.APIKey // 留空＝沿用已保存的密钥
+			}
+		}
+		k.Models = sanitizeModels(k.Models)
+		if k.APIKey == "" && k.Label == "" && len(k.Models) == 0 {
+			continue
+		}
+		if k.ID == "" || claimed[k.ID] {
+			k.ID = newKeyID()
+		}
+		claimed[k.ID] = true
+		used[k.ID] = true
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+// keyLabelForErr 报错时用来指认是哪把 Key（备注名 > 归属 id）。
+func keyLabelForErr(k ProviderKeyCfg) string {
+	if k.Label != "" {
+		return k.Label
+	}
+	if k.ID != "" {
+		return k.ID
+	}
+	return "未命名"
 }
 
 // handleUpsertProvider 新增或更新单个提供方（模型页卡片「保存」）。
@@ -1122,6 +1235,9 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 		APIKey   string     `json:"apiKey"` // 空串 = 沿用已保存的 key
 		Protocol string     `json:"protocol"`
 		Models   []ModelCfg `json:"models"`
+		// Keys 自定义供应商的多 Key（多分组）：带了就按它保存（每把 Key 各自
+		// 的备注名/密钥/协议/模型）；预置提供方忽略它，保持单 Key 结构。
+		Keys []ProviderKeyCfg `json:"keys"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
@@ -1160,30 +1276,42 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	models := []ModelCfg{}
-	seen := map[string]bool{}
-	for _, m := range in.Models {
-		mid := strings.TrimSpace(m.ID)
-		if mid == "" || seen[mid] {
-			continue
-		}
-		seen[mid] = true
-		m.ID = mid
-		models = append(models, m)
-	}
+	models := sanitizeModels(in.Models)
 	// 预置提供方未带模型目录时回落到模板清单：套餐端点（智谱 Coding 等）
 	// 不一定支持 /models 拉取，模板自带 glm-5.3 系才能开箱即用
 	if isPreset && len(models) == 0 && len(preset.Models) > 0 {
 		models = append(models, preset.Models...)
 	}
-	pc := ProviderCfg{ID: id, Name: name, BaseURL: baseURL, Protocol: protocol, Models: models}
-	if key := strings.TrimSpace(in.APIKey); key != "" {
-		pc.APIKey = key
-	} else if old := a.providerByID(id); old != nil {
-		pc.APIKey = old.APIKey
+	old := a.providerByID(id)
+	// 多 Key：只有自定义供应商走多 Key 结构。请求没带 keys（老页面/接口调用只
+	// 提交 apiKey+models）时保留已保存的多 Key 结构——否则一次普通保存就会把
+	// 用户配好的多分组冲成单 Key。
+	var keys []ProviderKeyCfg
+	if isPreset {
+		// 预置提供方保持单 Key：密钥与模型由模板/系统维护，没有分组概念
+	} else if len(in.Keys) > 0 {
+		var err error
+		if keys, err = normalizeProviderKeys(in.Keys, old); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	} else if old != nil && len(old.Keys) > 0 {
+		keys = old.Keys
+	}
+	pc := ProviderCfg{ID: id, Name: name, BaseURL: baseURL, Protocol: protocol}
+	if len(keys) > 0 {
+		pc.Keys = keys
+		pc.APIKey, pc.Models = keys[0].APIKey, keys[0].Models // 供应商级镜像第一把（老版本可读）
+	} else {
+		pc.Models = models
+		if key := strings.TrimSpace(in.APIKey); key != "" {
+			pc.APIKey = key
+		} else if old != nil {
+			pc.APIKey = old.APIKey
+		}
 	}
 	// 启停状态与外网通道不在编辑表单里：替换保存时沿用旧值（toggle 端点与公告同步才是它们的写入口）
-	if old := a.providerByID(id); old != nil {
+	if old != nil {
 		pc.Enabled = old.Enabled
 		pc.AutoDisabled = old.AutoDisabled
 		pc.PublicBaseURL = old.PublicBaseURL
@@ -1269,26 +1397,39 @@ func (a *App) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		BaseURL  string   `json:"baseURL"`
 		APIKey   string   `json:"apiKey"`
 		Protocol string   `json:"protocol"`
+		KeyID    string   `json:"keyId"` // 用哪把 Key 测（不同分组的分组能调的模型不同）
 		Models   []string `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	p, err := a.resolveProviderDraft(in.ID, in.BaseURL, in.APIKey, in.Protocol)
+	p, err := a.resolveProviderDraft(in.ID, in.BaseURL, in.APIKey, in.Protocol, in.KeyID)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"results": TestProviderModels(p, in.Models)})
+	writeJSON(w, 200, map[string]any{"results": TestProviderModels(p, in.KeyID, in.Models)})
 }
 
 func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	// keyView 是下发给前端的一把 Key：密钥一律只回掩码，模型清单与分组备注名
+	// 这类非敏感信息才下发（设置页据此渲染多 Key 卡片）。
+	type keyView struct {
+		ID           string     `json:"id"`
+		Label        string     `json:"label,omitempty"`
+		Protocol     string     `json:"protocol,omitempty"` // Key 级协议覆盖：空＝跟随供应商级
+		APIKeyMasked string     `json:"apiKeyMasked"`
+		Models       []ModelCfg `json:"models"`
+	}
 	type providerView struct {
-		ID            string     `json:"id"`
-		Name          string     `json:"name"`
-		BaseURL       string     `json:"baseURL"`
-		Protocol      string     `json:"protocol,omitempty"` // 渠道协议：空＝OpenAI 兼容、anthropic、responses
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		BaseURL  string `json:"baseURL"`
+		Protocol string `json:"protocol,omitempty"` // 渠道协议：空＝OpenAI 兼容、anthropic、responses
+		// Keys 多 Key 供应商的每把 Key（自定义渠道卡片逐把渲染）；预置提供方与
+		// 公司通道没有多 Key 结构，这一项为空、前端退回单 Key 表单。
+		Keys          []keyView  `json:"keys,omitempty"`
 		APIKeyMasked  string     `json:"apiKeyMasked"`
 		Preset        bool       `json:"preset"`
 		PresetURL     string     `json:"presetURL,omitempty"`
@@ -1305,9 +1446,15 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	for _, p := range a.Cfg.Providers {
 		pv := providerView{
 			ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Protocol: p.Protocol,
-			APIKeyMasked: maskKey(p.APIKey), Models: p.Models,
+			// 供应商级掩码取第一把 Key（多 Key 结构下供应商级 apiKey 只是镜像，
+			// 内存里可能还没同步过来）
+			APIKeyMasked: maskKey(p.KeyList()[0].APIKey), Models: p.Models,
 			Enabled: p.Enabled == nil || *p.Enabled, AutoDisabled: p.AutoDisabled,
 			Company: p.ID == wizardProviderID, PublicBaseURL: p.PublicBaseURL,
+		}
+		for _, k := range p.Keys {
+			pv.Keys = append(pv.Keys, keyView{ID: k.ID, Label: k.Label, Protocol: k.Protocol,
+				APIKeyMasked: maskKey(k.APIKey), Models: k.Models})
 		}
 		if pv.Company && p.PublicBaseURL != "" {
 			if companyViaPublic() {
@@ -1442,6 +1589,9 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			BaseURL string     `json:"baseURL"`
 			APIKey  string     `json:"apiKey"` // 空串表示沿用已保存的 key
 			Models  []ModelCfg `json:"models"`
+			// Keys 多 Key 供应商的每把 Key：带了就按它写（留空/不传则沿用已保存的
+			// 多 Key 结构，普通保存不会把多分组冲成单 Key）
+			Keys []ProviderKeyCfg `json:"keys"`
 		} `json:"providers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1469,10 +1619,26 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			if pc.ID == "" || pc.BaseURL == "" {
 				continue
 			}
-			if in.APIKey != "" {
-				pc.APIKey = strings.TrimSpace(in.APIKey)
-			} else if old := a.providerByID(in.ID); old != nil {
-				pc.APIKey = old.APIKey // 前端回传空 key = 保持不变
+			old := a.providerByID(in.ID)
+			if len(in.Keys) > 0 {
+				keys, err := normalizeProviderKeys(in.Keys, old)
+				if err != nil {
+					writeErr(w, 400, err.Error())
+					return
+				}
+				pc.Keys = keys
+				if len(keys) > 0 {
+					pc.APIKey, pc.Models = keys[0].APIKey, keys[0].Models
+				}
+			} else if old != nil && len(old.Keys) > 0 {
+				pc.Keys, pc.APIKey, pc.Models = old.Keys, old.APIKey, old.Models // 没带多 Key：原样保留
+			}
+			if len(pc.Keys) == 0 {
+				if in.APIKey != "" {
+					pc.APIKey = strings.TrimSpace(in.APIKey)
+				} else if old != nil {
+					pc.APIKey = old.APIKey // 前端回传空 key = 保持不变
+				}
 			}
 			merged = append(merged, pc)
 		}
@@ -1883,6 +2049,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		ParentID       string           `json:"parent"`
 		Provider       string           `json:"provider"`
 		Model          string           `json:"model"`
+		ProviderKey    string           `json:"providerKey"` // 模型归属的那把 Key（多 Key 供应商）
 		Permission     string           `json:"permission"`
 		Thinking       string           `json:"thinking"`
 		PlanMode       bool             `json:"planMode"`
@@ -1900,7 +2067,8 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	m, err := a.createSession(createSessionParams{
 		Mode: body.Mode, Workspace: body.Workspace, Title: body.Title,
 		ParentID: body.ParentID, Provider: body.Provider, Model: body.Model,
-		Permission: body.Permission, Thinking: body.Thinking,
+		ProviderKey: body.ProviderKey,
+		Permission:  body.Permission, Thinking: body.Thinking,
 		PlanMode: body.PlanMode, GoalMode: body.GoalMode, GoalText: body.GoalText,
 		Tools: body.Tools, Remote: body.Remote,
 		CloneFromParent: body.InheritContext, CopyHistory: body.InheritContext,
@@ -2164,18 +2332,19 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title      *string   `json:"title"`
-		Workspace  *string   `json:"workspace"`
-		Provider   *string   `json:"provider"`
-		Model      *string   `json:"model"`
-		Permission *string   `json:"permission"`
-		Thinking   *string   `json:"thinking"`
-		PlanMode   *bool     `json:"planMode"`
-		GoalMode   *bool     `json:"goalMode"`
-		GoalText   *string   `json:"goalText"`
-		Tools      *[]string `json:"tools"`
-		Archived   *bool     `json:"archived"`
-		Unread     *bool     `json:"unread"`
+		Title       *string   `json:"title"`
+		Workspace   *string   `json:"workspace"`
+		Provider    *string   `json:"provider"`
+		Model       *string   `json:"model"`
+		ProviderKey *string   `json:"providerKey"` // 模型归属的那把 Key（多 Key 供应商）
+		Permission  *string   `json:"permission"`
+		Thinking    *string   `json:"thinking"`
+		PlanMode    *bool     `json:"planMode"`
+		GoalMode    *bool     `json:"goalMode"`
+		GoalText    *string   `json:"goalText"`
+		Tools       *[]string `json:"tools"`
+		Archived    *bool     `json:"archived"`
+		Unread      *bool     `json:"unread"`
 		// AI 自动标题（组件 session-title）的通道语义：autoTitle=true 是组件改
 		// 标题——会话被手动命名（钉住）时 409 拒绝，成功也不打钉；autoTitleUnpin
 		// =true 解除钉住（恢复自动改名）。不带这两项的普通 title 修改视为用户
@@ -2223,8 +2392,18 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		old := m.Provider
 		m.Provider = strings.TrimSpace(*body.Provider)
 		if old != m.Provider {
+			// 换供应商：Key 归属跟着换（除非本次同时显式给了新的归属），
+			// 否则新供应商下会拿旧供应商的 Key id 去解析密钥
+			if body.ProviderKey == nil {
+				m.ProviderKey = ""
+			}
 			notes = append(notes, ctxNote{ctxModel, "提供方：" + old + " → " + m.Provider})
 		}
+	}
+	if body.ProviderKey != nil {
+		// 模型归属的 Key（多 Key 供应商重名模型的唯一定位依据）：不记上下文
+		// 事件——用户选的还是同一个模型名，只是落到了另一把 Key 上
+		m.ProviderKey = strings.TrimSpace(*body.ProviderKey)
 	}
 	if body.Model != nil {
 		old := m.Model

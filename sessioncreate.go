@@ -43,19 +43,22 @@ func createSessionErrCode(err error) int {
 // 创建技能/长期助理主对话 full」补——与人工口径一致；派发入口总是显式传值，
 // 不走默认）。
 type createSessionParams struct {
-	Mode       string
-	Title      string
-	Workspace  string
-	ParentID   string // 挂靠的父会话（子对话/分支克隆；顶层任务与普通会话为空）
-	Provider   string
-	Model      string
-	Permission string
-	Thinking   string
-	PlanMode   bool
-	GoalMode   bool
-	GoalText   string
-	Tools      []string
-	Remote     *RemoteWorkspace
+	Mode      string
+	Title     string
+	Workspace string
+	ParentID  string // 挂靠的父会话（子对话/分支克隆；顶层任务与普通会话为空）
+	Provider  string
+	Model     string
+	// ProviderKey 模型归属的那把 Key（自定义供应商多 Key 后用于定位密钥；
+	// 空＝按模型名找回/第一把可用 Key）
+	ProviderKey string
+	Permission  string
+	Thinking    string
+	PlanMode    bool
+	GoalMode    bool
+	GoalText    string
+	Tools       []string
+	Remote      *RemoteWorkspace
 
 	Expert       string // 子对话专家名（dispatch_sub 专属；空=非专家）
 	DispatchedBy string // 派发链（dispatch_task 专属：回报按它找派发方）
@@ -129,6 +132,7 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		ParentID:     strings.TrimSpace(p.ParentID),
 		Provider:     strings.TrimSpace(p.Provider),
 		Model:        strings.TrimSpace(p.Model),
+		ProviderKey:  strings.TrimSpace(p.ProviderKey),
 		Permission:   perm,
 		Thinking:     thinking,
 		PlanMode:     p.PlanMode,
@@ -149,6 +153,7 @@ func (a *App) createSession(p createSessionParams) (*SessionMeta, error) {
 		m.Workspace = parent.Workspace
 		m.Provider = parent.Provider
 		m.Model = parent.Model
+		m.ProviderKey = parent.ProviderKey
 		m.Permission = parent.Permission
 		m.Thinking, _ = normalizeThinkingLevel(parent.Thinking)
 		m.Tools = parent.Tools

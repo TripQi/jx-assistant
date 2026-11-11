@@ -266,10 +266,13 @@ func applyAnnounce(a *App, ann *announcePayload, server string, fromPublic bool)
 				p.BaseURL = ann.API.BaseURL // 公网公告的 baseURL 按公网推导，不覆盖内网地址
 			}
 			p.PublicBaseURL = strings.TrimRight(ann.API.PublicBaseURL, "/") // 空=未授权/关闭：同步清除
-			p.Models = buildWizardModels(ann.API.Models)
+			// 公司通道的密钥+模型由服务端下发：统一走 SetPrimaryKey（多 Key 结构
+			// 改第一把，单 Key 结构改供应商级），别的地方不用关心结构形态
+			models := buildWizardModels(ann.API.Models)
+			p.SetPrimaryKey(p.APIKey, models)
 			changed = append(changed, fmt.Sprintf("模型×%d", len(ann.API.Models)))
 			if m := a.Cfg.Model; m != "" && !providerHasModel(p, m) { // 已选模型被下线：回默认
-				a.Cfg.Model = firstModelID(p.Models)
+				a.Cfg.Model = firstModelID(models)
 			}
 		}
 	}
@@ -421,13 +424,9 @@ func wizardProvider(a *App) *ProviderCfg {
 	return nil
 }
 
+// providerHasModel 该提供方（多 Key 时任意一把 Key）的目录里有没有这个模型。
 func providerHasModel(p *ProviderCfg, id string) bool {
-	for _, m := range p.Models {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
+	return p.hasModel(id)
 }
 
 /* ---------- 一次性重新接入（发新版本时把老配置追平） ---------- */

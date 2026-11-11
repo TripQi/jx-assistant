@@ -421,7 +421,7 @@ func (a *App) bridgeDispatch(r *http.Request, m *SessionMeta, tok *bridgeToken, 
 		a.bridgeMu.Unlock()
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	provider, mdl, err := tc.dispatchModelChoice(str("model"))
+	provider, providerKey, mdl, err := tc.dispatchModelChoice(str("model"))
 	if err != nil {
 		a.bridgeMu.Lock()
 		tok.dispAlive--
@@ -435,7 +435,7 @@ func (a *App) bridgeDispatch(r *http.Request, m *SessionMeta, tok *bridgeToken, 
 	params := createSessionParams{
 		Mode: "task", Title: title, Workspace: m.Workspace,
 		Permission: perm, DispatchedBy: m.ID,
-		Provider: provider, Model: mdl,
+		Provider: provider, Model: mdl, ProviderKey: providerKey,
 	}
 	if m.Remote != nil {
 		rr := *m.Remote

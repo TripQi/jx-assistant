@@ -592,6 +592,9 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.APIKey = unprotectSecret(cfg.APIKey)
 	for i := range cfg.Providers {
 		cfg.Providers[i].APIKey = unprotectSecret(cfg.Providers[i].APIKey)
+		for j := range cfg.Providers[i].Keys {
+			cfg.Providers[i].Keys[j].APIKey = unprotectSecret(cfg.Providers[i].Keys[j].APIKey)
+		}
 	}
 	// 老配置兼容：没有 Providers 时把旧的三元组折算成第一个 provider
 	if len(cfg.Providers) == 0 {
@@ -605,16 +608,53 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		cfg.Providers = []ProviderCfg{p}
 	}
+	// 多 Key（多分组）迁移：自定义供应商原来的供应商级单 Key（apiKey + models）
+	// 折算成「只有一把 Key」的多 Key 结构——老配置加载即升级，用户不用重填；
+	// 保存时 Keys 回读一致（config_migrate_test 有往返用例）。
+	// 预置提供方与公司内部通道不迁：它们是系统/服务端维护的单通道（同步器直接
+	// 改供应商级字段），保持单 Key 结构，运行时由 KeyList 合成隐含 Key 走同一套
+	// 解析路径。
+	keysMigrated := false
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		if len(p.Keys) > 0 || p.ID == wizardProviderID {
+			continue
+		}
+		if _, isPreset := PresetByID(p.ID); isPreset {
+			continue
+		}
+		if p.APIKey == "" && len(p.Models) == 0 {
+			continue // 空卡片（新建未填）：没有可迁移的内容
+		}
+		p.Keys = []ProviderKeyCfg{{ID: newProviderKeyID(p), APIKey: p.APIKey, Models: p.Models}}
+		keysMigrated = true
+	}
 	// 步数上限从历次默认迁移过（旧默认 → 不限制）、压缩从百分比阈值迁移到
 	// 间隔制：立即落盘，让设置页读数、配置文件与运行时三者一致（免得用户看到
 	// 配置文件里还是旧键，以为没生效；其他补全都留给下一次保存）
-	if maxStepsBumped || remoteHostMigrated || compactMigrated || plainSelfMigrated {
+	if maxStepsBumped || remoteHostMigrated || compactMigrated || plainSelfMigrated || keysMigrated {
 		if err := cfg.Save(path); err != nil {
 			log.Printf("回写配置迁移失败: %v", err)
 		}
 	}
 	cfg.syncLegacyFields()
 	return cfg, nil
+}
+
+// newProviderKeyID 给一把 Key 生成供应商内唯一的稳定归属 id。
+// 归属 id 一旦发给前端就会被会话/草稿记住，因此只在新 Key 落库时生成一次，
+// 之后永不改写（改了等于把老会话的模型引用指向别的 Key）。
+func newProviderKeyID(p *ProviderCfg) string {
+	used := map[string]bool{}
+	for _, k := range p.Keys {
+		used[k.ID] = true
+	}
+	for i := 1; ; i++ {
+		id := fmt.Sprintf("k%d", i)
+		if !used[id] {
+			return id
+		}
+	}
 }
 
 // legacyPlainHosts 自家服务端的已知地址——存量配置里可能以明文 http:// 记录
@@ -645,16 +685,19 @@ func migrateLegacyPlainURL(u string) (string, bool) {
 }
 
 // syncLegacyFields 让旧字段与第一个 provider 保持一致，老版本 exe 回退时仍能读。
+// 多 Key 供应商按第一把 Key 折算（那把 Key 就是镜像到供应商级字段的那把）。
 func (c *Config) syncLegacyFields() {
 	if len(c.Providers) == 0 {
 		return
 	}
 	p := c.Providers[0]
 	c.BaseURL = p.BaseURL
-	c.APIKey = p.APIKey
 	c.Model = ""
-	if len(p.Models) > 0 {
-		c.Model = p.Models[0].ID
+	// KeyList 至少一项：多 Key 取第一把，老的供应商级单 Key 就是合成的那一把
+	first := p.KeyList()[0]
+	c.APIKey = first.APIKey
+	if len(first.Models) > 0 {
+		c.Model = first.Models[0].ID
 	}
 }
 
@@ -668,7 +711,21 @@ func (c *Config) Save(path string) error {
 		out.APIKey = enc
 	}
 	for i := range out.Providers {
-		if enc, err := protectSecret(out.Providers[i].APIKey); err == nil {
+		// 多 Key 供应商：每把 Key 的密钥各自加密；供应商级 apiKey/models 作为
+		// 第一把 Key 的镜像一并写盘（老版本 exe 回退时仍读得到唯一那把 Key，
+		// 新版本加载时以 Keys 为准、镜像只是派生结果，不会成为第二个事实来源）。
+		if n := len(out.Providers[i].Keys); n > 0 {
+			keys := make([]ProviderKeyCfg, n)
+			copy(keys, out.Providers[i].Keys)
+			for j := range keys {
+				if enc, err := protectSecret(keys[j].APIKey); err == nil {
+					keys[j].APIKey = enc
+				}
+			}
+			out.Providers[i].Keys = keys
+			out.Providers[i].APIKey = keys[0].APIKey
+			out.Providers[i].Models = keys[0].Models
+		} else if enc, err := protectSecret(out.Providers[i].APIKey); err == nil {
 			out.Providers[i].APIKey = enc
 		}
 	}

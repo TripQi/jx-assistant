@@ -191,6 +191,7 @@ def process_session(sid):
 
         ar = host_call("POST", "/api/llm/ask", {
             "session": sid, "system": TITLE_SYSTEM_PROMPT,
+            "purpose": "title",
             "user": build_user_prompt(old_title, texts[-RECENT_MSGS:])})
         if not ar or ar.get("status") != 200:
             with _gen_lock:

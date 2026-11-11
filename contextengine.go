@@ -193,13 +193,17 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, input string) (string,
 	var sb strings.Builder
 	var usage *Usage
 	start := time.Now()
-	err := StreamChat(context.Background(), target, ChatRequest{Model: target.Model, Messages: msgs}, StreamCallbacks{
+	// 用量明细（组件 usage-stats）：摘要调用单独记为「上下文压缩」用途——压缩的
+	// token 花销往往不小，混在主对话里看不出钱花在哪
+	meterCb, finishUsage := e.app.meterUsage(usagePurposeCompact, sess, target, StreamCallbacks{
 		OnText: func(s string) { sb.WriteString(s) },
 		OnUsage: func(u Usage) {
 			uu := u
 			usage = &uu
 		},
 	})
+	err := StreamChat(context.Background(), target, ChatRequest{Model: target.Model, Messages: msgs}, meterCb)
+	finishUsage(err)
 	p := map[string]any{"type": "call", "scope": "summarize", "model": target.AuditModel(),
 		"msgs": len(msgs), "est": estimateTokens(msgs),
 		"ms": time.Since(start).Milliseconds(), "text": len([]rune(sb.String()))}

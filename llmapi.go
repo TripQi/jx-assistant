@@ -27,6 +27,10 @@ func (a *App) handleLLMAsk(w http.ResponseWriter, r *http.Request) {
 		Session string `json:"session"` // 可选：跟随该会话配置的模型
 		System  string `json:"system"`  // 可选系统提示词
 		User    string `json:"user"`    // 必填：单轮正文
+		// Purpose 可选：这次辅助生成在用量统计里记成什么用途（title=AI 自动
+		// 会话标题、compact=上下文压缩，其余一律 assist=其他辅助生成）。
+		// 组件自己知道在干什么，记账口径由调用方给，主程序不猜。
+		Purpose string `json:"purpose"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
@@ -41,9 +45,11 @@ func (a *App) handleLLMAsk(w http.ResponseWriter, r *http.Request) {
 		user = user[:llmAskMaxInput]
 	}
 	target := a.DefaultTarget()
+	var sess *SessionMeta
 	if body.Session != "" {
 		if m, err := a.Store.Get(body.Session); err == nil && m != nil {
 			target = a.resolveTarget(m)
+			sess = m
 		}
 	}
 	msgs := make([]Message, 0, 2)
@@ -54,12 +60,24 @@ func (a *App) handleLLMAsk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), llmAskTimeout)
 	defer cancel()
 	var sb strings.Builder
-	if err := StreamChat(ctx, target, ChatRequest{
+	purpose := usagePurposeAssist
+	switch strings.TrimSpace(body.Purpose) {
+	case usagePurposeTitle:
+		purpose = usagePurposeTitle
+	case usagePurposeCompact:
+		purpose = usagePurposeCompact
+	}
+	meterCb, finishUsage := a.meterUsage(purpose, sess, target, StreamCallbacks{
+		OnText: func(s string) { sb.WriteString(s) },
+	})
+	err := StreamChat(ctx, target, ChatRequest{
 		Model:    target.Model,
 		Messages: msgs,
 		Stream:   true,
-	}, StreamCallbacks{OnText: func(s string) { sb.WriteString(s) }}); err != nil {
-		writeErr(w, 502, "模型调用失败：" + err.Error())
+	}, meterCb)
+	finishUsage(err)
+	if err != nil {
+		writeErr(w, 502, "模型调用失败："+err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"text": sb.String()})

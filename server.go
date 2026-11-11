@@ -97,6 +97,7 @@ type App struct {
 	stopWatchdog        time.Duration     // 停止看门狗：协作取消后等多久仍未收口就强制终结（runtime.go watchStop）
 	streamKillMu        sync.Mutex
 	streamKills         map[string]func() // 会话 → 在跑模型流的强制断开器（llm.go 注册，停止看门狗硬终结时调用）
+	usageCh             chan usageRow     // 用量明细的异步落库队列（usagestats.go：流式热路径只入队，写库在后台协程）
 	osOnce              sync.Once
 	osDesc              string // 环境快照用的系统描述（Windows 版本 + PowerShell 版本，探测一次缓存）
 	selfOnce            sync.Once
@@ -223,6 +224,10 @@ func NewApp(cfg *Config, cfgPath, webDir string) (*App, error) {
 	recorderASR = a.transcribeWavBytes
 	// 文件快照保留策略：按天超龄清理 + 按会话限量驱逐（见 snapshot.go）
 	go a.snapshotJanitor()
+	// 用量统计的明细落库协程 + 保留策略（见 usagestats.go）：组件关掉时不记录，
+	// 队列照常空转，已有数据不动
+	a.startUsageWriter()
+	go a.usageJanitor()
 	// 会话浏览器 profile 的按天回收（见 browser_cleanup.go）：启动先跑一轮，之后每天
 	go a.browserProfileJanitor()
 	// 公司接入自动同步（sync.go）：跟随服务端变化（模型/公司名/地址迁移）
@@ -299,7 +304,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// 整文件通道）共用；未启用时 404。
 	a.apiRoute(mux, "GET /api/user-memory", a.handleUserMemoryGet, apiMeta{Summary: "读用户记忆（用户称呼/身份与喜好/AI 名字/AI 身份/对话气泡颜色）", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/user-memory", a.handleUserMemorySet, apiMeta{Summary: "按字段保存用户记忆（未给出的字段保持不变，各字段上限 1000 字自动截断）", Params: "userName、userMemory、aiName、aiIdentity、bubbleColor 均可选", Perm: permWorkspace})
-	a.apiRoute(mux, "POST /api/llm/ask", a.handleLLMAsk, apiMeta{Summary: "独立单轮模型调用（一次请求一次输出，不进会话上下文）", Params: "system、user、session 可选（跟随该会话的模型）", Perm: permWorkspace})
+	a.apiRoute(mux, "POST /api/llm/ask", a.handleLLMAsk, apiMeta{Summary: "独立单轮模型调用（一次请求一次输出，不进会话上下文）", Params: "system、user、session、purpose 可选（跟随该会话的模型；purpose=title 记为标题生成）", Perm: permWorkspace})
 	a.apiRoute(mux, "GET /api/modes", a.handleChatModes, apiMeta{Summary: "工作模式清单（新建会话可选的模式）", Perm: permReadOnly}) // 工作模式清单（chatmodes.go）：模式下拉与 dispatch_task 的 mode 参数同一数据源
 	mux.HandleFunc("POST /api/providers", a.handleUpsertProvider)
 	mux.HandleFunc("POST /api/providers/toggle", a.handleToggleProvider)

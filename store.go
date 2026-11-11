@@ -356,6 +356,39 @@ var storeMigrations = []migration{
 			`ALTER TABLE sessions ADD COLUMN provider_key TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// 「用量统计」组件的逐次调用明细（usagestats.go）：sessions 只有会话级
+		// 累计，看不出按天/按模型/按渠道的账，也算不出花费。这里一次模型调用
+		// 一行（成功失败都记），价格与倍率不进表——它们是可改的配置，聚合时
+		// 现算（改了单价历史花费跟着变）。
+		id: "0018_usage_events",
+		sql: []string{
+			`CREATE TABLE IF NOT EXISTS usage_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts TEXT NOT NULL,
+				session_id TEXT NOT NULL DEFAULT '',
+				purpose TEXT NOT NULL DEFAULT '',
+				provider_id TEXT NOT NULL DEFAULT '',
+				key_id TEXT NOT NULL DEFAULT '',
+				model TEXT NOT NULL DEFAULT '',
+				protocol TEXT NOT NULL DEFAULT '',
+				input_tokens INTEGER NOT NULL DEFAULT 0,
+				cache_read INTEGER NOT NULL DEFAULT 0,
+				cache_write INTEGER NOT NULL DEFAULT 0,
+				output_tokens INTEGER NOT NULL DEFAULT 0,
+				ttft_ms INTEGER NOT NULL DEFAULT 0,
+				duration_ms INTEGER NOT NULL DEFAULT 0,
+				ok INTEGER NOT NULL DEFAULT 1,
+				error TEXT NOT NULL DEFAULT '',
+				stream INTEGER NOT NULL DEFAULT 0
+			)`,
+			// 按天聚合看 ts、按会话回溯看 session_id、按模型拆账看 model——
+			// 三个方向都是页面上的主查询，都不能扫全表
+			`CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts)`,
+			`CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_events(model)`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

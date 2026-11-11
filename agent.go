@@ -40,7 +40,7 @@ func clipToolResult(out string) string {
 
 // Event 是后端向前端推送的流式事件（SSE data 帧的载荷）。
 type Event struct {
-	Type       string   `json:"type"` // message|delta|tool_start|tool_end|tool_wait|sub_start|sub_end|title|done|stopped|error|pending|approval_required|approval_resolved|question_required|question_resolved|todos
+	Type       string   `json:"type"` // message|delta|tool_start|tool_end|tool_wait|sub_start|sub_end|title|done|stopped|error|pending|usage|approval_required|approval_resolved|question_required|question_resolved|todos
 	Delta      string   `json:"delta,omitempty"`
 	Message    *Message `json:"message,omitempty"`
 	Thinking   string   `json:"thinking,omitempty"` // message 事件附带该步思考原文（前端实时渲染思考块用）
@@ -1301,7 +1301,10 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				}
 				lastOut = t
 			}
-			err = StreamChat(stepCtx, target, req, StreamCallbacks{
+			// 用量明细埋点（组件 usage-stats）：包一层回调记首字延迟与流尾 usage，
+			// 流结束（成功或失败）调 finishUsage 异步落一条明细——失败调用也记，
+			// 页面才能算成功率
+			meterCb, finishUsage := a.meterUsage(usagePurposeOf(sess), sess, target, StreamCallbacks{
 				// 模型流强断登记（停止看门狗硬终结用）：流建立时注册、结束时注销——
 				// 硬停止时直接断开底层连接，不依赖 ctx 取消生效
 				OnBody: func(abort func()) {
@@ -1339,6 +1342,22 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 					a.noteCompactUsage(sess.ID, target.Model, u.PromptTokens)
 				},
 			})
+			err = StreamChat(stepCtx, target, req, meterCb)
+			finishUsage(err)
+			// 真实用量推给前端（输入框下方的实时速度条用它对账定格）：流式过程中
+			// 前端按字符估个数先显示，这里给出这一步的真实输出 tokens 与首字延迟
+			if usage != nil {
+				ttftMs := int64(0)
+				if !firstOut.IsZero() {
+					ttftMs = firstOut.Sub(callStart).Milliseconds()
+				}
+				emit(Event{Type: "usage", Data: map[string]any{
+					"outputTokens": usage.CompletionTokens,
+					"inputTokens":  usage.PromptTokens,
+					"ttftMs":       ttftMs,
+					"durationMs":   time.Since(callStart).Milliseconds(),
+				}})
+			}
 			// 调用日志（引擎记录）：成败都落——发送规模、前缀指纹、返回、缓存命中、耗时、
 			// 本次实际使用的模型（重试的每次尝试各一条；中途换模型的会话按行即可拆账）
 			outMs := int64(0)

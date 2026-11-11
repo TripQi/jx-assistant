@@ -269,6 +269,9 @@ type LLMTarget struct {
 	// ProviderID 目标所属提供方 id（""=旧单模型配置）：调用层用它把连接类失败
 	// 归因到提供方（公司通道不可达时自动停用，见 sync.go noteProviderConnFail）。
 	ProviderID string
+	// KeyID 这次调用用的是该提供方的哪把 Key（多 Key 供应商的用量要能区分是哪把
+	// 分组的额度；""=老单 Key 结构合成的隐含 Key）。只用于记账与展示。
+	KeyID string
 	// AltBaseURL 外网备用地址（公司通道由公告下发）：内网地址连接失败时
 	// StreamChat 自动改走这里重试一次。
 	AltBaseURL string
@@ -345,7 +348,7 @@ func (a *App) resolveTarget(sess *SessionMeta) LLMTarget {
 func (a *App) targetOf(p *ProviderCfg, keyID, modelID string) LLMTarget {
 	k := p.resolveKey(keyID, modelID)
 	t := LLMTarget{BaseURL: p.BaseURL, APIKey: k.APIKey, ContextWindow: DefaultContextWindow,
-		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL, Protocol: p.keyProtocol(k)}
+		ProviderID: p.ID, AltBaseURL: p.PublicBaseURL, Protocol: p.keyProtocol(k), KeyID: k.ID}
 	t.Model = modelID
 	if t.Model == "" && len(k.Models) > 0 {
 		t.Model = k.Models[0].ID

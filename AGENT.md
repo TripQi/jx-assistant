@@ -484,14 +484,29 @@ WebView2 内核渲染（浏览器组件已全部内嵌进 exe，整个程序就
   （外部别名保持旧内容），Windows 上替换前尽力保留原文件安全描述符。
 - **Windows 后端**（`sandbox_windows.go`，对齐官方 sandbox-windows-acl）：
   `CreateRestrictedToken` 造受限令牌（剥全部特权 + LUA + 写受限 Flags），
-  restricting 列表 = 登录 SID + Everyone + 工作区/临时目录合成 SID（由路径
-  SHA-256 派生，长期 ACE 授权工作区、一次性授权每运行私有临时目录）；子进程
-  每次写都过内核两段检查。令牌默认 DACL 按官方 setTokenDefaultDaclGrant
-  补授（临时 SID 优先，新建对象不携带共享工作区能力），保证管道/临时文件
-  可创建。NTFS 硬链接写穿属官方自报缺口（密级关卡撤除后重新打开：受限
+  restricting 列表 = 登录 SID + Everyone + **CONSOLE LOGON（S-1-2-1）** +
+  工作区/临时目录合成 SID（由路径 SHA-256 派生，长期 ACE 授权工作区、
+  一次性授权每运行私有临时目录）；子进程每次写都过内核两段检查。令牌默认
+  DACL 按官方 setTokenDefaultDaclGrant 补授（临时 SID 优先，新建对象不携带
+  共享工作区能力；另加 CONSOLE LOGON，见下条），保证管道/临时文件可创建。
+  **控制台是硬约束**（2026-11-11 实测定案）：cmd / powershell / python 都是
+  控制台程序，子系统建控制台时用的安全描述符授的是登录会话类身份、不授
+  Everyone，restricting 列表与令牌默认 DACL 里缺 CONSOLE LOGON 时，pass-2
+  在 DLL 初始化阶段就拒，子进程 **0xC0000142 秒退、零输出**——这正是
+  「沙箱内命令静默失效、返回『命令执行完成，无输出』」的根因。选
+  CONSOLE LOGON 而非 BUILTIN\Users：两者都能建控制台，但 Users 会连带写开
+  `C:\ProgramData` 根与 `C:\Windows\Temp`（实测）；INTERACTIVE 同样能建，
+  但 `C:\Users\Public` 授 INTERACTIVE 写权，放行即逃逸，仍在排除名单。
+  NTFS 硬链接写穿属官方自报缺口（密级关卡撤除后重新打开：受限
   进程打开工作区内硬链接名时，NTFS 懒传播会把继承授权 ACE 应用到共享
   SD，外部别名随之可写——首授后全树扫描摘 ACE 的收尾因懒传播在下次
   打开时重新应用而无效，已移除）。
+- **沙箱内进程的退出码必须采集**（2026-11-11 补）：`GetExitCodeProcess` 在
+  `wait()` 里统一取码，前台非 0 补 `[进程退出异常: exit status N]`（与完全
+  访问路径 `runUnconfinedLocal` 同口径，NTSTATUS 崩溃码补十六进制），后台
+  作业 `jobRun.exitInfo` 也用它（此前硬写 `exit 0`，秒退照样报成功）；每次
+  沙箱执行留一行日志（命令行/档位/退出码/耗时）。排查沙箱问题先看这条
+  日志——没有退出码时「命令崩了」和「命令没输出」长得一模一样。
 - **密级关卡（已撤除）**：曾在官方之上叠加 Low 完整性级别封堵——受限
   令牌降为低完整性（S-1-16-4096）、工作区与私有临时目录打 Low 强制标签，
   内核 NO_WRITE_UP 不分路线统一拒绝「写/删密级更高的对象」。因常驻

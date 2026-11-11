@@ -1924,7 +1924,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 |---|---|
 | `main.go` | 启动入口：配置、HTTP 服务、自动开浏览器、-webdir 开发模式 |
 | `config.go` | 运行配置（含 providers 与压缩设置）的加载/保存/兼容折算 |
-| `models.go` | 多 provider 模型清单、调用目标解析、模型列表拉取（按渠道协议适配端点与鉴权头） |
+| `models.go` | 多 provider 模型清单、调用目标解析（含自定义供应商多 Key 的模型归属解析与 Key 级协议覆盖）、模型列表拉取（按渠道协议适配端点与鉴权头） |
 | `config.go` 的 `companyQuota` | **公司通道额度快照**（服务端随 `/announce`、`/provision` 的 `quota` 字段下发，客户端只存不算）：`sync.go` 的 `applyAnnounce` 与 `wizard.go` 的 `applyProvisionPayload` 写进 `Cfg.CompanyQuota`（`quotaEqual` 判变化才落盘）；`/api/models` 带 `companyQuota`（模型菜单里**公司通道那个分组头**上显示「剩余 N 积分」，悬停看明细）、`/api/config` 的公司通道带 `quota`（设置页公司通道**卡片头**的额度 chip + 展开后的明细与「刷新额度」）；设置页「刷新额度」走 `POST /api/company-sync`——复用 `companySyncOnce` 重拉一轮公告，**不为额度另开查询接口**（new-api 的 AI 接口没有余额端点，额度只能由服务端代读并随公告下发） || `llm.go` | OpenAI 兼容流式客户端（SSE 解析、工具调用增量聚合）+ mock 演示模型；`StreamChat` 是全部协议的统一入口（按 `LLMTarget.Protocol` 分发，主备地址故障转移/断开器登记/错误整理三协议共用） |
 | `llmproto.go` | **渠道协议扩展**：`llmProtocol`（端点路径+鉴权头+请求转换+SSE 解析）三个实现——OpenAI 兼容 chat/completions（原行为原样）、Anthropic 原生 /v1/messages、OpenAI Responses /v1/responses。统一 Message/ToolCall 与协议格式互转（system 提取、tool_use/tool_result、function_call/function_call_output、图片 data URL）、思考档位映射（Anthropic budget_tokens：low 2k/enabled·medium 6k/high 12k/max 24k，max_tokens 不足自动抬升；Responses effort：low/medium 原样、high·max→high、enabled/disabled 不干预）、usage 归一（Anthropic 的 cache_read/cache_creation 映入 Usage 缓存字段）。看护测试 llmproto_test.go（转换/SSE/工具往返/mock 网关端到端/既有渠道报文回归） |
 | `contextengine.go` | 上下文引擎：请求材料的唯一组装者 + 上下文事件总线。系统提示词（可被 `data/prompts/<mode>.md` 引用文件覆盖，引用文件附内容 hash 标记来源；版本号不进提示词——随发版变化会白白打断前缀缓存）、环境快照、工具目录、历史视图、视觉内联经 `Assemble` 成包（确定性：同一状态逐字节一致——前缀缓存命中的根基，有测试看护），token 估算与前缀指纹随包产出；每轮开轮的 prompt 展示快照行经 `OpenRound` 落库；需把上下文发给模型的侧路调用（模型摘要）由 `CallSummarizer` 拼装并发送（留痕 audit scope=summarize，不进请求环形缓存）；权限/模型/思考档位/计划目标/工作区/远程挂载等配置变更经 `Notify` 落时间线（audit type=ctx，含前后值）；技能增减由环境快照 diff 在尾部留痕，同一事实不重复记账 |
@@ -2017,6 +2017,41 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   用 function_call/function_call_output 顶层 item；OpenAI 兼容照旧
   tool_calls/tool_call_id。三协议对上层暴露完全相同的 ToolCall。
 
+## 自定义供应商多 Key（多分组）
+
+中转站（API 聚合网关）按**分组**发 Key：一把 Key 只能看到/调用它那个分组的模型。
+以前只能给每个分组建一个供应商卡片，菜单里分裂成多组；现在**一个自定义供应商可
+以配多把 Key**，对话里选模型时这些模型都在同一个供应商分组下平铺展示。
+
+- **数据模型**（models.go）：`ProviderCfg.Keys []ProviderKeyCfg`，每项 =
+  `{id（稳定归属标识）, label（分组备注名）, apiKey, protocol（Key 级协议覆盖）,
+  models（这把 Key 自己拉到的模型）}`。BaseURL 仍是供应商级（多把 Key 共用一个
+  地址）；预置提供方与公司内部通道保持单 Key 结构（它们由模板/服务端维护），
+  `ProviderCfg.KeyList()` 把单 Key 结构合成一把隐含 Key——调用链、接口、菜单
+  只有一套解析路径，到处没有「是不是多 Key」的分支。
+- **模型归属**：`resolveKey(keyID, modelID)` = 显式 Key 归属 > 模型清单里有它的
+  那把 Key（老会话只存了模型名时的兜底）> 第一把可用 Key（有密钥的那把）。会话
+  记住归属：`sessions.provider_key`（迁移 0017），老会话为空照常可解析。
+- **协议**：`keyProtocol` = Key 级覆盖优先于供应商级；Key 级 `"chat"` 是「显式
+  OpenAI 兼容」的哨兵（空串表示跟随供应商，没有哨兵就表达不出「供应商默认
+  anthropic、这把 Key 走 chat/completions」）。
+- **调用链**：`targetOf(p, keyID, modelID)` 取那把 Key 的密钥与该 Key 生效的协议
+  填进 `LLMTarget`，三协议（chat/responses/anthropic）发请求的路径与主备地址
+  故障转移、用量统计都不变；派发（dispatch_task/dispatch_sub）继承主会话时连
+  Key 归属一起继承。
+- **接口**：`/api/config` 每把 Key 只回 `apiKeyMasked`（口径同供应商级掩码）+
+  备注名/协议/模型；`/api/models` 拍平所有 Key 的模型并带 `keyId`/`keyLabel`；
+  `/api/providers`（upsert）收 `keys[]`（留空密钥＝沿用同 id 已保存的那把、新
+  Key 分配稳定归属 id、空壳 Key 丢掉；**不带 keys 的普通保存不会把多 Key 冲掉**）；
+  `/api/providers/fetch|test` 收 `keyId` 按那把 Key 的密钥与协议拉取/测试。
+- **前端**：设置页自定义渠道卡片一把 Key 一块（备注名/密钥/各自协议/各自模型
+  目录与「拉取模型」「测试连通」，可加/删 Key，至少留一把）；对话模型菜单按
+  供应商分组平铺，**只对重名的那几项**加分组备注名后缀，不重名的不加标签。
+- **迁移**：老配置的自定义供应商（供应商级 apiKey+models）在 `LoadConfig` 时
+  自动折成「只有一把 Key」的结构并立即落盘，再回读一致（config_migrate /
+  provider_multikey_test 有往返用例）；落盘时每把 Key 的密钥各自 DPAPI 加密，
+  供应商级 apiKey/models 是第一把 Key 的镜像（老版本 exe 回退仍读得到）。
+
 ## 前后端接口
 
 下表是人类（前端）使用的接口。**AI 另有一条通用直通通道**：call_api 工具（仅 assistant 模式注入，其余模式一律没有）——同一批接口按「注册即元数据」开放（server.go 的 .apiRoute(..., apiMeta{...})，元数据缺席=不对 AI 开放；SSE 流、multipart 上传、二进制下载、组件桥等不适合同步直调的保持关闭），进程内直调与前端同一 handler（见 callapi.go）；完整目录（每条标注最低权限档与 ⚠ 危险标记）拼在 call_api 工具说明里静态随请求前缀，不进环境快照，会话档位不足在调用时被权限闸拒绝并提示需要的档位，危险接口（删除/清空类）调用前走审批卡。执行类工具与意图工具（dispatch_task 等）不受影响——它们与前端共用 service（sessioncreate.go / deliverToSession / stopRunBy / registerUploadPath / chatModes）。
@@ -2024,8 +2059,8 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | 方法与路径 | 说明 |
 |---|---|
 | `GET /api/status` | 服务状态 |
-| `GET/POST /api/config` | 读取/修改配置（Key 回传掩码，providers/压缩设置） |
-| `GET /api/models` / `POST /api/providers/fetch` | 模型清单 / 从提供方拉取模型 |
+| `GET/POST /api/config` | 读取/修改配置（Key 一律回掩码，多 Key 供应商逐把回 `keys[]`；providers/压缩设置） |
+| `GET /api/models` / `POST /api/providers/fetch` | 模型清单（多 Key 供应商平铺，条目带 `keyId`/`keyLabel`）/ 从提供方拉取模型（`keyId` 指定哪把 Key） |
 | `GET/POST /api/sessions` | 会话列表（`?parent=` 查子会话；列表项带 `status=running` 与异常中断标记 `lastStop`）/ 创建（mode/parent/provider/model） |
 | `GET/PATCH/DELETE /api/sessions/{id}` | 详情（含 `running` / `pending` / `error`：执行中、待生效消息、最近一次失败原因）/ 改标题、工作区、模型 / 删除 |
 | `POST /api/sessions/{id}/chat` | 发送消息；SSE 流式返回。**执行体独立于本请求**：浏览器刷新/关页只断开这条流，执行照旧跑完并落库 |

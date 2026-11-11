@@ -1051,7 +1051,8 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, m := range p.Models {
 			// 存储的档位若是旧版推断写死的（无手工编辑入口），跟随新版本刷新
-			levels := effectiveReasoningLevels(m.ID, m.ReasoningLevels)
+			//（推断按渠道协议+模型 ID，同一模型在不同协议下档位不同）
+			levels := effectiveReasoningLevels(p.Protocol, m.ID, m.ReasoningLevels)
 			items = append(items, modelItem{p.ID, p.Name, m.ID, m.Name, m.ContextWindow, levels, !p.IsSelectable(), via})
 		}
 	}
@@ -1171,9 +1172,9 @@ func (a *App) handleUpsertProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[mid] = true
 		m.ID = mid
-		// 思考档位未配置时按 ID 自动推断（添加/编辑模型即自动带上）
+		// 思考档位未配置时按协议+ID 自动推断（添加/编辑模型即自动带上）
 		if len(m.ReasoningLevels) == 0 {
-			m.ReasoningLevels = guessReasoningLevels(mid)
+			m.ReasoningLevels = guessReasoningLevels(protocol, mid)
 		}
 		models = append(models, m)
 	}
@@ -2255,15 +2256,18 @@ func (a *App) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.Thinking != nil {
+		// 合法档位枚举全集（不分协议：同一档位串在不同协议渠道由协议层各自
+		// 映射，见 llmproto.go；max 是 deepseek/Anthropic 的档位，漏了它会让
+		// 已有会话切到 max 被 400 拒绝）
 		switch t := strings.TrimSpace(*body.Thinking); t {
-		case "", "enabled", "disabled", "low", "medium", "high":
+		case "", "enabled", "disabled", "low", "medium", "high", "max":
 			old := m.Thinking
 			m.Thinking = t
 			if old != t {
 				notes = append(notes, ctxNote{ctxThinking, "思考档位：" + old + " → " + t})
 			}
 		default:
-			writeErr(w, 400, "thinking 档位必须是 enabled/disabled/low/medium/high 或空")
+			writeErr(w, 400, "thinking 档位必须是 enabled/disabled/low/medium/high/max 或空")
 			return
 		}
 	}

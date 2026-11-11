@@ -105,10 +105,22 @@ func DefaultProviders() []ProviderCfg {
 		// Anthropic 原生协议预置：x-api-key 鉴权 + /v1/messages（llmproto.go）；
 		// baseURL 约定与 OpenAI 一致（填到 /v1）。模型别名即官方短名。
 		{ID: "anthropic", Name: "Anthropic", BaseURL: "https://api.anthropic.com/v1", Protocol: "anthropic", Models: []ModelCfg{
-			{ID: "claude-opus-4-1", Name: "Claude Opus 4.1", ContextWindow: 200000, MaxOutput: 32768, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
-			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
-			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high"}},
+			// 思考预算档（budget_tokens）：enabled=6144、disabled=不发 thinking、
+			// low/medium/high/max=2048/6144/12288/24576（llmproto.go）
+			{ID: "claude-opus-4-1", Name: "Claude Opus 4.1", ContextWindow: 200000, MaxOutput: 32768, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
+			{ID: "claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextWindow: 200000, MaxOutput: 64000, SupportsImages: true, ReasoningLevels: []string{"enabled", "disabled", "low", "medium", "high", "max"}},
 		}, Note: "密钥用 Anthropic 控制台的 API Key（sk-ant- 开头）；兼容 new-api 等中转站时地址填中转站地址"},
+		// OpenAI Responses 协议预置：官方新一代 /v1/responses 端点（与上面的
+		// chat/completions 预置同一 BaseURL 同一 Key，两种端点并存，按需选）。
+		// 思考档位走 reasoning.effort（llmproto.go）：disabled=不发 reasoning
+		//（服务端默认，gpt-5 官方默认 medium）、low/medium/high=effort 值；
+		// Responses 没有 max 档，推理模型的思考关不掉，disabled 就是最低。
+		{ID: "openai-responses", Name: "OpenAI（Responses 协议）", BaseURL: "https://api.openai.com/v1", Protocol: "responses", Models: []ModelCfg{
+			{ID: "gpt-5", Name: "GPT-5", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
+			{ID: "gpt-5-mini", Name: "GPT-5 mini", ContextWindow: 400000, MaxOutput: 128000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
+			{ID: "o3", Name: "o3", ContextWindow: 200000, MaxOutput: 100000, SupportsImages: true, ReasoningLevels: []string{"disabled", "low", "medium", "high"}},
+		}, Note: "官方新一代 Responses 端点；与「OpenAI」预置（chat/completions）同一账号同一 Key，二选一即可"},
 		{ID: "ollama", Name: "Ollama 本地", BaseURL: "http://127.0.0.1:11434/v1"},
 	}
 }
@@ -298,10 +310,19 @@ func guessModelMeta(id string) (ctx int, images bool) {
 	return 0, images
 }
 
-// guessReasoningLevels 按模型 ID 推断可用的思考档位（/models 接口不提供能力
-// 信息，只能按已知命名规则推断；返回 nil 表示无思考控制，菜单不显示二级）。
-// enabled/disabled → 请求体 thinking{type}；low/medium/high → reasoning_effort。
-func guessReasoningLevels(id string) []string {
+// guessReasoningLevels 按渠道协议 + 模型 ID 推断可用的思考档位（/models 接口
+// 不提供能力信息，只能按已知命名规则推断；返回 nil 表示无思考控制，菜单不
+// 显示二级）。同一模型走不同协议时思考控制完全不同（Anthropic 是
+// thinking.budget_tokens、Responses 是 reasoning.effort、兼容端点是
+// thinking{type}/reasoning_effort），所以协议维度必须参与推断。
+// 档位语义（llmproto.go 的 marshalAnthropic/marshalResponses 落到报文）：
+//   - OpenAI 兼容（默认）：enabled/disabled → thinking{type}；
+//     low/medium/high/max → reasoning_effort 原样透传
+//   - anthropic 协议：enabled=中档预算、disabled=不发 thinking、
+//     low/medium/high/max → budget_tokens 2048/6144/12288/24576
+//   - responses 协议：disabled=不发 reasoning（服务端默认 effort）、
+//     low/medium/high → reasoning.effort（Responses 无 max 档）
+func guessReasoningLevels(protocol, id string) []string {
 	s := strings.ToLower(id)
 	has := func(subs ...string) bool {
 		for _, x := range subs {
@@ -311,9 +332,28 @@ func guessReasoningLevels(id string) []string {
 		}
 		return false
 	}
+	switch protocol {
+	case "anthropic":
+		// Anthropic 原生渠道只有 claude 系；预算档上限 24k（Opus 4.1
+		// 建议 ≤24k，超过收益递减且挤占 max_tokens）
+		if has("claude") {
+			return []string{"enabled", "disabled", "low", "medium", "high", "max"}
+		}
+		return nil
+	case "responses":
+		// Responses 端点的推理模型（gpt-5 / o 系）；没有 disabled 之外的
+		// 关闭手段——推理模型思考关不掉，disabled 档=不发 reasoning，
+		// 服务端按官方默认（gpt-5 为 medium）处理
+		if has("o1") || has("o3") || has("o4") || has("gpt-5") {
+			return []string{"disabled", "low", "medium", "high"}
+		}
+		return nil
+	}
 	switch {
 	case has("claude"):
-		return []string{"enabled", "disabled", "low", "medium", "high"} // 思考预算档（llmproto 映射 budget_tokens）
+		// 兼容网关上的 claude（new-api/OpenRouter 等）：thinking 开关 +
+		// reasoning_effort 两套都部分支持，维持既有档位（协议层各走各的）
+		return []string{"enabled", "disabled", "low", "medium", "high"}
 	case has("o1"), has("o3"), has("o4"), has("gpt-5"):
 		return []string{"low", "medium", "high"} // OpenAI effort 档
 	case has("deepseek-reasoner"), has("-r1"):
@@ -333,12 +373,15 @@ func guessReasoningLevels(id string) []string {
 }
 
 // effectiveReasoningLevels 取模型思考档位的最终展示/使用值：存储值优先
-//（「拉取模型」固化的服务端真实 supported_levels），但存储值是当前按 ID
-// 推断结果的子集时视为过时的自动推断，跟随本版本推断刷新——档位没有手工
-// 编辑入口，存量配置里的值全是程序写入的（保存兜底会把 guess 写死进
+//（「拉取模型」固化的服务端真实 supported_levels），但存储值是当前按
+// 协议+ID 推断结果的子集时视为过时的自动推断，跟随本版本推断刷新——档位
+// 没有手工编辑入口，存量配置里的值全是程序写入的（保存兜底会把 guess 写死进
 // config），guess 修正后老配置必须能跟着升级，否则用户永远看不到新档位。
-func effectiveReasoningLevels(modelID string, stored []string) []string {
-	guessed := guessReasoningLevels(modelID)
+// 协议参与推断（同一 ID 在不同协议渠道档位不同），协议没变过的存量自然按
+// 原协议口径刷新；协议切换后旧档位与新模式对不上（非子集）则原样保留，
+// 重新「拉取模型」即换新。
+func effectiveReasoningLevels(protocol, modelID string, stored []string) []string {
+	guessed := guessReasoningLevels(protocol, modelID)
 	if len(stored) == 0 {
 		return guessed
 	}
@@ -548,7 +591,7 @@ func (a *App) FetchModels(p *ProviderCfg) ([]ModelCfg, error) {
 		}
 		levels := m.Effort.SupportedLevels
 		if len(levels) == 0 {
-			levels = guessReasoningLevels(m.ID)
+			levels = guessReasoningLevels(p.Protocol, m.ID)
 		}
 		models = append(models, ModelCfg{
 			ID: m.ID, Name: m.Name, ContextWindow: ctx,

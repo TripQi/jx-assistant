@@ -2083,7 +2083,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   「估算花费（按调用时段计价）」与「总花费＝模型+搜索」）、每日趋势
   （手写 SVG 折线，不引图表库）、模型占比环形图、按模型统计表、明细分页表
   （首字延迟与推理强度列在这里，速度条不显示它们；推理强度显示档位显示名
-  None/Low/Medium/High/Extra High/Max，空值写「默认」，筛选下拉另有一档「默认」
+  None/Low/Medium/High/Xhigh/Max，空值写「默认」，筛选下拉另有一档「默认」
   兜住老数据与不吃档位的调用；**行 hover 显示该次调用命中高峰还是空闲价**）、
   **搜索调用分区**（KPI：次数/成功/失败/回落率/费用/平均耗时 + 按供应商表 + 逐次尝试
   明细）、单价与时段规则（每行可展开编辑高峰星期/时段/节假日/空闲折扣，可复制到其它
@@ -2125,7 +2125,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   也按协议选端点与鉴权头（Anthropic 用 x-api-key + anthropic-version，
   其余 Bearer）。
 - **思考档位（与模型彻底解绑）**：全系统固定六档 `none` / `low` / `medium` /
-  `high` / `xhigh` / `max`（显示名 None/Low/Medium/High/Extra High/Max，
+  `high` / `xhigh` / `max`（显示名 None/Low/Medium/High/Xhigh/Max，
   前端 THINK_LABELS）。任何模型、任何渠道都显示同一套，由用户自己选——
   不再按模型名推断，也不采用服务端 `/models` 上报的
   `effort.supported_levels`（未知档位透传到前端只会「能选、后端 400」）。

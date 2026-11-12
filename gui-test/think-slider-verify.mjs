@@ -263,11 +263,12 @@ async function main() {
       subPop: !!document.getElementById('model-sub-pop'),
       mpLv: !!document.querySelector('.mp-lv'),
       lvHit: !!document.querySelector('.lv-hit'),
-      thinkItems: document.body.innerHTML.includes('Extra High'),
+      hasExtra: /Extra/.test(document.body.innerHTML),
     }))()`);
     ok('A2 旧档位二级菜单已删除（#model-pop/#model-sub-pop/.mp-lv/.lv-hit 都不存在）',
       !oldUi.modelPop && !oldUi.subPop && !oldUi.mpLv && !oldUi.lvHit, JSON.stringify(oldUi));
-    ok('A3 界面文案里不再出现「Extra High」', !oldUi.thinkItems, '');
+    // 第五档全库统一显示 Xhigh（组件里的用量统计也一并对齐），页面不该再有旧写法残留
+    ok('A3 页面文案里不再有旧档位写法（无「Extra」字样）', !oldUi.hasExtra, '');
 
     // ---------- B 打开卡片（初始 thinking 为空＝跟随服务端默认） ----------
     await clickEl(t, `document.getElementById('model-chip')`);

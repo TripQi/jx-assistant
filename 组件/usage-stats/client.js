@@ -39,7 +39,7 @@
   // 思考档位显示名：与主界面「思考档位」菜单同一套（models.go 的 thinkingLevels）。
   // 库里存内部值，空串＝这次调用没指定档位（跟随服务端默认），界面写「默认」。
   var THINK_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
-  var THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+  var THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Xhigh', max: 'Max' };
   var THINK_DEFAULT = 'default'; // 筛选里「默认」档的哨兵值（后端 usageThinkingDefault）
 
   var DONUT_COLORS = ['#4d6bfe', '#1f9d55', '#e8a33d', '#9a6700', '#a855f7', '#0ea5e9', '#8b949e'];

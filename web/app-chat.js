@@ -7244,7 +7244,7 @@ function modelNameOf(key) {
 // 内部值 = 发给模型的值，显示名按官方口径。
 const THINK_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 // 显示名与内部值分开：内部值（发给后端、落库的）永远是 thinkingLevels 里的小写，
-// 显示名按官方口径首字母大写——第五档显示 Xhigh（不是 xhigh，也不是「Extra High」）。
+// 显示名按官方口径首字母大写——第五档显示 Xhigh（不是内部值的小写 xhigh，也不用旧版长名）。
 const THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Xhigh', max: 'Max' };
 // 跟随服务端默认（thinking 为空串）时芯片与卡片大字显示的文案
 const THINK_DEFAULT_LABEL = 'Default';

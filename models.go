@@ -450,7 +450,7 @@ func guessModelMeta(id string) (ctx int, images bool) {
 // 任何模型、任何渠道都显示同一套六档，由用户自己选——模型支不支持、服务端
 // 认不认都不在这里猜（能自动降级就降级，报错让用户自己换档）。
 // 内部值 → 显示名（前端 THINK_LABELS）：none/low/medium/high/xhigh/max →
-// None/Low/Medium/High/Extra High/Max。
+// None/Low/Medium/High/Xhigh/Max。
 func thinkingLevels() []string {
 	return []string{"none", "low", "medium", "high", "xhigh", "max"}
 }

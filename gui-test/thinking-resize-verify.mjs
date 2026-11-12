@@ -270,7 +270,8 @@ try {
     return { opts: [...sel.options].map((o) => o.textContent), val: sel.value };
   })()`);
   ok('T4 筛选区有「推理强度」下拉（全部/默认/六档）',
-    !!filt && filt.opts.length === 8 && filt.opts[0] === '全部推理强度' && filt.opts[1] === '默认' && filt.opts[7] === 'Max',
+    !!filt && filt.opts.length === 8 && filt.opts[0] === '全部推理强度' && filt.opts[1] === '默认' &&
+      filt.opts.slice(2).join(',') === 'None,Low,Medium,High,Xhigh,Max',
     JSON.stringify(filt && filt.opts));
   if (filt) {
     // 真选一次 High：表里只剩 High

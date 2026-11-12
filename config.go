@@ -110,6 +110,13 @@ type Config struct {
 	// 联网搜索服务端地址（web_search 工具的上游网关，jxai-server 的 /api/search，
 	// 见 websearch.go）：空 = 跟随市场地址同源——市场与搜索本就同一台服务端。
 	SearchURL string `json:"searchURL,omitempty"`
+	// 搜索供应商（websearch_providers.go）：公司网关 + 用户自配的第三方搜索/抽取
+	// 服务，按 order 顺序回落、只有失败才换下一家。SearchURL 与它并存——公司网关
+	// 只是 kind=gateway 的一条，地址仍在调用时从 SearchURL 解析（老配置零迁移）。
+	// 加载时没有这一键的配置自动补齐默认四条（key 为空，由用户自己填）。
+	SearchProviders []SearchProviderCfg `json:"searchProviders,omitempty"`
+	// 一次 web_search 的总耗时预算（秒，5–120，默认 20）：是预算不是每家超时相加。
+	SearchTimeoutSec int `json:"searchTimeoutSec,omitempty"`
 	// 发布者姓名（市场条目的归属名 owner）：发布技能时随包上报，市场卡片拿它
 	// 与条目 owner 比对——只显示自己那些条目的「更新发布 / 删除」（见
 	// market_publish.go 的 unpublish）。默认由首启向导里填的姓名写入（wizard.go）；
@@ -596,6 +603,19 @@ func LoadConfig(path string) (*Config, error) {
 			cfg.Providers[i].Keys[j].APIKey = unprotectSecret(cfg.Providers[i].Keys[j].APIKey)
 		}
 	}
+	// 搜索供应商（websearch_providers.go）：敏感字段同一套透明解密；老配置没有
+	// 这一键时补默认四条（公司网关 + DeepSeek/Tavily/AnySearch，key 为空，由用户
+	// 自己在设置页填）。用户写成空数组 = 明确的「我只要老网关」，不再补种。
+	var searchKeys map[string]json.RawMessage
+	if json.Unmarshal(data, &searchKeys) == nil {
+		if _, has := searchKeys["searchProviders"]; !has {
+			cfg.SearchProviders = defaultSearchProviders()
+		}
+	}
+	for i := range cfg.SearchProviders {
+		cfg.SearchProviders[i].APIKey = unprotectSecret(cfg.SearchProviders[i].APIKey)
+	}
+	cfg.SearchProviders = normalizeSearchProviders(cfg.SearchProviders)
 	// 老配置兼容：没有 Providers 时把旧的三元组折算成第一个 provider
 	if len(cfg.Providers) == 0 {
 		providers := DefaultProviders()
@@ -727,6 +747,17 @@ func (c *Config) Save(path string) error {
 			out.Providers[i].Models = keys[0].Models
 		} else if enc, err := protectSecret(out.Providers[i].APIKey); err == nil {
 			out.Providers[i].APIKey = enc
+		}
+	}
+	// 搜索供应商的 API Key 同一套加密（副本上做，内存对象保持明文供运行时使用）。
+	// 用户在设置页粘贴的明文 key 只在内存里存在，落盘的永远是 dpapi:v1: 密文。
+	if n := len(c.SearchProviders); n > 0 {
+		out.SearchProviders = make([]SearchProviderCfg, n)
+		copy(out.SearchProviders, c.SearchProviders)
+		for i := range out.SearchProviders {
+			if enc, err := protectSecret(out.SearchProviders[i].APIKey); err == nil {
+				out.SearchProviders[i].APIKey = enc
+			}
 		}
 	}
 	data, err := json.MarshalIndent(&out, "", "  ")

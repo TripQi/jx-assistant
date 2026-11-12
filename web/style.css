@@ -2137,8 +2137,16 @@ mark {
    第一层＝大字档位 + 模型行 + 渐变滑杆 + 跟随服务端默认；第二层＝平铺模型列表。
    渲染/交互见 app-chat.js「模型与思考档位卡片」节（几何常量 MC_TRACK_PAD 与这里的
    .mc-slider 左右内边距 9px 必须一致）。宽 300px、窄屏（460px 视口）夹在视口内。 */
-.model-card { width: 300px; min-width: 0; max-width: calc(100vw - 24px); padding: 12px 14px 10px; }
+/* 卡片：固定宽度、窄屏夹在视口内；纵向用 flex 列 + overflow:hidden，
+   保证任何内容都不会画到圆角外面（列表再长也不会漫出卡片底边）。 */
+.model-card {
+  width: 300px; min-width: 0; max-width: calc(100vw - 24px);
+  display: flex; flex-direction: column; overflow: hidden;
+  padding: 12px 14px 10px;
+}
 .model-card .mc-layer.hidden { display: none; }
+/* 层也是 flex 列：min-height:0 才允许在卡片被压矮时收缩，把余量让给列表内部滚动 */
+.mc-layer { display: flex; flex-direction: column; min-height: 0; }
 /* 标题行：没有底色（卡片顶部就是卡片底色），档位大字水平居中、主题强调色；
    刷新按钮绝对定位钉在右上角，不参与居中排版 */
 .mc-top { position: relative; padding: 1px 0 0; }
@@ -2210,7 +2218,7 @@ mark {
 .mc-follow-text { flex: 1; min-width: 0; }
 .model-card.following .mc-slider { display: none; } /* 跟随服务端默认：滑杆收起，大字显示 Default */
 /* 第二层：按供应商分组的模型列表（灰色小字分组标题 + 缩进列模型；不放「默认模型」条目） */
-.mc-models-head { display: flex; align-items: center; gap: 6px; padding: 0 0 6px; }
+.mc-models-head { display: flex; align-items: center; gap: 6px; padding: 0 0 6px; flex: none; }
 .mc-models-head b { font-size: 13px; font-weight: 600; color: var(--text); }
 .mc-back {
   flex: none; display: inline-flex; align-items: center; justify-content: center;
@@ -2219,7 +2227,12 @@ mark {
 }
 .mc-back:hover { background: var(--hover); color: var(--accent); }
 .mc-back svg { width: 15px; height: 15px; }
-.mc-list { max-height: min(46vh, 300px); overflow-y: auto; overscroll-behavior: contain; }
+/* 列表：不要自己定高，由卡片剩余空间决定（flex:1 + min-height:0）；
+   超出部分在列表内部滚动，底部留 12px 内边距，最后一项不贴圆角被切 */
+.mc-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; padding-bottom: 12px;
+}
 .mc-list.busy { opacity: .6; }
 /* 分组标题：字号/灰字沿用 .pop-group（不可点、不带勾），这里只管间距；模型缩进排在它下面 */
 .mc-group { padding: 8px 11px 2px; }
@@ -2231,7 +2244,7 @@ mark {
 .mc-empty { padding: 10px 11px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
 /* 卡片内错误条（刷新/切档失败）：两层都可见 */
 .mc-err {
-  margin-top: 8px; padding: 7px 9px; border-radius: 8px;
+  flex: none; margin-top: 8px; padding: 7px 9px; border-radius: 8px;
   background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger);
   font-size: 11.5px; line-height: 1.5; word-break: break-all;
 }

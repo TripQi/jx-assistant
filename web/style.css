@@ -2128,16 +2128,99 @@ mark {
 
 /* 思考过程：统一走 .proc-row 过程行（见"回合折叠条与过程行"节），此处仅留旧类名兼容清理 */
 
-/* 模型菜单：模型行；思考档位 = 向右弹出的二级浮窗 #model-sub-pop（定位见 app-chat.js syncModelSubPop）。
-   交互：桌面悬停整行即浮出档位、点行=选中并收起；点行尾箭头(.lv-hit)手动开合档位（触屏的主入口） */
-.model-item span:not(.lv-hit) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* 排除箭头命中区：它也是 span，被 flex:1 拉宽会让半行都变成箭头 */
+/* 模型菜单里的模型行（设置页「子对话专家」的默认模型选择仍在用；输入区的模型选择
+   已收进「模型与思考档位卡片」，见下面 .model-card 一节） */
+.model-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-item .caret { width: 12px; height: 12px; color: var(--text-3); flex-shrink: 0; }
-.model-item .lv-hit { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 8px; margin: -8px; } /* 箭头命中区约 28px 见方（触屏好点）；负外边距抵净内边距，不撑宽菜单 */
-.model-item.exp { background: rgba(77, 107, 254, .08); } /* 展开着二级浮窗的行 */
-.model-item.exp .caret { color: var(--accent); }
-.model-sub-pop { min-width: 150px; max-width: 240px; }
-.mp-lv { padding: 7px 11px; font-size: 12.5px; color: var(--text-2); border-radius: 7px; }
-.mp-lv.on { color: var(--accent); font-weight: 600; background: rgba(77, 107, 254, .08); }
+
+/* ---------- 模型与思考档位卡片（#model-card，一卡两层） ----------
+   第一层＝大字档位 + 模型行 + 渐变滑杆 + 跟随服务端默认；第二层＝平铺模型列表。
+   渲染/交互见 app-chat.js「模型与思考档位卡片」节（几何常量 MC_TRACK_PAD 与这里的
+   .mc-slider 左右内边距 9px 必须一致）。宽 300px、窄屏（460px 视口）夹在视口内。 */
+.model-card { width: 300px; min-width: 0; max-width: calc(100vw - 24px); padding: 12px 14px 10px; }
+.model-card .mc-layer.hidden { display: none; }
+.mc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.mc-big { font-size: 22px; font-weight: 700; line-height: 1.15; color: var(--text); letter-spacing: -.2px; }
+/* 右上角刷新＝重新拉模型列表（loading 时转圈）；不是重置档位 */
+.mc-refresh {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: none; border-radius: 8px;
+  background: none; color: var(--text-3); cursor: pointer;
+}
+.mc-refresh:hover { background: var(--hover); color: var(--accent); }
+.mc-refresh svg { width: 15px; height: 15px; }
+.mc-refresh.spin svg { animation: mc-spin .9s linear infinite; }
+.mc-refresh:disabled { cursor: default; }
+@keyframes mc-spin { to { transform: rotate(360deg); } }
+/* 模型行：小字模型名 + 「>」指示，点它翻到第二层 */
+.mc-model {
+  display: flex; align-items: center; gap: 4px; max-width: 100%;
+  margin: 2px 0 10px; padding: 2px 0; border: none; background: none;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer; text-align: left;
+}
+.mc-model:hover { color: var(--accent); }
+.mc-model span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-model .mc-go { width: 13px; height: 13px; flex: none; color: var(--text-3); }
+.mc-model:hover .mc-go { color: var(--accent); }
+/* 渐变滑杆（滑动变阻器样式）：轨道深蓝→紫，已选段按档位从左填亮；白色圆形滑块；
+   轨道上六等分处六个小圆点刻度。拖动/触摸手势归滑杆（touch-action:none）。 */
+.mc-slider {
+  position: relative; height: 26px; padding: 0 9px;
+  touch-action: none; cursor: pointer; outline: none; -webkit-tap-highlight-color: transparent;
+}
+.mc-slider:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 8px; }
+.mc-slider[aria-disabled='true'] { cursor: default; opacity: .45; }
+.mc-track {
+  position: absolute; left: 9px; right: 9px; top: 50%; height: 6px; margin-top: -3px;
+  border-radius: 3px; background: linear-gradient(90deg, rgba(30, 58, 138, .32), rgba(124, 58, 237, .32));
+}
+.mc-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 40%; border-radius: 3px;
+  background: linear-gradient(90deg, #24479f, #8b5cf6);
+}
+.mc-ticks { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; }
+/* 六等分刻度点：白点加一圈淡描边——落在已选（深色）段与未选（浅色）段上都看得见 */
+.mc-ticks i { width: 4px; height: 4px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(40, 60, 130, .28); }
+.mc-thumb {
+  position: absolute; top: 50%; left: 9px; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  border-radius: 50%; background: #fff; pointer-events: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35), 0 0 0 1px rgba(0, 0, 0, .04);
+}
+.mc-hint { margin: 2px 0 8px; font-size: 11px; color: var(--text-3); }
+/* 「跟随服务端默认」：苹果式小开关（复用 .sw-mini），开＝主题色轨道 */
+.mc-follow {
+  position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer; user-select: none;
+}
+.mc-follow input { position: absolute; opacity: 0; margin: 0; cursor: pointer; }
+.mc-follow input:checked ~ .sw-mini { background: var(--accent); }
+.mc-follow input:checked ~ .sw-mini::after { left: 15px; }
+.mc-follow input:focus-visible ~ .sw-mini { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mc-follow-text { flex: 1; min-width: 0; }
+.model-card.following .mc-slider { display: none; } /* 跟随服务端默认：滑杆收起，大字显示 Default */
+/* 第二层：平铺模型列表（不分组、不放「默认模型」条目，当前模型带勾） */
+.mc-models-head { display: flex; align-items: center; gap: 6px; padding: 0 0 6px; }
+.mc-models-head b { font-size: 13px; font-weight: 600; color: var(--text); }
+.mc-back {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; margin-left: -4px; border: none; border-radius: 7px;
+  background: none; color: var(--text-3); cursor: pointer;
+}
+.mc-back:hover { background: var(--hover); color: var(--accent); }
+.mc-back svg { width: 15px; height: 15px; }
+.mc-list { max-height: min(46vh, 300px); overflow-y: auto; overscroll-behavior: contain; }
+.mc-list.busy { opacity: .6; }
+.mc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-item.off { color: var(--text-3); }
+.mc-item .mc-check { width: 15px; height: 15px; flex: none; color: var(--accent); }
+.mc-empty { padding: 10px 11px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
+/* 卡片内错误条（刷新/切档失败）：两层都可见 */
+.mc-err {
+  margin-top: 8px; padding: 7px 9px; border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger);
+  font-size: 11.5px; line-height: 1.5; word-break: break-all;
+}
+.mc-err.hidden { display: none; }
 
 /* 搜索定位：命中的消息/过程行滚动到视野中心并闪烁 */
 .search-flash { animation: search-flash 1.2s ease-in-out 2; border-radius: 6px; }
@@ -2913,6 +2996,11 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
   --da-paper-line: #8a9099;
 }
 :root[data-theme='dark'] .popover { background: #1d2026; box-shadow: 0 8px 28px rgba(0, 0, 0, .5); }
+/* 暗色下渐变滑杆要重新配一遍：深色底上「未选段」用深蓝紫低透明度容易被误看成已选，
+   所以未选段压暗、已选段提亮（深蓝→紫不变），保证「已选部分＝高亮」的读法一致 */
+:root[data-theme='dark'] .mc-track { background: linear-gradient(90deg, rgba(72, 104, 220, .26), rgba(150, 90, 255, .26)); }
+:root[data-theme='dark'] .mc-fill { background: linear-gradient(90deg, #4a7bff, #b06bff); }
+:root[data-theme='dark'] .mc-thumb { box-shadow: 0 1px 4px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .12); }
 :root[data-theme='dark'] .modal-card { background: #1d2026; }
 :root[data-theme='dark'] .composer-card:focus-within { border-color: #4a5158; }
 :root[data-theme='dark'] ::-webkit-scrollbar-thumb { background: #3d434d; }

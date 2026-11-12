@@ -197,8 +197,9 @@
               <span class="cr-num" id="ctx-num">–</span>
               <div class="ctx-tip" id="ctx-tip"></div>
             </div>
-            <button id="model-chip" class="chip-btn" title="选择模型">
-              <span id="model-chip-label">默认模型</span>
+            <!-- 模型与思考档位合在这一枚芯片里：显示「模型名 · 档位」，点开是整张卡片 -->
+            <button id="model-chip" class="chip-btn" title="模型与思考档位">
+              <span id="model-chip-label">默认模型 · Default</span>
               <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <button id="btn-stop" class="send-btn stop hidden" title="停止">
@@ -287,8 +288,8 @@
                     <span class="cr-num" id="sub-ctx-num">–</span>
                     <div class="ctx-tip" id="sub-ctx-tip"></div>
                   </div>
-                  <button id="sub-model-chip" class="chip-btn" title="选择模型">
-                    <span id="sub-model-chip-label">默认模型</span>
+                  <button id="sub-model-chip" class="chip-btn" title="模型与思考档位">
+                    <span id="sub-model-chip-label">默认模型 · Default</span>
                     <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
                   </button>
                   <button id="sub-stop" class="send-btn stop hidden" title="停止">
@@ -1092,11 +1093,49 @@
   </div>
 </div>
 
-<!-- 模型选择面板 -->
-<div id="model-pop" class="popover model-pop hidden"></div>
-
-<!-- 模型菜单的思考档位二级浮窗：向右弹出的子菜单（挂在 model-pop 之后，同层级靠 DOM 顺序盖住它） -->
-<div id="model-sub-pop" class="popover model-sub-pop hidden"></div>
+<!-- 模型与思考档位卡片（输入框下方那枚芯片弹它，一卡两层）：
+     第一层＝档位滑杆（大字档位 + 模型行 + 渐变滑杆 + 跟随服务端默认开关 + 刷新模型列表），
+     第二层＝平铺模型列表（点第一层的模型名翻过去，选中即切模型并翻回）。
+     档位只有滑杆这一个入口——model 菜单里的档位二级菜单已删；两者互不影响。
+     静态骨架常驻（刷新按钮等元素不随重绘销毁），动态内容由 app-chat.js 的 renderModelCard 填 -->
+<div id="model-card" class="popover model-card hidden" role="dialog" aria-label="模型与思考档位">
+  <div class="mc-layer" id="mc-lv">
+    <div class="mc-head">
+      <span class="mc-big" id="mc-big">Medium</span>
+      <!-- 右上角刷新＝重新拉 GET /api/models（不是重置档位） -->
+      <button class="mc-refresh" id="mc-refresh" type="button" title="重新拉取模型列表" aria-label="重新拉取模型列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 4.5V11h-6.5"/></svg>
+      </button>
+    </div>
+    <button class="mc-model" id="mc-model" type="button" title="选择模型">
+      <span id="mc-model-name">默认模型</span>
+      <svg class="mc-go" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <div class="mc-slider" id="mc-slider" role="slider" tabindex="0" aria-label="思考档位"
+         aria-valuemin="0" aria-valuemax="5" aria-valuenow="2" aria-valuetext="Medium">
+      <div class="mc-track" id="mc-track"><div class="mc-fill" id="mc-fill"></div>
+        <div class="mc-ticks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="mc-thumb" id="mc-thumb" aria-hidden="true"></div>
+    </div>
+    <div class="mc-hint" id="mc-hint">推理强度</div>
+    <label class="mc-follow" title="不指定档位，交给服务端决定（滑杆暂不可调）">
+      <input type="checkbox" id="mc-follow">
+      <span class="mc-follow-text">跟随服务端默认</span>
+      <span class="sw-mini" aria-hidden="true"></span>
+    </label>
+  </div>
+  <div class="mc-layer hidden" id="mc-models">
+    <div class="mc-models-head">
+      <button class="mc-back" id="mc-back" type="button" title="返回档位" aria-label="返回档位">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <b>选择模型</b>
+    </div>
+    <div class="mc-list" id="mc-list"></div>
+  </div>
+  <div class="mc-err hidden" id="mc-err"></div>
+</div>
 
 <!-- 子对话专家表单的默认模型选择面板（数据同 /api/models，选中写入专家预设） -->
 <div id="expert-model-pop" class="popover model-pop hidden"></div>

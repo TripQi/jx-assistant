@@ -7243,7 +7243,11 @@ function modelNameOf(key) {
 // 由用户自己选；服务端认不认、能自动降级就降级，报错由用户自己换档）。
 // 内部值 = 发给模型的值，显示名按官方口径。
 const THINK_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
-const THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', max: 'Max' };
+// 显示名与内部值分开：内部值（发给后端、落库的）永远是 thinkingLevels 里的小写，
+// 显示名按官方口径首字母大写——第五档显示 Xhigh（不是 xhigh，也不是「Extra High」）。
+const THINK_LABELS = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Xhigh', max: 'Max' };
+// 跟随服务端默认（thinking 为空串）时芯片与卡片大字显示的文案
+const THINK_DEFAULT_LABEL = 'Default';
 
 // 老草稿里的档位（上一代的 disabled/enabled）归一，与后端 normalizeThinkingLevel 同口径：
 // disabled → none、enabled（只开关不指深浅）→ 空（跟随服务端默认）、认不出的清空。
@@ -7262,9 +7266,9 @@ function curThinking(view) {
 
 // pickModel 选中一个模型：会话 PATCH provider/providerKey/model，首页写进草稿。
 // providerKey 是模型归属的那把 Key——重名模型靠它落到正确的密钥上。
-async function pickModel(key, keepOpen, view) {
+// 只发模型三件套：换模型不动思考档位（thinking 不在 body 里）。返回是否成功。
+async function pickModel(key, view) {
   view = view || mainView;
-  if (!keepOpen) closePopovers();
   const parts = key === '__default__' ? ['', '', ''] : key.split('|');
   const provider = parts[0] || '', providerKey = parts[1] || '', model = parts[2] || '';
   if (view.state.cur) {
@@ -7273,170 +7277,212 @@ async function pickModel(key, keepOpen, view) {
         method: 'PATCH',
         body: JSON.stringify({ provider, providerKey, model }),
       });
-    } catch (e) { alert('切换模型失败：' + e.message); }
+    } catch (e) { mcShowError('切换模型失败：' + e.message); return false; }
   } else if (view === mainView) {
     homeDraft.provider = provider;
     homeDraft.providerKey = providerKey;
     homeDraft.model = model;
   }
   syncComposer(view);
+  return true;
 }
 
-// 设置思考档位（空串=跟随服务端默认）
-async function pickThinking(level, view) {
-  view = view || mainView;
-  closePopovers();
+// 设置思考档位（空串=跟随服务端默认）。卡片不收起：滑杆是连续调节控件，调一档就
+// 收卡片等于让用户反复点开。只发 thinking 一个字段——改档位不动模型。
+async function setThinking(level, view) {
+  view = view || popView || mainView;
+  level = normThinkLevel(level);
+  if (level) rememberManualThink(level);
   if (view.state.cur) {
     try {
       view.state.cur = await api('/api/sessions/' + view.state.cur.id, { method: 'PATCH', body: JSON.stringify({ thinking: level }) });
-    } catch (e) { alert('设置思考档位失败：' + e.message); return; }
+    } catch (e) {
+      mcShowError('设置思考档位失败：' + e.message); // 就地提示，不静默失败
+      renderModelCard(view);                        // 回到真实状态，不留乐观态
+      return;
+    }
   } else if (view === mainView) {
     homeDraft.thinking = level;
     persistHomeDraftLS();
   }
+  renderModelCard(view);
   syncComposer(view);
 }
 
-// 悬停展开只在真 hover 指针（鼠标）上生效；触屏没有 hover，思考档位靠点行尾箭头
-const hoverFineMq = window.matchMedia ? window.matchMedia('(hover: hover) and (pointer: fine)') : null;
-let modelSubLeaveTimer = 0; // 指针离开主面板/二级浮窗后的延迟收起计时（见 modelSubHideSoon）
+/* ---------- 模型与思考档位卡片（一卡两层，入口是输入框下方那枚芯片） ----------
+   第一层：大字档位 + 模型行（点它翻到第二层）+ 渐变滑杆 + 「跟随服务端默认」开关
+           + 右上角刷新（重新拉 GET /api/models，不是重置档位）；
+   第二层：平铺模型列表（不按渠道分组，当前模型带勾），选中即切会话模型并翻回第一层。
+   设计要点（都是用户敲定的口径）：
+   · 档位只有滑杆这一个入口，模型菜单里的档位二级菜单已删；两者互不影响——
+     改档位只发 thinking，换模型只发 provider/providerKey/model；
+   · 拖动只实时改大字预览，松手才 PATCH（一次）；点轨道＝跳档并立即提交；
+     键盘左右各一档、立即提交；
+   · 六档对所有模型都可用（后端白名单与模型无关），所以滑杆永远在，不按模型隐藏；
+   · 「跟随服务端默认」= thinking 空串：滑杆隐藏、大字显示 Default，关掉恢复上次手选档位。 */
+const MC_TRACK_PAD = 9;   // 滑杆轨道左右内边距（须与 style.css 的 .mc-slider padding 一致）
+const MC_CHECK = '<svg class="mc-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg>';
+let mcLayer = 1;          // 卡片当前层：1=档位，2=模型列表
+let mcDrag = null;        // 拖动中：{ pid, idx }——松手才提交
+let mcBusy = false;       // 刷新模型列表进行中（loading 态）
+// 「跟随服务端默认」关掉后要恢复的档位：用户上一次手选的（本机记忆，没有就用 Medium）
+let lastManualThink = normThinkLevel(lsGet('jx.thinkLast', '')) || 'medium';
 
-function renderModelPop(view) {
+function thinkLabel(level) { return level ? (THINK_LABELS[level] || level) : THINK_DEFAULT_LABEL; }
+
+function rememberManualThink(level) {
+  if (!THINK_LEVELS.includes(level)) return;
+  lastManualThink = level;
+  lsSet('jx.thinkLast', level);
+}
+
+// 卡片里的错误条（刷新失败/切档失败都在这里现身；空串＝收起）
+function mcShowError(msg) {
+  const el = $('mc-err');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.classList.toggle('hidden', !msg);
+}
+function mcHideError() { mcShowError(''); }
+
+// 打开卡片。anchor 是那枚芯片：主对话区 #model-chip、右栏子对话 #sub-model-chip，
+// 两处共用同一张卡，popView 记住它属于哪个视图。
+function openModelCard(view) {
+  popView = view || mainView;
+  mcLayer = 1;
+  mcHideError();
+  renderModelCard(popView);
+  openPopover('model-card', viewEl(popView, 'model-chip'));
+}
+
+// 按当前会话/草稿状态重画整张卡（第一层 + 第二层列表）
+function renderModelCard(view) {
   view = view || popView || mainView;
-  const pop = $('model-pop');
-  const cur = currentModelKey(view);
-  // 行尾箭头（带命中区 .lv-hit）：触屏点它开合思考档位；桌面悬停即展开、点它也可展开
-  const arrow = '<span class="lv-hit"><svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></span>';
-  let html = '';
-  // 公司通道的额度显示在它自己的分组头上（见下面的 quotaBadge）：员工点开模型
-  // 选择，公司通道那一段就写着「剩余 N 积分 / 额度已用完」，不额外占一行。
-  const companyQuota = state.companyQuota || null;
-  const fmtPoints = (n) => (n || 0).toLocaleString('zh-CN');
-  html += `<button class="pop-item model-item ${cur === '__default__' ? 'sel' : ''}${modelPopExpand === '__default__' ? ' exp' : ''}" data-key="__default__"><span>默认（${esc(state.defaultModel || '未配置')}）</span>${arrow}</button>`;
-  // 同一供应商内重名的模型（不同 Key 拉到同名模型）只给这几项加区分后缀，
-  // 不重名的一律不加标签——菜单保持干净，多 Key 是内部的事
+  const lv = curThinking(view);         // '' = 跟随服务端默认
+  const follow = !lv;
+  const shown = follow ? lastManualThink : lv;
+  const idx = Math.max(0, THINK_LEVELS.indexOf(shown));
+  $('mc-big').textContent = follow ? THINK_DEFAULT_LABEL : thinkLabel(lv);
+  $('mc-model-name').textContent = modelNameOf(currentModelKey(view));
+  $('mc-follow').checked = follow;
+  $('model-card').classList.toggle('following', follow);
+  $('mc-hint').textContent = follow ? '由服务端决定推理强度' : '拖动调节推理强度';
+  const slider = $('mc-slider');
+  slider.setAttribute('aria-disabled', follow ? 'true' : 'false');
+  slider.tabIndex = follow ? -1 : 0;    // 跟随默认时滑杆不可聚焦（键盘也调不了）
+  mcSetSlider(idx, follow ? THINK_DEFAULT_LABEL : thinkLabel(lv));
+  mcShowLayer(mcLayer);
+  mcRenderList(view);
+}
+
+// 滑杆几何：六等分，第 idx 档落在 idx/5 处；填充条与滑块圆心对齐同一位置
+function mcSetSlider(idx, text) {
+  const n = THINK_LEVELS.length - 1;
+  const p = n > 0 ? idx / n : 0;
+  $('mc-fill').style.width = (p * 100).toFixed(2) + '%';
+  $('mc-thumb').style.left = 'calc(' + MC_TRACK_PAD + 'px + (100% - ' + MC_TRACK_PAD * 2 + 'px) * ' + p.toFixed(4) + ')';
+  const s = $('mc-slider');
+  s.setAttribute('aria-valuenow', String(idx));
+  s.setAttribute('aria-valuetext', text);
+}
+
+function mcShowLayer(n) {
+  mcLayer = n;
+  $('mc-lv').classList.toggle('hidden', n !== 1);
+  $('mc-models').classList.toggle('hidden', n !== 2);
+}
+
+// 指针横坐标 → 档位下标（夹取在轨道两端之间，六等分就近取整）
+function mcLevelAt(clientX) {
+  const r = $('mc-track').getBoundingClientRect();
+  const n = THINK_LEVELS.length - 1;
+  if (r.width <= 0) return 0;
+  const x = Math.min(Math.max(clientX - r.left, 0), r.width);
+  return Math.round((x / r.width) * n);
+}
+
+// 拖动中的预览：只改大字与滑杆位置，不发请求（松手才提交）
+function mcPreview(idx) {
+  if (!mcDrag) return;
+  mcDrag.idx = idx;
+  const text = thinkLabel(THINK_LEVELS[idx]);
+  $('mc-big').textContent = text;
+  mcSetSlider(idx, text);
+}
+
+// 卡片被关掉（Esc 等）时丢掉未松手的拖动：松手前关闭不提交中间态
+function mcCancelDrag() { mcDrag = null; }
+
+// 第二层：平铺模型列表。同一渠道内重名的模型（不同 Key 拉到同名模型）加 Key 备注
+// 后缀区分，不重名的一律不加标签；不放「默认模型」这类条目。
+function mcRenderList(view) {
+  const list = $('mc-list');
+  const cur = currentModelKey(view || popView || mainView);
+  // 老会话只存了模型名（没有 Key 归属）时按「同渠道同模型的第一项」认勾选，
+  // 免得列表里一个勾都没有
+  let curKey = cur;
+  if (cur !== '__default__') {
+    const p = cur.split('|');
+    if (!p[1]) {
+      const hit = (state.models || []).find((m) => m.providerId === p[0] && m.modelId === p[2]);
+      if (hit) curKey = modelKeyOf(hit.providerId, hit.keyId, hit.modelId);
+    }
+  }
   const dupCount = {};
   for (const m of state.models || []) {
     const k = m.providerId + '|' + m.modelId;
     dupCount[k] = (dupCount[k] || 0) + 1;
   }
-  let lastProv = '';
+  let h = '';
   for (const m of state.models || []) {
-    if (m.providerId !== lastProv) {
-      // 分组头状态：停用=置灰「已停用」；公司通道外网兜底生效=绿色「外网通道中」
-      // （通道仍可用，只是走的公网地址——不再让用户误以为不可用）
-      const viaBadge = !m.providerOff && m.providerVia === 'wan'
-        ? '（<span style="color:var(--green,#1f9d55)">外网通道中</span>）' : '';
-      // 公司通道这一组：分组头右侧直接带额度（服务端随公告下发，只读）
-      let quotaBadge = '';
-      if (m.providerId === 'company-internal' && companyQuota) {
-        const q = companyQuota;
-        let txt = q.unlimited ? '额度不限量' : '剩余 ' + fmtPoints(q.remainPoints) + ' 积分';
-        if (q.status === 2) txt = '额度已用完';
-        let tip = q.unlimited ? '公司通道：额度不限量（只记账）'
-          : '公司通道剩余 ' + fmtPoints(q.remainPoints) + ' 积分（≈' + ((q.remainPoints || 0) / 1000).toFixed(2) + ' 元）· 已用 ' + fmtPoints(q.usedPoints) + ' 积分';
-        tip += ' · 规则：' + (q.periodText || '') + (q.points ? '，每次 ' + fmtPoints(q.points) + ' 积分' : '');
-        tip += q.nextAt ? ' · 下次重置 ' + q.nextAt.replace('T', ' ').slice(0, 16) : ' · 不自动重置';
-        tip += '（由公司服务端与中转站结算；设置·模型的公司通道卡片里可刷新）';
-        quotaBadge = `<span class="pop-quota" title="${esc(tip)}">${esc(txt)}</span>`;
-      }
-      html += `<div class="pop-group">${esc(m.providerName)}${m.providerOff ? '（已停用）' : viaBadge}${quotaBadge}</div>`;
-      lastProv = m.providerId;
-    }
-    // 菜单 key 带 Key 归属（providerId|keyId|modelId）：重名模型各占一行、各选
-    // 各自那把 Key，选中后会话记住 providerKey
     const k = modelKeyOf(m.providerId, m.keyId, m.modelId);
-    const dup = dupCount[m.providerId + '|' + m.modelId] > 1 && m.keyLabel;
-    const label = (m.modelName || m.modelId) + (dup ? '（' + m.keyLabel + '）' : '');
-    // 停用服务商的模型置灰（公司通道出公司自动停用期间仍可见，点了也能选——
-    // 会话解析时会自动回落到可用服务商，但选单里如实标注状态）
-    html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(label)}</span>${arrow}</button>`;
+    const tag = dupCount[m.providerId + '|' + m.modelId] > 1 && m.keyLabel ? '（' + m.keyLabel + '）' : '';
+    const on = k === curKey;
+    h += '<button type="button" class="pop-item mc-item' + (on ? ' sel' : '') + (m.providerOff ? ' off' : '') + '"'
+      + ' data-key="' + esc(k) + '" title="' + esc((m.providerName || '') + ' · ' + m.modelId) + '">'
+      + '<span>' + esc((m.modelName || m.modelId) + tag) + '</span>' + (on ? MC_CHECK : '') + '</button>';
   }
-  pop.innerHTML = html;
-  pop.querySelectorAll('.model-item').forEach((b) => {
-    const key = b.dataset.key;
-    // 悬停整行：有档位就在右侧浮出它的思考档位，悬到无档位的行则收起（仅真 hover 指针）
-    b.onpointerenter = () => {
-      if (!hoverFineMq || !hoverFineMq.matches) return;
-      clearTimeout(modelSubLeaveTimer);
-      if (modelPopExpand === key) {
-        // 行曾滚出可视区被收起（展开标记还留着）：滚回来重新浮出
-        if ($('model-sub-pop').classList.contains('hidden')) syncModelSubPop(popView);
-        return;
-      }
-      modelPopExpand = key;
-      pop.querySelectorAll('.model-item.exp').forEach((x) => x.classList.remove('exp'));
-      b.classList.add('exp');
-      syncModelSubPop(popView);
-    };
-    b.onclick = async (e) => {
-      // 点行尾箭头 = 只开合该行的思考档位浮窗，不选中、不收菜单。
-      // 触屏没有 hover，箭头就是开合开关；桌面悬停已能展开，箭头点开可以、
-      // 点收不行——收下之后指针还停在行上，合成悬停会把它立刻再弹出来
-      if (e.target.closest('.lv-hit')) {
-        if (hoverFineMq && hoverFineMq.matches) {
-          if (modelPopExpand === key) return;
-          modelPopExpand = key;
-        } else {
-          modelPopExpand = modelPopExpand === key ? '' : key;
-        }
-        renderModelPop(popView);
-        syncModelSubPop(popView);
-        return;
-      }
-      // 点行任意处 = 选中该模型并收起。不在这里顺带弹二级浮窗——那要求点了再
-      // 点才收，连点两下会互相抵消（旧版「偶尔关不掉」的来源），手机端也格外别扭
-      await pickModel(key, false, popView);
-    };
-  });
-  // 打开面板的时序：onclick 里 openPopover 在本函数之后执行，rAF 等面板
-  // 可见、行有真实布局后再定位二级浮窗
-  requestAnimationFrame(() => syncModelSubPop(view));
+  if (!h && !mcBusy) h = '<div class="mc-empty">还没有可用模型（去 设置 · 模型 添加供应商）</div>';
+  const keepTop = list.scrollTop;
+  list.innerHTML = (mcBusy ? '<div class="mc-empty">正在刷新模型列表…</div>' : '') + h;
+  list.scrollTop = keepTop;
+  list.classList.toggle('busy', mcBusy);
+  list.querySelectorAll('.mc-item').forEach((b) => { b.onclick = () => mcPickModel(b.dataset.key); });
 }
 
-// 思考档位二级浮窗：跟随 modelPopExpand 指向的模型行，向右弹出。
-// 桌面悬停整行即展开（renderModelPop 的 pointerenter），触屏点行尾箭头展开；
-// 行滚出主面板可视区（主面板会滚动）或主面板收起时一并收起。
-function syncModelSubPop(view) {
-  view = view || popView || mainView;
-  const sub = $('model-sub-pop');
-  const main = $('model-pop');
-  const key = modelPopExpand;
-  const levels = key ? THINK_LEVELS : [];
-  let row = null;
-  if (levels.length && !main.classList.contains('hidden')) {
-    main.querySelectorAll('.model-item').forEach((b) => { if (b.dataset.key === key) row = b; });
+// 点模型：立即切会话模型（PATCH /api/sessions/{id}），档位保持不变，然后翻回第一层
+async function mcPickModel(key) {
+  if (!key) return;
+  const ok = await pickModel(key, popView);
+  if (!ok) { renderModelCard(popView); return; } // 失败留在列表里改选，错误条已给出原因
+  mcShowLayer(1);
+  renderModelCard(popView);
+}
+
+// 右上角刷新：重新拉 GET /api/models 并重画第二层列表；期间转圈，失败给出可见提示
+async function mcRefreshModels() {
+  if (mcBusy) return;
+  mcBusy = true;
+  mcHideError();
+  const btn = $('mc-refresh');
+  btn.classList.add('spin');
+  btn.disabled = true;
+  mcRenderList(popView); // 第二层当场显示加载态（刷新常在第一层点，但列表可能正开着）
+  try {
+    const d = await api('/api/models');
+    state.models = d.models || [];
+    state.defaultProvider = d.defaultProvider || '';
+    state.defaultModel = d.defaultModel || '';
+    state.companyQuota = d.companyQuota || null;
+  } catch (e) {
+    mcShowError('刷新模型列表失败：' + e.message); // 不静默失败
+  } finally {
+    mcBusy = false;
+    btn.classList.remove('spin');
+    btn.disabled = false;
+    renderModelCard(popView);
+    syncComposer(popView); // 芯片上的模型名可能已变（模型清单刷新后重名后缀/命名跟着变）
   }
-  if (!row) { sub.classList.add('hidden'); return; }
-  const rr = row.getBoundingClientRect();
-  const mp = main.getBoundingClientRect();
-  if (rr.bottom < mp.top || rr.top > mp.bottom) { sub.classList.add('hidden'); return; } // 行不在可视区
-  const cur = currentModelKey(view);
-  const thinking = curThinking(view);
-  const active = key === cur; // 档位选中态只在当前选中的模型上生效
-  let h = `<button class="pop-item mp-lv${active && !thinking ? ' on' : ''}" data-lv="">默认（跟随服务）</button>`;
-  for (const lv of levels) {
-    h += `<button class="pop-item mp-lv${active && thinking === lv ? ' on' : ''}" data-lv="${esc(lv)}">${THINK_LABELS[lv] || esc(lv)}</button>`;
-  }
-  sub.innerHTML = h;
-  sub.classList.remove('hidden');
-  sub.querySelectorAll('.mp-lv').forEach((b) => {
-    b.onclick = async (e) => {
-      e.stopPropagation();
-      // 在还没选中的模型行上直接定档 = 一并选中该模型（悬停别的模型定档是常态操作）
-      const key = modelPopExpand;
-      if (key && key !== currentModelKey(popView)) await pickModel(key, true, popView);
-      pickThinking(b.dataset.lv, popView);
-    };
-  });
-  // 定位：贴该行右侧弹出；右侧放不下翻到主面板左缘外侧（不是行左缘——贴行左翻
-  // 会把浮窗压在菜单行上，行就点不了了）；再放不下贴视口左缘，垂直夹取在视口内
-  const sw = sub.offsetWidth, sh = sub.offsetHeight;
-  let x = rr.right + 2;
-  if (x + sw > window.innerWidth - 12) x = Math.max(12, mp.left - sw - 2);
-  let y = Math.max(12, Math.min(rr.top - 6, window.innerHeight - sh - 12));
-  sub.style.left = x + 'px';
-  sub.style.top = y + 'px';
 }
 
 /* ---------- 弹出面板系统：加号菜单 / 权限面板 / 模型面板 / 目录面板 ---------- */
@@ -7788,8 +7834,8 @@ function syncComposer(view) {
   const remote = vcur ? !!vcur.remote : (view === mainView && !!homeDraft.remote);
   viewEl(view, 'perm-chip-label').textContent = (PERM_LABELS[s.permission] || s.permission) + (remote ? ' ·远程' : '');
   viewEl(view, 'perm-chip').dataset.short = (PERM_SHORTS[s.permission] || s.permission) + (remote ? ' ·远' : '');
-  const tk = curThinking(view);
-  viewEl(view, 'model-chip-label').textContent = modelNameOf(currentModelKey(view)) + (tk ? ' · ' + (THINK_LABELS[tk] || tk) : '');
+  // 芯片＝「模型名 · 档位」一体的入口（点开整张模型与档位卡片）；跟随服务端默认显示 Default
+  viewEl(view, 'model-chip-label').textContent = modelNameOf(currentModelKey(view)) + ' · ' + thinkLabel(curThinking(view));
   viewEl(view, 'flag-plan').classList.toggle('on', s.planMode);
   viewEl(view, 'flag-goal').classList.toggle('on', s.goalMode);
   viewEl(view, 'flag-goal').title = s.goalMode ? ('目标模式：' + (s.goalText || '（未填写目标）')) : '目标模式';
@@ -8692,27 +8738,63 @@ jxDiag('init:绑定A btn-send/stop/plus 完成');
 $('sub-btn-plus').onclick = () => openPlusMenu(subView);
 $('perm-chip').onclick = () => { popView = mainView; renderPermPop(popView); openPopover('perm-pop', $('perm-chip')); };
 $('sub-perm-chip').onclick = () => { popView = subView; renderPermPop(popView); openPopover('perm-pop', $('sub-perm-chip')); };
-$('model-chip').onclick = () => { popView = mainView; renderModelPop(popView); openPopover('model-pop', $('model-chip')); };
-$('sub-model-chip').onclick = () => { popView = subView; renderModelPop(popView); openPopover('model-pop', $('sub-model-chip')); };
-// 主面板滚动时二级浮窗跟随模型行重新定位（行滚出可视区自动收起）
-$('model-pop').addEventListener('scroll', () => syncModelSubPop());
-// 思考档位浮窗的悬停收起（仅真 hover 指针）：指针离开主面板与浮窗本体后稍候收起
-// ——跨过两者之间的窄缝去点档位时不误收（再进入任一面板即取消计时）；触屏
-// 没有 hover 不走这里，箭头展开的浮窗由点箭头/选中/点外面收起。
-function modelSubHideSoon() {
-  clearTimeout(modelSubLeaveTimer);
-  modelSubLeaveTimer = setTimeout(() => {
-    modelPopExpand = '';
-    $('model-sub-pop').classList.add('hidden');
-    $('model-pop').querySelectorAll('.model-item.exp').forEach((b) => b.classList.remove('exp'));
-  }, 250);
-}
-['model-pop', 'model-sub-pop'].forEach((id) => {
-  $(id).addEventListener('pointerenter', () => clearTimeout(modelSubLeaveTimer));
-  $(id).addEventListener('pointerleave', () => {
-    if (hoverFineMq && hoverFineMq.matches) modelSubHideSoon();
+$('model-chip').onclick = () => openModelCard(mainView);
+$('sub-model-chip').onclick = () => openModelCard(subView);
+
+/* ---------- 模型与思考档位卡片：滑杆/开关/刷新/两层的交互 ----------
+   滑杆用 pointer 事件 + setPointerCapture：WebView2 里把滑块拖出卡片范围也不丢事件
+   （触屏同样走 pointer，touch-action:none 关掉页面滚动抢手势）。
+   拖动只更新大字预览，松手（pointerup）才提交一次 PATCH；pointercancel（被系统手势
+   打断／卡片被收）直接回到真实状态、不提交。点轨道任意处＝按下即预览、松手提交，
+   与拖动同一条路径，所以「点击＝跳档并立即提交」自然成立。 */
+{
+  const slider = $('mc-slider');
+  slider.addEventListener('pointerdown', (e) => {
+    if ($('mc-follow').checked) return;               // 跟随服务端默认时滑杆禁用
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    mcDrag = { pid: e.pointerId, idx: mcLevelAt(e.clientX) };
+    try { slider.setPointerCapture(e.pointerId); } catch (err) { /* 老内核不支持捕获，move 照样来 */ }
+    mcPreview(mcDrag.idx);
+    try { slider.focus({ preventScroll: true }); } catch (err) { /* 老内核无参对象 */ }
   });
-});
+  slider.addEventListener('pointermove', (e) => {
+    if (!mcDrag || mcDrag.pid !== e.pointerId) return;
+    e.preventDefault();
+    mcPreview(mcLevelAt(e.clientX));
+  });
+  const endDrag = (commit) => (e) => {
+    if (!mcDrag || (e && e.pointerId !== mcDrag.pid)) return;
+    const idx = mcDrag.idx;
+    const pid = mcDrag.pid;
+    mcDrag = null;
+    try { slider.releasePointerCapture(pid); } catch (err) { /* 已释放 */ }
+    if (commit) setThinking(THINK_LEVELS[idx], popView); // 松手才提交：一次 PATCH
+    else renderModelCard(popView);                       // 取消：回到真实档位，不留中间态
+  };
+  slider.addEventListener('pointerup', endDrag(true));
+  slider.addEventListener('pointercancel', endDrag(false));
+  // 键盘：左右（上下）各切一档并立即提交，role=slider 的标准交互
+  slider.addEventListener('keydown', (e) => {
+    const dir = (e.key === 'ArrowRight' || e.key === 'ArrowUp') ? 1
+      : ((e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? -1 : 0);
+    if (!dir) return;
+    const n = THINK_LEVELS.length;
+    const cur = THINK_LEVELS.indexOf(curThinking(popView) || lastManualThink);
+    const idx = Math.min(n - 1, Math.max(0, (cur < 0 ? THINK_LEVELS.indexOf(lastManualThink) : cur) + dir));
+    e.preventDefault();
+    setThinking(THINK_LEVELS[idx], popView);
+  });
+  // 「跟随服务端默认」：开＝thinking 空串（滑杆隐藏、大字 Default）；
+  // 关＝恢复上一次手选的档位（没有历史就是 Medium）
+  $('mc-follow').addEventListener('change', (e) => {
+    setThinking(e.target.checked ? '' : (lastManualThink || 'medium'), popView);
+  });
+  // 模型行 → 第二层；返回键回第一层；右上角刷新重新拉模型列表
+  $('mc-model').onclick = () => { mcShowLayer(2); mcRenderList(popView); $('mc-list').scrollTop = 0; };
+  $('mc-back').onclick = () => mcShowLayer(1);
+  $('mc-refresh').onclick = () => mcRefreshModels();
+}
 jxDiag('init:绑定B sub/chips 完成');
 // 工作目录面板：每次打开重置搜索；搜索实时过滤目录列表
 $('ws-row').onclick = () => {
@@ -8867,6 +8949,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   hideSelPop();
   if (sideSearchOpen()) { closeSideSearch(); return; } // 搜索开着：优先关搜索
+  mcCancelDrag(); // 模型与档位卡片里正在拖滑杆：Esc 关闭不提交中间态
   closePopovers();
 });
 /* ---------- 语音输入：实现已迁入组件 组件/voice/ ------------------------------------------

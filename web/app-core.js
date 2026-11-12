@@ -1214,14 +1214,8 @@ const dotDone = {};     // 会话id -> 完成未查看（绿点）
 // 单 Key 供应商为空）。
 const homeDraft = { mode: 'office', permission: 'workspace-write', provider: '', providerKey: '', model: '', thinking: '', tools: ['browser'], planMode: false, goalMode: false, goalText: '', remote: null, quote: '' };
 
-// 模型菜单里展开思考档位浮窗的模型 key（app-chat.js 的模型菜单在用）。
-// 放这半边是因为它属于弹层开合状态：任何关闭路径（Esc / 点外面 / 切别的
-// 弹层 / 选中收起）都要把它清零，重开菜单才不会把上次的二级浮窗又弹出来。
-let modelPopExpand = '';
-
 function closePopovers() {
   document.querySelectorAll('.popover').forEach((p) => p.classList.add('hidden'));
-  modelPopExpand = '';
   closeAllSelects();
 }
 

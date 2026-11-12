@@ -47,7 +47,22 @@ const (
 	usagePurposeTitle   = "title"   // AI 自动会话标题（组件 session-title 经 /api/llm/ask）
 	usagePurposeCompact = "compact" // 上下文压缩摘要（contextengine 的 CallSummarizer）
 	usagePurposeAssist  = "assist"  // 其他辅助生成（git 提交摘要、插件 mods 等）
+	usagePurposeSearch  = "search"  // 联网搜索/抽取的供应商调用（按次计费，见 usagesearch.go）
 )
+
+// 调用类型（usage_events.kind）：模型调用与搜索/抽取调用共用一张明细表，但计费
+// 维度完全不同（token 按量 vs 按次），页面分开展示、各自合计——kind 是两者的分界。
+// 模型调用落空串（这列加之前的老数据也是空串，按 llm 对待，不回填）。
+const (
+	usageKindLLM     = ""        // 模型调用（token 计费）
+	usageKindSearch  = "search"  // 搜索供应商调用（按次计费）
+	usageKindExtract = "extract" // 抽取供应商调用（按次计费）
+)
+
+// usageKindSearchOf 搜索/抽取类调用的 kind（其余一律 llm）。
+func usageKindIsSearchCall(kind string) bool {
+	return kind == usageKindSearch || kind == usageKindExtract
+}
 
 // usageRow 是一条逐次调用明细（表 usage_events 的一行）。
 type usageRow struct {
@@ -57,7 +72,7 @@ type usageRow struct {
 	ProviderID string
 	KeyID      string
 	Model      string
-	Protocol   string // chat | responses | anthropic
+	Protocol   string // chat | responses | anthropic（搜索/抽取调用为空）
 	Input      int64  // 输入 tokens（含缓存读取部分，上游 prompt_tokens 口径）
 	CacheRead  int64  // 缓存读取 tokens（命中）
 	CacheWrite int64  // 缓存写入 tokens（Anthropic 的 cache_creation）
@@ -68,6 +83,11 @@ type usageRow struct {
 	OK         bool
 	Error      string
 	Stream     bool
+	// ---- 搜索/抽取调用专用（llm 调用这四项为空）----
+	Kind    string // 调用类型：""（llm）/ search / extract
+	Detail  string // 目标摘要：搜索词或目标 URL（截断，便于排查，不存全文）
+	ErrKind string // 失败类别（连不上/Key 无效/额度/限流/解析/上游/拒绝/配置）
+	Rank    int    // 供应商顺位（1 起；>1 表示前面几家失败过、这次是回落来的）
 }
 
 // usagePurposeOf 按会话形态判定用途（主对话/子任务会话/辅助对话/任务会话）。
@@ -234,6 +254,7 @@ func (m *usageCall) finish(err error) {
 		DurationMs: time.Since(m.start).Milliseconds(),
 		OK:         err == nil,
 		Stream:     true,
+		Kind:       usageKindLLM,
 	}
 	if u := m.usage; u != nil {
 		row.Input = int64(u.PromptTokens)
@@ -262,8 +283,9 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	}
 	stmt, err := tx.Prepare(`INSERT INTO usage_events
 		(ts, session_id, purpose, provider_id, key_id, model, protocol,
-		 input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream,
+		 kind, detail, err_kind, provider_rank)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -271,7 +293,8 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	defer stmt.Close()
 	for _, r := range rows {
 		if _, err := stmt.Exec(r.TS, r.SessionID, r.Purpose, r.ProviderID, r.KeyID, r.Model, r.Protocol,
-			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.Thinking, r.TTFTMs, r.DurationMs, boolInt(r.OK), r.Error, boolInt(r.Stream)); err != nil {
+			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.Thinking, r.TTFTMs, r.DurationMs, boolInt(r.OK), r.Error, boolInt(r.Stream),
+			r.Kind, r.Detail, r.ErrKind, r.Rank); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -310,9 +333,11 @@ func usageThinkingFilter(s string) string {
 	return ""
 }
 
-// where 生成 WHERE 子句与参数。日期用 substr(ts,1,10) 比较——ts 是本地时间
-// 字符串，按天切开就是日期，不必让 SQLite 解析时间（也吃得到 ts 上的索引）。
-func (f usageFilter) where() (string, []any) {
+// baseConds 基础筛选条件（日期/渠道/Key/推理强度），**不含调用类型**：
+// token 类聚合与搜索类聚合都从它出发，各自再叠自己的 kind 条件。
+// 日期用 substr(ts,1,10) 比较——ts 是本地时间字符串，按天切开就是日期，不必让
+// SQLite 解析时间（也吃得到 ts 上的索引）。
+func (f usageFilter) baseConds() ([]string, []any) {
 	var conds []string
 	var args []any
 	if d := strings.TrimSpace(f.From); d != "" {
@@ -340,16 +365,47 @@ func (f usageFilter) where() (string, []any) {
 		conds = append(conds, "thinking = ?")
 		args = append(args, usageThinkingFilter(f.Thinking))
 	}
+	return conds, args
+}
+
+// whereClause 拼 WHERE 与参数（无条件时返回空串——调用方必须挡住全表操作）。
+func whereClause(conds []string, args []any) (string, []any) {
 	if len(conds) == 0 {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
-// usageDayGroupRow 是「每日用量趋势」的原始聚合：按 (天, 模型, 协议, 渠道) 分组
-// ——天级费用必须逐渠道按各自倍率算完再合并，SQL 里算不了（价格是 Go 侧的配置）。
+// where 全部明细的条件（清理用；不带调用类型条件）。
+func (f usageFilter) where() (string, []any) {
+	conds, args := f.baseConds()
+	return whereClause(conds, args)
+}
+
+// whereTokens 只取模型调用：token 合计与模型占比不能被搜索/抽取明细污染
+//（它们没有 token，只按次计费）。
+func (f usageFilter) whereTokens() (string, []any) {
+	conds, args := f.baseConds()
+	conds = append(conds, "kind IN ('', 'llm')")
+	return whereClause(conds, args)
+}
+
+// whereKind 只取某一类搜索/抽取调用。
+func (f usageFilter) whereKind(kind string) (string, []any) {
+	conds, args := f.baseConds()
+	conds = append(conds, "kind = ?")
+	return whereClause(conds, append(args, kind))
+}
+
+// usageDayGroupRow 是「每日用量趋势」的原始聚合：按 (小时, 模型, 协议, 渠道) 分组
+// —— 天级费用必须逐渠道按各自倍率、逐时段按峰值/空闲价算完再合并，SQL 里算不了
+//（价格、节假日表都是 Go 侧的配置）。
+//
+// 为什么精确到小时而不是天：官方的高峰/空闲时段边界都落在整点，按小时分桶与逐条
+// 按 ts 判定完全等价；而费用必须按**调用发生的时段**算，不能按「现在」——否则
+// 历史数据重算出来的钱是错的。
 type usageDayGroupRow struct {
-	Day        string `json:"day"`
+	HourTS     string `json:"hourTs"` // 'YYYY-MM-DD HH'（时段判定的最小粒度）
 	Model      string `json:"model"`
 	Protocol   string `json:"protocol"`
 	ProviderID string `json:"providerId"`
@@ -361,9 +417,11 @@ type usageDayGroupRow struct {
 	Errors     int64  `json:"errors"`
 }
 
-// usageModelRow 是「按模型消耗统计」的一行原始聚合：按 (模型, 协议, 渠道) 分组
-// ——渠道必须单独出来，费用要按各自渠道倍率算完再合并（同模型不同中转站价格不同）。
+// usageModelRow 是「按模型消耗统计」的一行原始聚合：按 (小时, 模型, 协议, 渠道)
+// 分组——渠道必须单独出来（费用按各自渠道倍率算），小时也必须单独出来（费用按
+// 各自时段价算）。
 type usageModelRow struct {
+	HourTS     string `json:"hourTs"`
 	Model      string `json:"model"`
 	Protocol   string `json:"protocol"`
 	ProviderID string `json:"providerId"`
@@ -375,15 +433,23 @@ type usageModelRow struct {
 	Errors     int64  `json:"errors"`
 }
 
-// UsageDailyGroups 按 (天, 模型, 协议, 渠道) 聚合（升序）。调用方在 Go 侧合并成
-// 天级数据并逐渠道按倍率算钱。
+// usageDayOf 从小时桶取日期（'YYYY-MM-DD HH' → 'YYYY-MM-DD'）。
+func usageDayOf(hourTS string) string {
+	if len(hourTS) >= 10 {
+		return hourTS[:10]
+	}
+	return hourTS
+}
+
+// UsageDailyGroups 按 (小时, 模型, 协议, 渠道) 聚合（升序）。调用方在 Go 侧合并成
+// 天级数据，并逐条按时段价、逐渠道按倍率算钱。
 func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
-	where, args := f.where()
-	q := `SELECT substr(ts,1,10) AS day, model, protocol, provider_id,
+	where, args := f.whereTokens()
+	q := `SELECT substr(ts,1,13) AS hour_ts, model, protocol, provider_id,
 			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 			COUNT(*), COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0)
-		FROM usage_events` + where + ` GROUP BY day, model, protocol, provider_id ORDER BY day`
+		FROM usage_events` + where + ` GROUP BY hour_ts, model, protocol, provider_id ORDER BY hour_ts`
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(q, args...)
@@ -394,7 +460,7 @@ func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
 	out := []usageDayGroupRow{}
 	for rows.Next() {
 		var r usageDayGroupRow
-		if err := rows.Scan(&r.Day, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
+		if err := rows.Scan(&r.HourTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
 			&r.CacheRead, &r.CacheWrite, &r.Calls, &r.Errors); err != nil {
 			return nil, err
 		}
@@ -403,15 +469,15 @@ func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
 	return out, rows.Err()
 }
 
-// UsageByModel 按 (模型, 协议, 渠道) 聚合。
+// UsageByModel 按 (小时, 模型, 协议, 渠道) 聚合。
 func (s *Store) UsageByModel(f usageFilter) ([]usageModelRow, error) {
-	where, args := f.where()
-	q := `SELECT model, protocol, provider_id,
+	where, args := f.whereTokens()
+	q := `SELECT substr(ts,1,13) AS hour_ts, model, protocol, provider_id,
 			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 			COUNT(*), COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0)
 		FROM usage_events` + where + `
-		GROUP BY model, protocol, provider_id ORDER BY COUNT(*) DESC`
+		GROUP BY hour_ts, model, protocol, provider_id ORDER BY COUNT(*) DESC`
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(q, args...)
@@ -422,13 +488,20 @@ func (s *Store) UsageByModel(f usageFilter) ([]usageModelRow, error) {
 	out := []usageModelRow{}
 	for rows.Next() {
 		var r usageModelRow
-		if err := rows.Scan(&r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
+		if err := rows.Scan(&r.HourTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
 			&r.CacheRead, &r.CacheWrite, &r.Calls, &r.Errors); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// whereSearch 只取搜索/抽取调用（按次计费的明细，没有 token）。
+func (f usageFilter) whereSearch() (string, []any) {
+	conds, args := f.baseConds()
+	conds = append(conds, "kind IN ('search', 'extract')")
+	return whereClause(conds, args)
 }
 
 // usageRecord 是「用量记录」明细表的一行（对外 JSON 口径）。
@@ -451,10 +524,30 @@ type usageRecord struct {
 	OK         bool   `json:"ok"`
 	Error      string `json:"error,omitempty"`
 	Stream     bool   `json:"stream"`
+	// Peak 这次调用落在高峰（按峰值价计费）还是空闲（按空闲价）；页面 hover 显示。
+	Peak bool `json:"peak"`
+	// ---- 搜索/抽取调用专用 ----
+	Kind    string `json:"kind,omitempty"`    // search | extract（模型调用为空）
+	Detail  string `json:"detail,omitempty"`  // 搜索词/目标 URL 的截断摘要
+	ErrKind string `json:"errKind,omitempty"` // 失败类别
+	Rank    int    `json:"rank,omitempty"`    // 供应商顺位（1 起）
 }
 
-// UsageRecords 明细分页（新的在前）与总条数。
+// UsageRecords 模型调用的明细分页（新的在前）与总条数。搜索/抽取明细走
+// UsageSearchRecords（各自合计，别混在一张表里）。
 func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, int, error) {
+	where, args := f.whereTokens()
+	return s.scanUsageRecords(where, args, limit, offset)
+}
+
+// UsageSearchRecords 搜索/抽取调用的明细分页（新的在前）与总条数。
+func (s *Store) UsageSearchRecords(f usageFilter, limit, offset int) ([]usageRecord, int, error) {
+	where, args := f.whereSearch()
+	return s.scanUsageRecords(where, args, limit, offset)
+}
+
+// scanUsageRecords 明细分页的公共实现（token 类与搜索类共用的列与口径）。
+func (s *Store) scanUsageRecords(where string, args []any, limit, offset int) ([]usageRecord, int, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -464,7 +557,6 @@ func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, i
 	if offset < 0 {
 		offset = 0
 	}
-	where, args := f.where()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var total int
@@ -472,7 +564,8 @@ func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, i
 		return nil, 0, err
 	}
 	q := `SELECT ts, session_id, purpose, provider_id, key_id, model, protocol,
-			input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream
+			input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream,
+			kind, detail, err_kind, provider_rank
 		FROM usage_events` + where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.Query(q, append(append([]any{}, args...), limit, offset)...)
 	if err != nil {
@@ -484,15 +577,55 @@ func (s *Store) UsageRecords(f usageFilter, limit, offset int) ([]usageRecord, i
 		var r usageRecord
 		var ok, stream int
 		if err := rows.Scan(&r.TS, &r.SessionID, &r.Purpose, &r.ProviderID, &r.KeyID, &r.Model, &r.Protocol,
-			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.Thinking, &r.TTFTMs, &r.DurationMs, &ok, &r.Error, &stream); err != nil {
+			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.Thinking, &r.TTFTMs, &r.DurationMs, &ok, &r.Error, &stream,
+			&r.Kind, &r.Detail, &r.ErrKind, &r.Rank); err != nil {
 			return nil, 0, err
 		}
 		r.OK = ok != 0
 		r.Stream = stream != 0
 		r.Total = r.Input + r.Output
+		r.Peak = usagePeakAt(r.TS)
 		out = append(out, r)
 	}
 	return out, total, rows.Err()
+}
+
+// usageSearchGroupRow 是「搜索调用」按 (天, 供应商, 类型) 的原始聚合。
+// 搜索按次计费：次数、成功次数（计费依据）、回落次数、总耗时（求平均）。
+type usageSearchGroupRow struct {
+	Day        string `json:"day"`
+	ProviderID string `json:"providerId"`
+	Kind       string `json:"kind"` // search | extract
+	Calls      int64  `json:"calls"`
+	Success    int64  `json:"success"`
+	Fallback   int64  `json:"fallback"` // 顺位 >1 的次数：前面几家失败过
+	DurationMs int64  `json:"durationMs"`
+}
+
+// UsageSearchGroups 按 (天, 供应商, 类型) 聚合搜索/抽取调用。
+func (s *Store) UsageSearchGroups(f usageFilter) ([]usageSearchGroupRow, error) {
+	where, args := f.whereSearch()
+	q := `SELECT substr(ts,1,10) AS day, provider_id, kind,
+			COUNT(*), COALESCE(SUM(CASE WHEN ok=1 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN provider_rank > 1 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(duration_ms),0)
+		FROM usage_events` + where + ` GROUP BY day, provider_id, kind ORDER BY day`
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []usageSearchGroupRow{}
+	for rows.Next() {
+		var r usageSearchGroupRow
+		if err := rows.Scan(&r.Day, &r.ProviderID, &r.Kind, &r.Calls, &r.Success, &r.Fallback, &r.DurationMs); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // UsageCleanupBetween 删除日期范围内（含首尾）的明细，返回删除条数。

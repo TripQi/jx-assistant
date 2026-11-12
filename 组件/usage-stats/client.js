@@ -53,6 +53,7 @@
     key: '',
     thinking: '', // 推理强度筛选：'' 全部 / 'default' 未指定档位 / 六档之一
     page: 0,
+    searchPage: 0,
     pricing: null,
     pricingDirty: false,
   };
@@ -163,7 +164,8 @@
     var ctx = { root: wrap };
 
     wrap.appendChild(el('p', 'us-note',
-      '这里记录每次模型调用的明细（会话与模型都会产生记录），按本地单价估算花费。'));
+      '这里记录每次模型调用的明细（会话与模型都会产生记录），以及联网搜索/抽取的按次调用；' +
+      '花费按本地单价估算，模型按 token 计、搜索按次计，两块各自合计后再相加。'));
 
     // ---- 筛选行 ----
     var filters = el('div', 'us-filters');
@@ -263,11 +265,32 @@
     cardRecords.appendChild(pager);
     wrap.appendChild(cardRecords);
 
+    // ---- 搜索调用（按次计费，与 token 类用量分开合计）----
+    var cardSearch = el('div', 'us-card');
+    var hSearch = el('h4', '', '搜索调用');
+    hSearch.appendChild(el('span', 'h-sub', '按次计费 · 失败计数不计费'));
+    cardSearch.appendChild(hSearch);
+    cardSearch.appendChild(el('p', 'us-note',
+      '联网搜索与正文抽取的供应商调用：每次回落尝试一行（第 1 家失败、第 2 家成功时是两行），' +
+      '所以「次数」含失败与回落。这里自本次升级起统计（此前的搜索调用没有记录）。'));
+    var searchKpis = el('div', 'us-kpis');
+    cardSearch.appendChild(searchKpis);
+    var searchProviderTable = el('div', 'us-table-wrap');
+    cardSearch.appendChild(searchProviderTable);
+    var searchRecTable = el('div', 'us-table-wrap');
+    cardSearch.appendChild(searchRecTable);
+    var searchPager = el('div', 'us-pager');
+    cardSearch.appendChild(searchPager);
+    wrap.appendChild(cardSearch);
+
     // ---- 单价与倍率 ----
     var cardPrice = el('div', 'us-card');
     cardPrice.appendChild(el('h4', '', '单价与倍率'));
     cardPrice.appendChild(el('p', 'us-note',
-      '模型基础价单位「元 / 百万 tokens」；渠道倍率默认 1.0，费用 = 基础价算出的金额 × 倍率（同一模型挂不同中转站不必逐个配价）。未配单价的模型只统计 token，费用列显示「未配单价」。'));
+      '模型基础价单位「元 / 百万 tokens」（填的是峰值价）；计费口径：未命中输入×输入价 + 缓存读取×缓存读价 + ' +
+      '缓存写入×缓存写价 + 输出×输出价，命中缓存的输入不再按输入价重复计费。' +
+      '空闲折扣 1＝不分时段、0.5＝空闲时段半价（高峰＝北京时间周一至周五 9:00–12:00、14:00–18:00，法定节假日与周末全天按空闲）。' +
+      '渠道倍率默认 1.0，费用 = 算出的金额 × 倍率（同一模型挂不同中转站不必逐个配价）。未配单价的模型只统计 token，费用列显示「未配单价」。'));
     var priceGrid = el('div', 'us-price-grid');
     cardPrice.appendChild(priceGrid);
     var statusLine = el('p', 'us-status');
@@ -369,6 +392,10 @@
     ctx.modelTable = modelTable;
     ctx.recTable = recTable;
     ctx.pager = pager;
+    ctx.searchKpis = searchKpis;
+    ctx.searchProviderTable = searchProviderTable;
+    ctx.searchRecTable = searchRecTable;
+    ctx.searchPager = searchPager;
     ctx.priceGrid = priceGrid;
     ctx.statusLine = statusLine;
 
@@ -442,6 +469,15 @@
     }).catch(function (e) {
       setStatus(ctx.statusLine, '读取明细失败：' + (e && e.message ? e.message : e), true);
     });
+
+    // 搜索调用只按日期筛（渠道筛选是模型渠道，搜索供应商不是同一套 id）
+    var sq = 'from=' + encodeURIComponent(r.from) + '&to=' + encodeURIComponent(r.to) +
+      '&limit=' + PAGE_SIZE + '&offset=' + (state.searchPage * PAGE_SIZE);
+    apiGet('/api/usage/search?' + sq).then(function (d) {
+      renderSearch(ctx, d);
+    }).catch(function (e) {
+      setStatus(ctx.statusLine, '读取搜索用量失败：' + (e && e.message ? e.message : e), true);
+    });
   }
 
   /* ---------- KPI ---------- */
@@ -466,23 +502,36 @@
         // 未配单价且一分钱都算不出来：直接写「未配单价」，写 ¥0 会让人误以为免费
         label: '估算花费',
         val: (!k.priced && !k.cost) ? '未配单价' : (k.priced ? fmtCost(k.cost) : fmtCost(k.cost) + '+'),
-        sub: k.priced ? '按本地单价估算' : ('有 ' + fmtInt(k.unpricedCalls) + ' 次调用未配单价'),
-        title: '按本地单价估算，不代表账单',
+        sub: k.priced ? '按调用时段计价' : ('按调用时段计价 · 有 ' + fmtInt(k.unpricedCalls) + ' 次未配单价'),
+        title: '模型调用的估算花费：未命中输入 + 缓存读写 + 输出各自按单价计，按每次调用发生的时间判定峰值/空闲价；不代表账单',
+      },
+      {
+        // 总花费 = 模型（token）+ 搜索（按次），两边的口径完全不同，必须分开注明
+        label: '总花费',
+        val: fmtCost(k.totalCost),
+        sub: '模型 ' + fmtCost(k.cost) + ' + 搜索 ' + fmtCost(k.searchCost),
+        title: '模型调用的 token 费用 + 搜索/抽取的按次费用；两者各自合计后再相加，不代表账单',
       },
     ];
     ctx.kpis.innerHTML = '';
-    cards.forEach(function (c) {
-      var box = el('div', 'us-kpi' + (c.alert ? ' alert' : ''));
-      if (c.title) box.title = c.title;
-      box.appendChild(el('div', 'k-label', c.label));
-      box.appendChild(el('div', 'k-val', c.val));
-      if (c.sub) box.appendChild(el('div', 'k-sub', c.sub));
-      ctx.kpis.appendChild(box);
-    });
+    renderKPICards(ctx.kpis, cards);
 
     renderChart(ctx.chartBox, d.daily || []);
     renderDonut(ctx.donutBox, d.byModel || []);
     renderModelTable(ctx.modelTable, d.byModel || []);
+  }
+
+  // renderKPICards 把卡片数组渲染进容器（模型用量与搜索分区共用一套样式）
+  function renderKPICards(box, cards) {
+    box.innerHTML = '';
+    cards.forEach(function (c) {
+      var cell = el('div', 'us-kpi' + (c.alert ? ' alert' : ''));
+      if (c.title) cell.title = c.title;
+      cell.appendChild(el('div', 'k-label', c.label));
+      cell.appendChild(el('div', 'k-val', c.val));
+      if (c.sub) cell.appendChild(el('div', 'k-sub', c.sub));
+      box.appendChild(cell);
+    });
   }
 
   /* ---------- 趋势图（手写 SVG，不引图表库） ---------- */
@@ -693,6 +742,8 @@
       var tb = el('tbody');
       items.forEach(function (it) {
         var r = el('tr');
+        // 这次调用命中峰值价还是空闲价：按明细时间戳判定（后端算好给 peak）
+        r.title = '调用时段：' + (it.peak ? '高峰（按峰值价计费）' : '空闲（按空闲价计费）');
         r.appendChild(el('td', 'num l', fmtTime(it.ts)));
         var name = el('td', 'l', it.model || '（未知）');
         name.title = (it.purpose ? (PURPOSE_LABEL[it.purpose] || it.purpose) : '') +
@@ -753,6 +804,126 @@
     }
   }
 
+  /* ---------- 搜索调用（按次计费，与 token 类用量分开合计） ---------- */
+
+  function renderSearch(ctx, d) {
+    var k = d.kpi || {};
+    renderKPICards(ctx.searchKpis, [
+      { label: '搜索次数', val: fmtInt(k.calls), sub: '含失败与回落尝试' },
+      { label: '成功次数', val: fmtInt(k.success), sub: '计费依据（失败不计费）' },
+      {
+        label: '失败次数',
+        val: fmtInt(k.errors),
+        sub: k.errors > 0 ? '失败只计数不计费' : '无失败',
+        alert: k.errors > 0,
+      },
+      {
+        label: '回落率',
+        val: k.calls > 0 ? fmtPct(k.fallbackRate) : '—',
+        sub: '第 2 家及以后才成功的占比',
+        title: '回落次数 / 总次数：某家失败后由后面几家接手，说明前一家不稳（Key、额度或上游）',
+      },
+      { label: '估算搜索费用', val: fmtCost(k.cost), sub: '成功次数 × 单价', title: '只对成功调用计费；各家单价在下面的「搜索单价」里改' },
+      { label: '平均耗时', val: fmtMs(k.avgDurationMs), sub: '含失败的那几次' },
+    ]);
+
+    // 按供应商（同一家的搜索与抽取分开成两行：能力位不同，单价与失败原因也不同）
+    var rows = d.byProvider || [];
+    ctx.searchProviderTable.innerHTML = '';
+    if (!rows.length) {
+      ctx.searchProviderTable.appendChild(el('div', 'us-empty', '这段时间没有搜索调用'));
+    } else {
+      var t = el('table', 'us-table');
+      var thead = el('thead');
+      var htr = el('tr');
+      ['供应商', '能力', '次数', '成功', '失败', '回落', '平均耗时', '单价（元/次）', '费用', '说明']
+        .forEach(function (h, i) { htr.appendChild(el('th', i === 0 ? 'l' : '', h)); });
+      thead.appendChild(htr);
+      t.appendChild(thead);
+      var tb = el('tbody');
+      rows.forEach(function (p) {
+        var r = el('tr');
+        r.appendChild(el('td', 'l', p.name || p.providerId));
+        r.appendChild(el('td', '', p.kind === 'extract' ? '抽取' : '搜索'));
+        r.appendChild(el('td', 'num', fmtInt(p.calls)));
+        r.appendChild(el('td', 'num', fmtInt(p.success)));
+        var errCell = el('td', 'num', fmtInt(p.errors));
+        if (p.errors > 0) errCell.className = 'num bad';
+        r.appendChild(errCell);
+        r.appendChild(el('td', 'num', fmtInt(p.fallback)));
+        r.appendChild(el('td', 'num', fmtMs(p.avgDurationMs)));
+        r.appendChild(el('td', 'num', '¥' + (Number(p.unitPrice) || 0).toFixed(4)));
+        r.appendChild(el('td', 'num', fmtCost(p.cost)));
+        var note = el('td', 'l muted', p.note || '');
+        r.appendChild(note);
+        tb.appendChild(r);
+      });
+      t.appendChild(tb);
+      ctx.searchProviderTable.appendChild(t);
+    }
+
+    // 明细（每次回落尝试一行）
+    var items = d.items || [];
+    var total = Number(d.total) || 0;
+    var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    ctx.searchRecTable.innerHTML = '';
+    if (!items.length) {
+      ctx.searchRecTable.appendChild(el('div', 'us-empty', '这段时间没有搜索调用（本页只统计升级之后的调用）'));
+    } else {
+      var t2 = el('table', 'us-table us-records-table');
+      var th2 = el('thead');
+      var htr2 = el('tr');
+      ['时间', '供应商', '能力', '结果', '错误类别', '耗时', '顺位', '是否回落', '查询 / 目标摘要']
+        .forEach(function (h) { htr2.appendChild(el('th', '', h)); });
+      th2.appendChild(htr2);
+      t2.appendChild(th2);
+      var tb2 = el('tbody');
+      items.forEach(function (it) {
+        var r = el('tr');
+        r.appendChild(el('td', 'num l', fmtTime(it.ts)));
+        r.appendChild(el('td', 'l', it.providerName || it.providerId || ''));
+        r.appendChild(el('td', '', it.kindLabel || (it.kind === 'extract' ? '抽取' : '搜索')));
+        r.appendChild(el('td', it.ok ? 'ok' : 'bad', it.ok ? '成功' : '失败'));
+        r.appendChild(el('td', 'l muted', it.ok ? '—' : (it.errKind || '未知')));
+        r.appendChild(el('td', 'num', fmtMs(it.durationMs)));
+        r.appendChild(el('td', 'num', '第 ' + fmtInt(it.rank) + ' 位'));
+        r.appendChild(el('td', '', it.rank > 1 ? '是' : '否'));
+        var det = el('td', 'l', it.detail || '');
+        det.title = (it.detail || '') + (it.error ? '\n错误：' + it.error : '');
+        r.appendChild(det);
+        tb2.appendChild(r);
+      });
+      t2.appendChild(tb2);
+      ctx.searchRecTable.appendChild(t2);
+    }
+
+    ctx.searchPager.innerHTML = '';
+    ctx.searchPager.appendChild(el('span', '',
+      '共 ' + fmtInt(total) + ' 条 · 第 ' + (state.searchPage + 1) + '/' + pages + ' 页'));
+    var prev = el('button', 'us-btn', '上一页');
+    prev.type = 'button';
+    prev.disabled = state.searchPage <= 0;
+    prev.onclick = function () {
+      if (state.searchPage <= 0) return;
+      state.searchPage--;
+      refreshData(ctx);
+    };
+    var next = el('button', 'us-btn', '下一页');
+    next.type = 'button';
+    next.disabled = state.searchPage + 1 >= pages;
+    next.onclick = function () {
+      if (state.searchPage + 1 >= pages) return;
+      state.searchPage++;
+      refreshData(ctx);
+    };
+    ctx.searchPager.appendChild(prev);
+    ctx.searchPager.appendChild(next);
+    if (state.searchPage >= pages && state.searchPage > 0) {
+      state.searchPage = pages - 1;
+      refreshData(ctx);
+    }
+  }
+
   /* ---------- 单价与倍率 ---------- */
 
   function renderPricing(ctx, p) {
@@ -766,8 +937,12 @@
     btnSave.type = 'button';
     var btnAdd = el('button', 'us-btn', '新增模型');
     btnAdd.type = 'button';
+    var btnDefaults = el('button', 'us-btn', '恢复内置价');
+    btnDefaults.type = 'button';
+    btnDefaults.title = '把内置单价（含 DeepSeek 官方峰值价与空闲半价）填进表格；不会立刻保存，确认后点「保存单价与倍率」生效';
     head.appendChild(btnSave);
     head.appendChild(btnAdd);
+    head.appendChild(btnDefaults);
     head.style.justifyContent = 'flex-start';
     grid.appendChild(head);
 
@@ -775,7 +950,7 @@
     var t = el('table', 'us-table us-price-table');
     var thead = el('thead');
     var htr = el('tr');
-    ['模型 id', '输入', '输出', '缓存读取', '缓存写入', ''].forEach(function (h) {
+    ['模型 id', '输入', '输出', '缓存读取', '缓存写入', '空闲折扣', ''].forEach(function (h) {
       htr.appendChild(el('th', h === '模型 id' ? 'l' : '', h));
     });
     thead.appendChild(htr);
@@ -785,9 +960,12 @@
     wrapT.appendChild(t);
     grid.appendChild(wrapT);
 
-    var draft = {}; // model id → {input, output, cacheRead, cacheWrite}
+    var draft = {}; // model id → {input, output, cacheRead, cacheWrite, idleFactor}
     (p.models || []).forEach(function (m) {
-      draft[m.id] = { input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite };
+      draft[m.id] = {
+        input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite,
+        idleFactor: m.idleFactor != null ? m.idleFactor : 1,
+      };
     });
 
     var mkRow = function (id, vals) {
@@ -799,15 +977,22 @@
       idIn.dataset.kind = 'id';
       idCell.appendChild(idIn);
       tr.appendChild(idCell);
-      ['input', 'output', 'cacheRead', 'cacheWrite'].forEach(function (k) {
+      ['input', 'output', 'cacheRead', 'cacheWrite', 'idleFactor'].forEach(function (k) {
         var td = el('td');
         var inp = el('input');
         inp.type = 'number';
-        inp.step = '0.01';
+        inp.step = k === 'idleFactor' ? '0.05' : '0.01';
         inp.min = '0';
-        inp.value = vals && vals[k] != null ? String(vals[k]) : '0';
+        if (k === 'idleFactor') inp.max = '1';
+        inp.value = vals && vals[k] != null ? String(vals[k]) : (k === 'idleFactor' ? '1' : '0');
         inp.dataset.kind = k;
-        inp.title = { input: '输入单价', output: '输出单价', cacheRead: '缓存读取单价', cacheWrite: '缓存写入单价' }[k];
+        inp.title = {
+          input: '峰值输入单价（未命中部分，元/百万 tokens）',
+          output: '峰值输出单价',
+          cacheRead: '缓存读取单价（命中部分）',
+          cacheWrite: '缓存写入单价（Anthropic 的 cache_creation）',
+          idleFactor: '空闲折扣：1＝不分时段，0.5＝空闲时段半价（DeepSeek 官方口径）。高峰＝北京时间周一至周五 9:00–12:00、14:00–18:00（法定节假日除外）',
+        }[k];
         td.appendChild(inp);
         tr.appendChild(td);
       });
@@ -823,6 +1008,21 @@
 
     // 已有的模型（按 id 排序由后端给出）逐行建表
     Object.keys(draft).sort().forEach(function (id) { mkRow(id, draft[id]); });
+
+    // 恢复内置价：只填表不保存（用户确认后点保存），避免一按就把自定义价覆盖掉
+    var applyModels = function (list) {
+      tb.innerHTML = '';
+      (list || []).forEach(function (m) {
+        mkRow(m.id, {
+          input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite,
+          idleFactor: m.idleFactor != null ? m.idleFactor : 1,
+        });
+      });
+    };
+    btnDefaults.onclick = function () {
+      applyModels(p.defaults || []);
+      setStatus(ctx.statusLine, '已填入内置单价（含峰值价与空闲折扣），点「保存单价与倍率」后生效', false);
+    };
 
     btnAdd.onclick = function () {
       var tr = mkRow('', null);
@@ -842,7 +1042,8 @@
           var v = parseFloat(ins[idx].value);
           return isFinite(v) && v >= 0 ? v : 0;
         };
-        models.push({ id: id, input: num(1), output: num(2), cacheRead: num(3), cacheWrite: num(4) });
+        models.push({ id: id, input: num(1), output: num(2), cacheRead: num(3), cacheWrite: num(4),
+          idleFactor: num(5) });
       });
       return models;
     };
@@ -877,6 +1078,35 @@
     mulBox.appendChild(saveBar);
     grid.appendChild(mulBox);
 
+    // ---- 搜索单价（按次计费，与 token 价完全两套口径）----
+    var searchBox = el('div', 'us-price-grid');
+    searchBox.appendChild(el('h4', '', '搜索单价'));
+    searchBox.appendChild(el('p', 'us-note',
+      '搜索/抽取按「次」计费，只有成功调用计费，单位「元 / 次」。0 表示不计费：' +
+      'Tavily / AnySearch 有免费额度、公司网关由服务端统一计费。改了这里，历史搜索费用按新价重算。'));
+    var searchList = el('div', 'us-mul-list');
+    (p.search || []).forEach(function (sv) {
+      var row = el('div', 'us-mul-row');
+      row.appendChild(el('span', 'nm', sv.name || sv.id));
+      var inp = el('input');
+      inp.type = 'number';
+      inp.step = '0.0001';
+      inp.min = '0';
+      inp.value = String(sv.price != null ? sv.price : 0);
+      inp.dataset.search = sv.id;
+      inp.title = '单价（元/次，只对成功调用计费）；该类型公开默认价 ' +
+        (Number(sv.default) || 0).toFixed(4) + ' 元/次';
+      row.appendChild(inp);
+      row.appendChild(el('span', '', '元 / 次（' + (sv.kind || '') + '）'));
+      if (sv.note) row.appendChild(el('span', 'us-note', sv.note));
+      searchList.appendChild(row);
+    });
+    if (!(p.search || []).length) {
+      searchList.appendChild(el('p', 'us-note', '还没有配置任何搜索供应商（设置 · 网络访问 · 联网搜索）。'));
+    }
+    searchBox.appendChild(searchList);
+    grid.appendChild(searchBox);
+
     var doSave = function () {
       var models = collect();
       var multipliers = {};
@@ -884,16 +1114,23 @@
         var v = parseFloat(inp.value);
         if (isFinite(v) && v > 0) multipliers[inp.dataset.provider] = v;
       });
-      setStatus(ctx.statusLine, '保存中…', false);
-      apiPost('/api/usage/pricing', { models: models, multipliers: multipliers }).then(function (np) {
-        state.pricing = np;
-        renderPricing(ctx, np);
-        setStatus(ctx.statusLine, '已保存（' + models.length + ' 个模型单价、' +
-          Object.keys(multipliers).length + ' 个渠道倍率）', false);
-        refreshData(ctx); // 改了价，费用与页面立刻按新价重算
-      }).catch(function (e) {
-        setStatus(ctx.statusLine, '保存失败：' + (e && e.message ? e.message : e), true);
+      var searchPrices = {};
+      searchList.querySelectorAll('input[data-search]').forEach(function (inp) {
+        var v = parseFloat(inp.value);
+        if (isFinite(v) && v >= 0) searchPrices[inp.dataset.search] = v;
       });
+      setStatus(ctx.statusLine, '保存中…', false);
+      apiPost('/api/usage/pricing', { models: models, multipliers: multipliers, searchPrices: searchPrices })
+        .then(function (np) {
+          state.pricing = np;
+          renderPricing(ctx, np);
+          setStatus(ctx.statusLine, '已保存（' + models.length + ' 个模型单价、' +
+            Object.keys(multipliers).length + ' 个渠道倍率、' +
+            Object.keys(searchPrices).length + ' 个搜索单价）', false);
+          refreshData(ctx); // 改了价，费用与页面立刻按新价重算
+        }).catch(function (e) {
+          setStatus(ctx.statusLine, '保存失败：' + (e && e.message ? e.message : e), true);
+        });
     };
     btnSave.onclick = doSave;
     btnSave2.onclick = doSave;

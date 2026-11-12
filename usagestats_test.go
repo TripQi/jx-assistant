@@ -222,17 +222,22 @@ func TestUsagePricingCost(t *testing.T) {
 		Models:      map[string]modelPrice{"m": {Input: 2, Output: 8, CacheRead: 0.2, CacheWrite: 4}},
 		Multipliers: map[string]float64{"relay": 1.5},
 	}
+	peakTS := "2026-11-12 10:00:00" // 周四上午：高峰时段（模型没配空闲折扣，时段不影响价）
 	tk := usageTokens{Input: 1000000, Output: 1000000, CacheRead: 1000000, CacheWrite: 1000000}
-	// (2+8+0.2+4) = 14.2；直连倍率 1.0
-	if got, ok := p.cost("m", "direct", tk); !ok || got < 14.199 || got > 14.201 {
-		t.Fatalf("直连费用应为 14.2，得到 %.4f ok=%v", got, ok)
+	// OpenAI 系（chat）：输入 1M 已含缓存命中 1M → 未命中 0；金额 = 输出 8 + 读 0.2 + 写 4 = 12.2
+	if got, ok := p.cost("m", "direct", "chat", peakTS, tk); !ok || got < 12.199 || got > 12.201 {
+		t.Fatalf("chat 协议直连费用应为 12.2（未命中输入为 0），得到 %.4f ok=%v", got, ok)
+	}
+	// Anthropic：输入不含缓存 → 未命中 1M 也照算；金额 = 2 + 8 + 0.2 + 4 = 14.2
+	if got, ok := p.cost("m", "direct", "anthropic", peakTS, tk); !ok || got < 14.199 || got > 14.201 {
+		t.Fatalf("Anthropic 协议费用应为 14.2，得到 %.4f ok=%v", got, ok)
 	}
 	// 中转站倍率 1.5
-	if got, ok := p.cost("m", "relay", tk); !ok || got < 21.299 || got > 21.301 {
-		t.Fatalf("倍率 1.5 后应为 21.3，得到 %.4f ok=%v", got, ok)
+	if got, ok := p.cost("m", "relay", "chat", peakTS, tk); !ok || got < 18.299 || got > 18.301 {
+		t.Fatalf("倍率 1.5 后应为 18.3，得到 %.4f ok=%v", got, ok)
 	}
 	// 未配单价：不给 0，返回 ok=false
-	if got, ok := p.cost("unknown-model", "direct", tk); ok || got != 0 {
+	if got, ok := p.cost("unknown-model", "direct", "chat", peakTS, tk); ok || got != 0 {
 		t.Fatalf("未配单价应返回 ok=false / 0，得到 %.4f ok=%v", got, ok)
 	}
 	// 倍率缺省 1.0、非法倍率按缺省

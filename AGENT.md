@@ -2008,7 +2008,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `gitpanel.go`（+`gitpanel_windows.go`/`_other.go`） | Git 面板（组件 `git-panel` 的宿主半边）：仓库扫描、porcelain/图谱/分支解析、暂存/提交（白名单 argv 直调 git，永不过 shell） |
 | `gittools.go` | git_sync 模型工具（组件 `git-panel`）：与面板共用 gitSync 执行缝的宿主通道远程同步，绕开沙箱内远程 git 必败的限制（背景与实测见《Git远程同步工具-改动说明.md》） |
 | `server.go` | 路由、聊天 SSE、全局事件流、压缩接口、插件注入、内嵌前端 |
-| `usagestats.go` / `usagepricing.go` / `usageapi.go` | 「用量统计」（组件 `usage-stats` 的宿主半边）：逐次调用明细表 `usage_events` + 采集埋点 + 异步落库 + 保留策略；模型单价与渠道倍率（存 meta 表 `globaldata:usage.pricing`）；`/api/usage/*` 汇总/明细/单价/清理。见「用量统计」节 |
+| `usagestats.go` / `usagesearch.go` / `usagepricing.go` / `usagepeak.go` / `usageapi.go` | 「用量统计」（组件 `usage-stats` 的宿主半边）：逐次调用明细表 `usage_events`（kind 区分模型调用与搜索/抽取）+ 采集埋点 + 异步落库 + 保留策略；模型单价与渠道倍率、搜索按次单价（存 meta 表 `globaldata:usage.pricing`）；`/api/usage/*` 汇总/明细/搜索/单价/清理；`usagepeak.go` 收两条厂商规则（协议输入口径 splitUsageTokens、高峰/闲时段判定 usagePeakAt + 节假日常量）。见「用量统计」节 |
 | `web/` | 前端：工作区分组侧栏、子对话抽屉、子任务卡片、模型选择器、设置页、市场页（`app-market.js`：左侧栏底部入口、主区整页视图 body.market-mode、三 tab+搜索+一键装卸；组件装卸后 `CX.refresh()` 热生效） |
 > **服务端已独立成仓库**（`D:\智能体工作区\jxaiserver`，module jxai-server）：远程访问中继 + 技能/组件/插件市场（含 /admin 管理页）+ 更新分发（日期+V序号版本体系）+ 公司接入（登记/UDP 发现/按人发 new-api 令牌/每月额度）。本仓库只保留客户端半边（market.go 市场客户端、wizard.go 接入向导、update.go 更新检查——与服务端的协议契约见各自文件头注释）；其部署与用法见该仓库 README/部署。开发完全分开，两边接口变更需双侧同步。
 
@@ -2017,13 +2017,16 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 计费与采集的口径由用户定死（2026-11-11），不要自行改：
 
 - **采集**：`sessions` 只有会话级累计，看不出按天/按模型/按渠道的账。明细表
-  `usage_events` 一次模型调用一行（成功失败都记，成功率才算得出来），字段：时间、
+  `usage_events` 一次调用一行（**模型调用**与**搜索/抽取调用**共用一张表，用 kind
+  区分；成功失败都记，成功率才算得出来），字段：时间、
   会话、用途（main 主对话 / task 任务会话 / sub 子任务 / aux 辅助对话 / title 标题
-  生成 / compact 压缩摘要 / assist 其他辅助生成）、provider、Key、模型、协议
+  生成 / compact 压缩摘要 / assist 其他辅助生成 / search 搜索调用）、provider、Key、模型、协议
   （chat/responses/anthropic）、输入/缓存读/缓存写/输出 tokens、**推理强度**
   （thinking：本次调用**实际使用**的思考档位，空串＝没指定、跟随服务端默认——
   标题/摘要/git 摘要/插件 mods 这类辅助调用不吃会话档位，一律记空，别拿会话的
-  档位冒充）、首字延迟、总耗时、成败、错误摘要、是否流式。索引：ts / session_id / model。
+  档位冒充）、首字延迟、总耗时、成败、错误摘要、是否流式；搜索/抽取行另有
+  kind（search/extract，空串＝模型调用）、detail（目标摘要）、err_kind（失败类别）、
+  provider_rank（供应商顺位）。索引：ts / session_id / model。
 - **采集点**：`App.meterUsage`（usagestats.go）包住调用方的 `StreamCallbacks`，在
   模型调用的每一个出口各包一层——agent.go 主循环（含重试的每次尝试）、
   contextengine.go 的 `CallSummarizer`、llmapi.go 的 `/api/llm/ask`（`purpose` 由
@@ -2034,24 +2037,55 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   已有数据保留；前端页面与速度条随同一个开关消失（组件 dispose 摘干净）。
 - **保留**：启动跑一次 + 每天一次（`usageJanitor`）：超 90 天或超 20 万条删最旧，
   保留最新；页面另有「按日期范围清理」（二次确认，不可恢复）。
-- **计费**：模型基础价按模型 id 配四个价（输入/输出/缓存读/缓存写，元 / 百万
-  tokens），渠道一个倍率（默认 1.0），**费用 = 基础价算出的金额 × 渠道倍率**；未配
-  单价的模型只显示 token，费用列写「未配单价」（不给 0，免得误读成免费）。价格不
-  进明细表，聚合时现算——改价后历史费用跟着变。页面固定标注「按本地单价估算，
-  不代表账单」。内置初始价见 `defaultUsagePricing`（美元价按 usdToCNY 折算），可编辑。
-- **界面**：设置 → 用量（组件注册的 pane）：渠道/日期/**推理强度**筛选、9 个 KPI、每日趋势
+- **计费（token 类）**：模型基础价按模型 id 配四个价（输入/输出/缓存读/缓存写，元 /
+  百万 tokens，填的是**峰值价**），渠道一个倍率（默认 1.0）。口径（2026-11-12 用户实测
+  虚高 23 倍后定死）：
+  **费用 = 未命中输入×输入价 + 缓存读取×缓存读价 + 缓存写入×缓存写价 + 输出×输出价，再乘渠道倍率**。
+  「未命中输入」必须按协议归一（`usagepeak.go` 的 `splitUsageTokens`）：OpenAI 系
+  （chat/responses）与 DeepSeek 的 `prompt_tokens` **已含**缓存命中，要减去
+  `CacheRead`；Anthropic 原生 `input_tokens` 不含缓存（单列 `cache_read`/
+  `cache_creation`），**不能减**。缓存写入按写价单独计（Anthropic 的 cache_creation）。
+  分时段价：`modelPrice.IdleFactor`（0.5＝官方空闲半价，缺省/1＝不分时段），时段按
+  **每次调用发生的时间戳**判定（`usagePeakAt`，不按「现在」，历史重算才对）：北京时间
+  周一至周五 9:00–12:00、14:00–18:00 为高峰，其余（含周末与法定节假日全天）为空闲；
+  节假日常量 `usageHolidayRanges`（2026 年按国办发明电〔2025〕7号，每年 11 月国务院
+  发布次年安排后追加，缺失年份按周一至周五判定）。未配单价的模型只显示 token，费用
+  列写「未配单价」。价格不进明细表，聚合时现算——改价后历史费用跟着变。页面固定标注
+  「按本地单价估算，不代表账单」；内置初始价见 `defaultUsagePricing`（美元价按
+  usdToCNY 折算、DeepSeek 用官方现行峰值价 + 空闲半价），页面另有「恢复内置价」把
+  内置表灌进表单（不立即保存）。
+- **计费（搜索/抽取，按次）**：搜索不是按 token 计费，单独记在明细表同一张表里，用
+  `kind` 区分（`search` / `extract` / 空串＝模型调用），token 列对搜索行恒 0，token
+  合计与模型占比一律排除（`whereTokens`）。**每一次回落尝试各记一行**（第 1 家失败一行、
+  第 2 家成功一行），字段：供应商 id、能力位、目标摘要（搜索词/URL 截断 200 字）、成败、
+  失败类别（连不上/Key 无效/额度/限流/解析/上游/拒绝/配置）、耗时、顺位（>1＝回落来的）。
+  **费用 = 成功次数 × 单价**，失败计数不计费；单价按供应商 id 可配、按类型有公开默认价
+  （`defaultSearchPrice`：DeepSeek ¥5/1000 次＝0.005、Tavily/AnySearch 免费额度内 0、
+  公司网关 0）。搜索与 token 两块各自合计，顶部「总花费」= 模型费用 + 搜索费用（sub
+  注明构成）。
+- **界面**：设置 → 用量（组件注册的 pane）：渠道/日期/**推理强度**筛选、KPI 卡（含
+  「估算花费（按调用时段计价）」与「总花费＝模型+搜索」）、每日趋势
   （手写 SVG 折线，不引图表库）、模型占比环形图、按模型统计表、明细分页表
   （首字延迟与推理强度列在这里，速度条不显示它们；推理强度显示档位显示名
   None/Low/Medium/High/Extra High/Max，空值写「默认」，筛选下拉另有一档「默认」
-  兜住老数据与不吃档位的调用）、单价与倍率、清理区。**不做热力图**（用户明确不要）。
+  兜住老数据与不吃档位的调用；**行 hover 显示该次调用命中高峰还是空闲价**）、
+  **搜索调用分区**（KPI：次数/成功/失败/回落率/费用/平均耗时 + 按供应商表 + 逐次尝试
+  明细）、单价与倍率（含**空闲折扣**列与**搜索单价**）、清理区。**不做热力图**（用户
+  明确不要）。
+- **采集点（搜索）**：`websearch_search.go` 的 `runProviderSearch`（搜索）与
+  `websearch_extract.go` 的 `runProviderExtract`（抽取）是两家供应商调用的唯一出口，
+  记账包在这两处（`recordSearchCall`，走同一条异步队列，不拖慢搜索）。
+- **验证**：`go test -run "Usage|Pricing|Cost" .`（落库/聚合/倍率/未配单价/清理/分页/
+  协议归一/峰值空闲/周末节假日/搜索回落与按次计费/组件关闭不记）；真机走
+  `node gui-test/usage-verify.mjs`（用量页与速度条）与
+  `node gui-test/usage-search-verify.mjs`（搜索回落记账：隔离实例里故意改坏第 1 家
+  Key → 第 2 家成功，断言两行明细与总花费相加，截图落 `gui-test-screenshots/usage-search-*.png`）。
+
 - **速度条**：输入框下方 `↑ 42.3 tok/s · 本轮 1.2k tok`。主前端在 SSE 的
   delta/reasoning 处 `JX.emit('chat:stream')`，每步流尾 `Event{Type:"usage"}` 带真实
   输出 tokens 与首字延迟（`chat:usage`），收尾 `chat:stream-end`；组件按收到的字符估
   token（与 `estimateTokens` 同一启发式 3/4）实时显示，收到真实 usage 后定格、约 3 秒
   淡出。
-- **验证**：`go test -run TestUsage .`（落库/聚合/倍率/未配单价/清理/分页/组件关闭
-  不记）；真机走 `node gui-test/usage-verify.mjs`（自建隔离实例 + 无头 Edge，发真实
-  消息，截图落 `gui-test-screenshots/usage-*.png`）。
 
 ## 渠道协议（provider protocol）
 

@@ -25,7 +25,17 @@ type providerSearchCall struct {
 
 // runProviderSearch 调一家供应商做搜索：成功（含 0 条结果）返回归一后的结果，
 // 失败返回 *providerError（类别决定文案，回落由调用方做）。
+// 每次尝试都记一条用量明细（失败也记、回落时每家各一条）——「哪家经常失败、
+// 第几家才成功」只能靠逐次尝试的明细算出来（统计走异步队列，不拖慢搜索）。
 func (a *App) runProviderSearch(ctx context.Context, p activeSearchProvider, call providerSearchCall) (searchResponse, error) {
+	start := time.Now()
+	out, err := a.searchViaKind(ctx, p, call)
+	a.recordSearchCall(usageKindSearch, call.sessID, p, err == nil, err, call.query, start)
+	return out, err
+}
+
+// searchViaKind 按供应商类型分发到各自实现（runProviderSearch 的裸调用部分）。
+func (a *App) searchViaKind(ctx context.Context, p activeSearchProvider, call providerSearchCall) (searchResponse, error) {
 	if providerNeedsKey(p.cfg.Kind) && strings.TrimSpace(p.cfg.APIKey) == "" {
 		return searchResponse{}, newProviderError(p, 0, searchErrAuth, "未配置 API Key")
 	}

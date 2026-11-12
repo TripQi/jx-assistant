@@ -20,7 +20,17 @@ func (a *App) extractProviders() []activeSearchProvider {
 }
 
 // runProviderExtract 调一家供应商抽正文：返回标题与正文（Markdown/纯文本）。
+// 每次尝试记一条用量明细（kind=extract，目标记 URL 摘要）——抽取同样按次计费，
+// 也不能因为它是 web_fetch 的兜底就漏账。
 func (a *App) runProviderExtract(ctx context.Context, p activeSearchProvider, pageURL string) (string, string, error) {
+	start := time.Now()
+	title, body, err := a.extractViaKind(ctx, p, pageURL)
+	a.recordSearchCall(usageKindExtract, "", p, err == nil, err, pageURL, start)
+	return title, body, err
+}
+
+// extractViaKind 按供应商类型分发到各自的抽取实现。
+func (a *App) extractViaKind(ctx context.Context, p activeSearchProvider, pageURL string) (string, string, error) {
 	if providerNeedsKey(p.cfg.Kind) && strings.TrimSpace(p.cfg.APIKey) == "" {
 		return "", "", newProviderError(p, 0, searchErrAuth, "未配置 API Key")
 	}

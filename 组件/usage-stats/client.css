@@ -344,15 +344,20 @@
 }
 
 .us-price-table input {
-  width: 88px;
+  width: 72px;
   font-family: inherit;
   font-size: 12px;
-  padding: 3px 6px;
+  padding: 3px 5px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
   text-align: right;
+}
+
+/* 空闲折扣只填 1 或 0.5，列宽再收一点：6 列的单价格在窄弹层里要放得下 */
+.us-price-table input[data-kind="idleFactor"] {
+  width: 52px;
 }
 
 .us-price-table input:focus {
@@ -362,7 +367,7 @@
 
 .us-price-table td.l input {
   text-align: left;
-  width: 150px;
+  width: 118px;
 }
 
 .us-mul-list {

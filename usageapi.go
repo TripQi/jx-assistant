@@ -35,7 +35,10 @@ type usageKPI struct {
 	CacheWrite    int64   `json:"cacheWrite"`
 	Total         int64   `json:"total"`         // 输入 + 输出（页面「总 tokens」）
 	CacheHitRate  float64 `json:"cacheHitRate"`  // 缓存读取 / 输入，0-100
-	Cost          float64 `json:"cost"`          // 已配单价部分的估算花费（元）
+	Cost          float64 `json:"cost"`          // 模型调用的估算花费（元，按调用时段计价）
+	SearchCost    float64 `json:"searchCost"`    // 搜索/抽取的估算花费（元，按次）
+	TotalCost     float64 `json:"totalCost"`     // 两者合计（页面「总花费」）
+	SearchCalls   int64   `json:"searchCalls"`   // 搜索/抽取的供应商尝试次数
 	Priced        bool    `json:"priced"`        // 是否全部模型都配了单价
 	UnpricedCalls int64   `json:"unpricedCalls"` // 未配单价的调用数
 }
@@ -93,9 +96,21 @@ type usageProviderView struct {
 }
 
 type usagePricingResp struct {
-	Models    []usagePricingModel `json:"models"`
-	Providers []usageProviderView `json:"providers"`
-	Note      string              `json:"note"`
+	Models    []usagePricingModel    `json:"models"`
+	Defaults  []usagePricingModel    `json:"defaults"` // 内置价表（页面「恢复内置价」用）
+	Providers []usageProviderView    `json:"providers"`
+	Search    []usageSearchPriceView `json:"search"` // 搜索/抽取供应商的按次价
+	Note      string                 `json:"note"`
+}
+
+// usageSearchPriceView 是「搜索单价」配置里的一行：一个搜索供应商 + 它的元/次价。
+type usageSearchPriceView struct {
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	Kind    string  `json:"kind"`    // 供应商类型（deepseek/tavily/…），决定默认价
+	Price   float64 `json:"price"`   // 当前生效单价（元/次，成功才计费）
+	Default float64 `json:"default"` // 该类型的公开默认价
+	Note    string  `json:"note,omitempty"`
 }
 
 // ---------- 请求解析 ----------
@@ -143,15 +158,17 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 	resp := usageSummaryResp{Enabled: a.usageEnabled(), From: f.From, To: f.To,
 		Daily: []usageDailyPoint{}, ByModel: []usageModelStat{}}
 
-	// 日级：先按天累加 token 与费用（费用逐渠道算），再按日期排序成趋势数据
+	// 日级：先按天累加 token 与费用（费用逐小时桶按时段价、逐渠道按倍率算），
+	// 再按日期排序成趋势数据
 	dayIdx := map[string]*usageDailyPoint{}
 	var kpi usageKPI
 	kpi.Priced = true
 	for _, d := range days {
-		p := dayIdx[d.Day]
+		day := usageDayOf(d.HourTS)
+		p := dayIdx[day]
 		if p == nil {
-			p = &usageDailyPoint{Day: d.Day, Priced: true}
-			dayIdx[d.Day] = p
+			p = &usageDailyPoint{Day: day, Priced: true}
+			dayIdx[day] = p
 		}
 		p.Input += d.Input
 		p.Output += d.Output
@@ -159,7 +176,7 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		p.CacheWrite += d.CacheWrite
 		p.Calls += d.Calls
 		p.Errors += d.Errors
-		if cost, ok := pricing.cost(d.Model, d.ProviderID, usageTokens{Input: d.Input, Output: d.Output,
+		if cost, ok := pricing.cost(d.Model, d.ProviderID, d.Protocol, d.HourTS, usageTokens{Input: d.Input, Output: d.Output,
 			CacheRead: d.CacheRead, CacheWrite: d.CacheWrite}); ok {
 			p.Cost += cost
 		} else {
@@ -197,7 +214,7 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		s.CacheWrite += m.CacheWrite
 		s.Calls += m.Calls
 		s.Errors += m.Errors
-		if cost, ok := pricing.cost(m.Model, m.ProviderID, usageTokens{Input: m.Input, Output: m.Output,
+		if cost, ok := pricing.cost(m.Model, m.ProviderID, m.Protocol, m.HourTS, usageTokens{Input: m.Input, Output: m.Output,
 			CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}); ok {
 			s.Cost += cost
 		} else {
@@ -219,6 +236,18 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		return resp.ByModel[i].Model < resp.ByModel[j].Model
 	})
+	// 搜索/抽取：按次计费，与 token 类各自合计；顶部「总花费」把两边相加
+	searches, err := a.Store.UsageSearchGroups(f)
+	if err != nil {
+		writeErr(w, 500, "读取搜索用量失败："+err.Error())
+		return
+	}
+	for _, g := range searches {
+		kpi.SearchCalls += g.Calls
+		kpi.SearchCost += float64(g.Success) * pricing.searchPriceOf(g.ProviderID, a.searchKindOf(g.ProviderID))
+	}
+	kpi.TotalCost = kpi.Cost + kpi.SearchCost
+
 	if kpi.Calls == 0 {
 		kpi.Priced = true
 	}
@@ -257,6 +286,8 @@ func (a *App) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 			"input": r.Input, "output": r.Output, "cacheRead": r.CacheRead, "cacheWrite": r.CacheWrite,
 			"total": r.Total, "ttftMs": r.TTFTMs, "durationMs": r.DurationMs,
 			"ok": r.OK, "error": r.Error, "stream": r.Stream,
+			// 这次调用命中峰值价还是空闲价（按明细 ts 判定），页面 hover 显示
+			"peak": r.Peak,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"total": total, "limit": limit, "offset": offset, "items": items})
@@ -286,8 +317,12 @@ func (a *App) usagePricingView() usagePricingResp {
 	p := a.loadUsagePricing()
 	resp := usagePricingResp{
 		Models:    p.modelsSorted(),
+		Defaults:  defaultUsagePricing().modelsSorted(),
 		Providers: []usageProviderView{},
-		Note:      "单价单位：元 / 百万 tokens；费用 = 基础价算出的金额 × 渠道倍率。按本地单价估算，不代表账单。",
+		Search:    []usageSearchPriceView{},
+		Note: "单价单位：元 / 百万 tokens；费用 = 未命中输入×输入价 + 缓存读取×缓存读价 + " +
+			"缓存写入×缓存写价 + 输出×输出价，再乘渠道倍率。缓存命中的输入不再按输入价重复计费；" +
+			"空闲折扣按时段自动生效（1＝不分时段）。按本地单价估算，不代表账单。",
 	}
 	if a.Cfg == nil {
 		return resp
@@ -301,6 +336,14 @@ func (a *App) usagePricingView() usagePricingResp {
 			ID: pv.ID, Name: pv.Name, Multiplier: p.multiplierOf(pv.ID), Keys: keys,
 		})
 	}
+	for _, sv := range a.Cfg.SearchProviders {
+		resp.Search = append(resp.Search, usageSearchPriceView{
+			ID: sv.ID, Name: sv.displayName(), Kind: sv.Kind,
+			Price:   p.searchPriceOf(sv.ID, sv.Kind),
+			Default: defaultSearchPrice(sv.Kind),
+			Note:    searchUnitPriceNote(sv.Kind),
+		})
+	}
 	return resp
 }
 
@@ -310,14 +353,16 @@ func (a *App) handleUsagePricingGet(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUsagePricingSet(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Models      []usagePricingModel `json:"models"`
-		Multipliers map[string]float64  `json:"multipliers"`
+		Models       []usagePricingModel `json:"models"`
+		Multipliers  map[string]float64  `json:"multipliers"`
+		SearchPrices map[string]float64  `json:"searchPrices"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	p := usagePricing{Models: map[string]modelPrice{}, Multipliers: map[string]float64{}}
+	p := usagePricing{Models: map[string]modelPrice{}, Multipliers: map[string]float64{},
+		SearchPrices: map[string]float64{}}
 	for _, m := range body.Models {
 		id := strings.TrimSpace(m.ID)
 		if id == "" {
@@ -327,11 +372,22 @@ func (a *App) handleUsagePricingSet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "模型「"+id+"」的单价不能是负数")
 			return
 		}
-		p.Models[id] = modelPrice{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
+		// 空闲折扣：1（或不填）＝不分时段；0.5＝官方空闲半价
+		idle := m.IdleFactor
+		if idle <= 0 || idle >= 1 {
+			idle = 0
+		}
+		p.Models[id] = modelPrice{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead,
+			CacheWrite: m.CacheWrite, IdleFactor: idle}
 	}
 	for id, mul := range body.Multipliers {
 		if mul > 0 {
 			p.Multipliers[id] = mul
+		}
+	}
+	for id, price := range body.SearchPrices {
+		if id = strings.TrimSpace(id); id != "" && price >= 0 {
+			p.SearchPrices[id] = price
 		}
 	}
 	if err := a.saveUsagePricing(p); err != nil {
@@ -339,6 +395,93 @@ func (a *App) handleUsagePricingSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, a.usagePricingView())
+}
+
+// handleUsageSearch 是「搜索调用」分区的数据：KPI + 按供应商 + 明细分页。
+// 搜索按次计费，与 token 类用量各自合计（顶部总花费 = 模型费用 + 搜索费用）。
+func (a *App) handleUsageSearch(w http.ResponseWriter, r *http.Request) {
+	f := usageQueryFilter(r)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	pricing := a.loadUsagePricing()
+	groups, err := a.Store.UsageSearchGroups(f)
+	if err != nil {
+		writeErr(w, 500, "读取搜索用量失败："+err.Error())
+		return
+	}
+	resp := usageSearchResp{
+		ByProvider: []usageSearchProviderStat{},
+		Items:      []map[string]any{},
+		Limit:      limit, Offset: offset,
+		Note: "搜索/抽取按「次」计费，与模型调用的 token 花费各自合计；失败调用计数但不计费。" +
+			"明细自本次升级起统计（此前的搜索调用没有记录）。",
+	}
+	type groupKey struct{ id, kind string }
+	type acc struct {
+		stat usageSearchProviderStat
+		dur  int64
+	}
+	idx := map[groupKey]*acc{}
+	var durSum int64
+	for _, g := range groups {
+		k := groupKey{g.ProviderID, g.Kind}
+		e := idx[k]
+		if e == nil {
+			e = &acc{stat: usageSearchProviderStat{ProviderID: g.ProviderID, Kind: g.Kind,
+				Name: a.searchProviderLabel(g.ProviderID)}}
+			idx[k] = e
+		}
+		e.stat.Calls += g.Calls
+		e.stat.Success += g.Success
+		e.stat.Errors += g.Calls - g.Success
+		e.stat.Fallback += g.Fallback
+		e.dur += g.DurationMs
+		// 单价按供应商 id 配，缺省用类型的公开价；只对成功次数计费
+		e.stat.UnitPrice = pricing.searchPriceOf(g.ProviderID, a.searchKindOf(g.ProviderID))
+		e.stat.Note = searchUnitPriceNote(a.searchKindOf(g.ProviderID))
+		e.stat.Cost += float64(g.Success) * e.stat.UnitPrice
+
+		resp.KPI.Calls += g.Calls
+		resp.KPI.Success += g.Success
+		resp.KPI.FallbackCalls += g.Fallback
+		resp.KPI.Cost += float64(g.Success) * e.stat.UnitPrice
+		durSum += g.DurationMs
+	}
+	for _, e := range idx {
+		if e.stat.Calls > 0 {
+			e.stat.AvgDurationMs = float64(e.dur) / float64(e.stat.Calls)
+		}
+		resp.ByProvider = append(resp.ByProvider, e.stat)
+	}
+	if resp.KPI.Calls > 0 {
+		resp.KPI.Errors = resp.KPI.Calls - resp.KPI.Success
+		resp.KPI.FallbackRate = float64(resp.KPI.FallbackCalls) / float64(resp.KPI.Calls) * 100
+		resp.KPI.AvgDurationMs = float64(durSum) / float64(resp.KPI.Calls)
+	}
+	sort.Slice(resp.ByProvider, func(i, j int) bool {
+		if resp.ByProvider[i].Calls != resp.ByProvider[j].Calls {
+			return resp.ByProvider[i].Calls > resp.ByProvider[j].Calls
+		}
+		return resp.ByProvider[i].ProviderID < resp.ByProvider[j].ProviderID
+	})
+
+	rows, total, err := a.Store.UsageSearchRecords(f, limit, offset)
+	if err != nil {
+		writeErr(w, 500, "读取搜索明细失败："+err.Error())
+		return
+	}
+	for _, r := range rows {
+		resp.Items = append(resp.Items, map[string]any{
+			"ts": r.TS, "sessionId": r.SessionID,
+			"providerId": r.ProviderID, "providerName": a.searchProviderLabel(r.ProviderID),
+			"kind": r.Kind, "kindLabel": usageCallKindLabel(r.Kind),
+			"detail": r.Detail, "errKind": r.ErrKind,
+			"ok": r.OK, "error": r.Error, "durationMs": r.DurationMs, "rank": r.Rank,
+		})
+	}
+	resp.Total = total
+	writeJSON(w, 200, resp)
 }
 
 // ---------- 清理 ----------

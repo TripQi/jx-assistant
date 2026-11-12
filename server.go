@@ -309,8 +309,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// 读类与设置页同为只读档；改单价与清理数据落到修改工作区档（清理不可恢复）。
 	a.apiRoute(mux, "GET /api/usage/summary", a.handleUsageSummary, apiMeta{Summary: "用量总览（KPI + 每日趋势 + 按模型统计）", Params: "from、to（YYYY-MM-DD）或 date=today|7d|30d；provider、key 可选", Perm: permReadOnly})
 	a.apiRoute(mux, "GET /api/usage/records", a.handleUsageRecords, apiMeta{Summary: "用量明细（分页，新的在前）", Params: "同上 + limit、offset", Perm: permReadOnly})
-	a.apiRoute(mux, "GET /api/usage/pricing", a.handleUsagePricingGet, apiMeta{Summary: "模型单价表与渠道倍率（含渠道/Key 清单）", Perm: permReadOnly})
-	a.apiRoute(mux, "POST /api/usage/pricing", a.handleUsagePricingSet, apiMeta{Summary: "保存模型单价表与渠道倍率（整体替换）", Params: "models、multipliers", Perm: permWorkspace})
+	a.apiRoute(mux, "GET /api/usage/pricing", a.handleUsagePricingGet, apiMeta{Summary: "模型单价表、渠道倍率与搜索按次单价（含渠道/Key 清单）", Perm: permReadOnly})
+	a.apiRoute(mux, "POST /api/usage/pricing", a.handleUsagePricingSet, apiMeta{Summary: "保存模型单价表、渠道倍率与搜索单价（整体替换）", Params: "models、multipliers、searchPrices", Perm: permWorkspace})
+	a.apiRoute(mux, "GET /api/usage/search", a.handleUsageSearch, apiMeta{Summary: "搜索/抽取调用统计（KPI + 按供应商 + 明细分页，按次计费）", Params: "同上 + limit、offset", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/usage/cleanup", a.handleUsageCleanup, apiMeta{Summary: "按日期范围删除用量明细", Params: "from、to", Perm: permWorkspace, Danger: "删除该日期范围内的用量明细，不可恢复"})
 	a.apiRoute(mux, "GET /api/modes", a.handleChatModes, apiMeta{Summary: "工作模式清单（新建会话可选的模式）", Perm: permReadOnly}) // 工作模式清单（chatmodes.go）：模式下拉与 dispatch_task 的 mode 参数同一数据源
 	mux.HandleFunc("POST /api/providers", a.handleUpsertProvider)

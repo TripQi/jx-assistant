@@ -399,6 +399,21 @@ var storeMigrations = []migration{
 			`ALTER TABLE usage_events ADD COLUMN thinking TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// 明细补「调用类型」与搜索/抽取的记账字段：模型调用按 token 计费，搜索/抽取
+		// 按「次」计费（见 usagesearch.go），两者不能混在一个口径里——搜索行的 token
+		// 恒 0，也绝不能进 token 合计。kind 空串＝模型调用（老数据同样，不回填）；
+		// detail 是搜索词/URL 的截断摘要（不存全文、不存 Key）；provider_rank 是供应商
+		// 顺位（>1 表示前面几家失败过、这次是回落来的）。
+		id:       "0020_usage_search_calls",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE usage_events ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE usage_events ADD COLUMN detail TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE usage_events ADD COLUMN err_kind TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE usage_events ADD COLUMN provider_rank INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

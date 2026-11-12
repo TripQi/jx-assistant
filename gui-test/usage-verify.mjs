@@ -349,6 +349,7 @@ try {
     ins[2].value = '40'; // 输出 元/M
     ins[3].value = '1';  // 缓存读 元/M
     ins[4].value = '10'; // 缓存写 元/M
+    ins[5].value = '1';  // 空闲折扣（1＝不分时段）
     return ins.length;
   })()`);
   const clickSave = `[...document.querySelectorAll('#set-pane-component-usage-stats .us-btn')].find((b) => b.textContent === '保存单价与倍率').click()`;
@@ -356,8 +357,8 @@ try {
   await sleep(1600);
   const paid = (await api('GET', '/api/usage/summary?date=30d')).json;
   ok('U7 配价后费用立刻可算（含未配单价转已配）',
-    addRes === 5 && paid.kpi.priced === true && paid.kpi.cost > 0,
-    'model=' + usedModel + ' cost=' + paid.kpi.cost + ' priced=' + paid.kpi.priced);
+    addRes === 6 && paid.kpi.priced === true && paid.kpi.cost > 0,
+    'model=' + usedModel + ' cost=' + paid.kpi.cost + ' priced=' + paid.kpi.priced + ' inputs=' + addRes);
   const cost1 = paid.kpi.cost;
 
   // 渠道倍率全部改成 2.0 → 费用应当翻倍（价格 × 倍率的口径）

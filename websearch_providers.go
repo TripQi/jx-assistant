@@ -254,6 +254,9 @@ type searchProviderView struct {
 	Available bool `json:"available"`
 	// UnavailableHint 不能用的原因（能用时为空）
 	UnavailableHint string `json:"unavailableHint,omitempty"`
+	// KeyMissing 这一家必须自带 Key 而还没填：仍算「可用」（填上就活），但调用必然
+	// 失败——设置页如实标「未填 Key」，别让用户以为配好了就能搜。
+	KeyMissing bool `json:"keyMissing,omitempty"`
 }
 
 // searchProviderViews 生成设置页回显（顺带给出运行期可用性：公司网关的地址是
@@ -268,7 +271,8 @@ func (a *App) searchProviderViews() []searchProviderView {
 			APIKeyMasked: maskKey(p.APIKey), Capabilities: p.Capabilities,
 			Enabled: p.isEnabled(), Order: p.Order, Engine: p.Engine,
 			Region: p.Region, Freshness: p.Freshness, Count: p.Count, TimeoutSec: p.TimeoutSec,
-			Available: true,
+			Available:  true,
+			KeyMissing: providerNeedsKey(p.Kind) && strings.TrimSpace(p.APIKey) == "",
 		}
 		switch p.Kind {
 		case spKindGateway:

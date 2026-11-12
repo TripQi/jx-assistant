@@ -8854,6 +8854,7 @@ document.addEventListener('click', (e) => {
       !e.target.closest('#mode-row') &&
       !e.target.closest('#sub-dd') &&
       !e.target.closest('#skill-add-btn') && // 设置页「＋ 添加技能」弹层锚点
+      !e.target.closest('#sp-add') && // 设置页「＋ 添加供应商」弹层锚点（搜索供应商下拉）
       !e.target.closest('.ex-model-chip') && // 设置页「子对话专家」的模型选择芯片锚点
       // 右栏子对话输入区那套同款控件也是弹层锚点
       !e.target.closest('#sub-btn-plus') && !e.target.closest('#sub-perm-chip') &&

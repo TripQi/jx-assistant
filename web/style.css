@@ -2140,6 +2140,7 @@ mark {
 /* 卡片：固定宽度、窄屏夹在视口内；纵向用 flex 列 + overflow:hidden，
    保证任何内容都不会画到圆角外面（列表再长也不会漫出卡片底边）。 */
 .model-card {
+  --mc-list-h: 217px; /* 第二层列表的固定目标高度＝7 行（每行 31px：8px 上下内边距 + 13px 字号的行高） */
   width: 300px; min-width: 0; max-width: calc(100vw - 24px);
   display: flex; flex-direction: column; overflow: hidden;
   padding: 12px 14px 10px;
@@ -2227,12 +2228,26 @@ mark {
 }
 .mc-back:hover { background: var(--hover); color: var(--accent); }
 .mc-back svg { width: 15px; height: 15px; }
-/* 列表：不要自己定高，由卡片剩余空间决定（flex:1 + min-height:0）；
-   超出部分在列表内部滚动，底部留 12px 内边距，最后一项不贴圆角被切 */
+/* 列表：固定目标高度（--mc-list-h，≈7 行），模型再多也不撑高卡片——
+   超出部分在列表内部滚动。flex-grow:0 保证模型少时按自然高度（不强行撑到目标高度），
+   flex-shrink:1 + min-height:0 保证可用空间不足时能被压矮（降级为 min(目标, 可用)）。
+   底部留 12px 内边距，滚到底时最后一项不贴圆角被切；滚动条细而可见（深色另配）。 */
 .mc-list {
-  flex: 1 1 auto; min-height: 0; overflow-y: auto;
-  overscroll-behavior: contain; padding-bottom: 12px;
+  flex: 0 1 auto; min-height: 0; max-height: var(--mc-list-h);
+  overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px;
+  scrollbar-width: thin; scrollbar-color: rgba(139, 148, 158, .55) transparent;
+  scrollbar-gutter: stable; /* 有无滚动条都留出槽位：换模型/切分组时行宽不跳 */
 }
+.mc-list::-webkit-scrollbar { width: 8px; }
+.mc-list::-webkit-scrollbar-track { background: transparent; }
+.mc-list::-webkit-scrollbar-thumb {
+  background: rgba(139, 148, 158, .5); border-radius: 4px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.mc-list::-webkit-scrollbar-thumb:hover { background: rgba(139, 148, 158, .78); background-clip: content-box; }
+:root[data-theme='dark'] .mc-list { scrollbar-color: rgba(255, 255, 255, .3) transparent; }
+:root[data-theme='dark'] .mc-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .28); background-clip: content-box; }
+:root[data-theme='dark'] .mc-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .45); background-clip: content-box; }
 .mc-list.busy { opacity: .6; }
 /* 分组标题：字号/灰字沿用 .pop-group（不可点、不带勾），这里只管间距；模型缩进排在它下面 */
 .mc-group { padding: 8px 11px 2px; }

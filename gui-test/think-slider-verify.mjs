@@ -582,6 +582,99 @@ async function main() {
     await pressKey(t, 'Escape');
     await sleep(300);
     ok('O4 Esc 关闭子对话卡片', !(await bigBox(t)).card, '');
+
+    // ---------- P 长列表（≥20 个模型）与 460×600 窄屏：卡片/列表都不越出视口 ----------
+    // 造一个大供应商（真接口 POST /api/providers），再用卡片右上角刷新把模型拉进列表
+    const bulkModels = Array.from({ length: 22 }, (_, i) => ({ id: 'bulk-' + (i + 1), name: '5.5 系列模型 ' + (i + 1) }));
+    const addRes = await fetch(BASE + '/api/providers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'mock-bulk', name: '大模型池', baseURL: 'mock', apiKey: '', models: bulkModels }),
+    });
+    ok('P0 预备：加一个 22 个模型的供应商', addRes.ok, 'HTTP ' + addRes.status);
+    // 真点：开卡片 → 刷新（拉 /api/models）→ 进第二层
+    await clickEl(t, `document.getElementById('model-chip')`);
+    await clickEl(t, `document.getElementById('mc-refresh')`);
+    await sleep(800);
+    await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(400);
+    // 语义化的「最后一项不越界」：把列表滚到底，量最后一项的底边
+    const listGeo = () => read(t, `(() => {
+      const vh = window.innerHeight;
+      const card = document.getElementById('model-card');
+      const list = document.getElementById('mc-list');
+      list.scrollTop = list.scrollHeight; // 滚到底：量「最下面那一项」的真实位置
+      const items = [...list.querySelectorAll('.mc-item')];
+      const last = items[items.length - 1];
+      const c = card.getBoundingClientRect();
+      const lb = last ? last.getBoundingClientRect() : { top: 0, bottom: 0 };
+      const lr = list.getBoundingClientRect();
+      const cs = getComputedStyle(card);
+      return { vh, count: items.length, cardTop: c.top, cardBottom: c.bottom, cardH: c.height,
+        lastTop: lb.top, lastBottom: lb.bottom, listBottom: lr.bottom,
+        overflowY: cs.overflowY, overflow: cs.overflow, clipped: cs.overflow === 'hidden' || cs.overflowY === 'hidden',
+        listScroll: list.scrollHeight > list.clientHeight + 1, listClient: list.clientHeight, listScrollH: list.scrollHeight,
+        listPadBottom: parseFloat(getComputedStyle(list).paddingBottom) };
+    })()`);
+    const big = await listGeo();
+    ok('P1 模型 ≥20 项已进列表', big.count >= 22, 'items=' + big.count);
+    ok('P2 卡片整体在视口内（底边留 ≥8px、顶边不越界）',
+      big.cardBottom <= big.vh - 8 + 0.5 && big.cardTop >= 7.5,
+      JSON.stringify({ top: big.cardTop, bottom: big.cardBottom, vh: big.vh }));
+    ok('P3 滚到底时最后一项底边 ≤ 视口高 − 8（贴底不被裁）',
+      big.lastBottom <= big.vh - 8 + 0.5 && big.lastBottom > 0,
+      JSON.stringify({ lastBottom: big.lastBottom, vh: big.vh }));
+    ok('P4 卡片 overflow:hidden（内容不会画到圆角外）', big.clipped, JSON.stringify({ overflow: big.overflow, overflowY: big.overflowY }));
+    ok('P5 列表内容超高时仍内部滚动（scrollHeight > clientHeight）',
+      big.listScroll && big.listScrollH > big.listClient,
+      JSON.stringify({ sh: big.listScrollH, ch: big.listClient }));
+    ok('P6 列表底部留 12px 内边距', big.listPadBottom >= 12, String(big.listPadBottom));
+    await shot(t, join(SCREEN, 'thinkslider-9-longlist.png'));
+    // 切模型后回第一层要复位（高度收回去、底边仍在视口内）
+    await clickEl(t, `document.querySelector('#mc-list .mc-item.sel')`);
+    await sleep(500);
+    const backGeo = await read(t, `(() => {
+      const c = document.getElementById('model-card').getBoundingClientRect();
+      return { vh: window.innerHeight, top: c.top, bottom: c.bottom, h: c.height,
+        layer1: !document.getElementById('mc-lv').classList.contains('hidden') };
+    })()`);
+    ok('P7 回第一层复位：层切回、卡片收短且底边仍在视口内',
+      backGeo.layer1 && backGeo.h < big.cardH && backGeo.bottom <= backGeo.vh - 8 + 0.5,
+      JSON.stringify(backGeo));
+
+    // 460×600 窄视口（旋屏/小窗）：卡片开着不动，只改视口 —— 验 resize 时动态重算
+    await t.send('Emulation.setDeviceMetricsOverride', { width: 460, height: 600, deviceScaleFactor: 1, mobile: false });
+    await sleep(900);
+    if ((await bigBox(t)).layer1) await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(450);
+    const narrow2 = await listGeo();
+    ok('P8 460×600 窄屏：卡片开着、改视口后仍停在列表层', narrow2.count >= 22 && narrow2.vh === 600, JSON.stringify({ n: narrow2.count, vh: narrow2.vh }));
+    ok('P9 460×600 窄屏（resize 动态重算）：卡片底边 ≤ 视口高 − 8、顶边不越界',
+      narrow2.cardBottom <= narrow2.vh - 8 + 0.5 && narrow2.cardTop >= 7.5,
+      JSON.stringify({ top: narrow2.cardTop, bottom: narrow2.cardBottom, vh: narrow2.vh }));
+    ok('P10 460×600 窄屏：滚到底时最后一项底边 ≤ 视口高 − 8',
+      narrow2.lastBottom <= narrow2.vh - 8 + 0.5 && narrow2.lastBottom > 0,
+      JSON.stringify({ lastBottom: narrow2.lastBottom, vh: narrow2.vh }));
+    ok('P11 460×600 窄屏：列表内部滚动 + 卡片 overflow:hidden',
+      narrow2.listScroll && narrow2.clipped, JSON.stringify({ scroll: narrow2.listScroll, clipped: narrow2.clipped }));
+    await shot(t, join(SCREEN, 'thinkslider-10-narrow600-longlist.png'));
+    // 窄屏下重开一次（关闭→再点芯片），确认从零定位也不越界
+    await pressKey(t, 'Escape');
+    await sleep(250);
+    await clickEl(t, `document.getElementById('model-chip')`);
+    await sleep(250);
+    if ((await bigBox(t)).layer1) await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(400);
+    const narrow3 = await listGeo();
+    ok('P12 460×600 窄屏重开：卡片与最后一项都不越界',
+      narrow3.cardBottom <= narrow3.vh - 8 + 0.5 && narrow3.cardTop >= 7.5 && narrow3.lastBottom <= narrow3.vh - 8 + 0.5,
+      JSON.stringify({ top: narrow3.cardTop, bottom: narrow3.cardBottom, last: narrow3.lastBottom, vh: narrow3.vh }));
+    // 复原视口与配置，避免影响后续
+    await t.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(500);
+    await pressKey(t, 'Escape');
+    await sleep(250);
+    await fetch(BASE + '/api/providers/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'mock-bulk' }) });
+    ok('P13 收尾：大供应商已删除、卡片已关闭', !(await bigBox(t)).card, '');
   } finally {
     await closeTab(t);
   }

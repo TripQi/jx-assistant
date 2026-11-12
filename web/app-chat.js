@@ -7343,6 +7343,7 @@ function mcShowError(msg) {
   if (!el) return;
   el.textContent = msg || '';
   el.classList.toggle('hidden', !msg);
+  requestAnimationFrame(mcFitCard); // 错误条改变了卡片高度，重新贴视口
 }
 function mcHideError() { mcShowError(''); }
 
@@ -7354,6 +7355,36 @@ function openModelCard(view) {
   mcHideError();
   renderModelCard(popView);
   openPopover('model-card', viewEl(popView, 'model-chip'));
+  requestAnimationFrame(mcFitCard); // 位置定了再按视口夹高度（见 mcFitCard）
+}
+
+// 卡片贴视口：从输入区那枚芯片向上展开，底边留 8px 余量（不越过芯片）；
+// 视口不够时整体上移，底边最多贴到视口底 −8（绝不越界），内容放不下就压卡片高度、
+// 让列表内部滚动（flex 列 + .mc-list 的 overflow-y:auto）。
+// 触发点：打开卡片、层切换（第一层↔第二层高度差很大）、重画列表、错误条出现/消失、
+// 窗口 resize / 旋屏。放在 rAF 里跑：要等这一帧的布局生效再量。
+// withX=true 时连横向也对齐一次（芯片可能因窄屏换行/旋屏挪了位置）。
+function mcFitCard(withX) {
+  const card = $('model-card');
+  if (!card || card.classList.contains('hidden')) return;
+  const gap = 8;
+  const vh = window.innerHeight;
+  const anchor = viewEl(popView || mainView, 'model-chip');
+  if (withX && anchor && typeof reposPopover === 'function') reposPopover('model-card', anchor);
+  const ar = anchor ? anchor.getBoundingClientRect() : null;
+  // 底边优先停在芯片上方（卡片向上展开、不盖住输入区）；芯片不可见或几乎贴顶时
+  // 退化成贴视口底（仍留 8px），否则卡片会被挤成一条缝
+  let bottomLimit = vh - gap;
+  if (ar && ar.height > 0) {
+    const above = ar.top - gap;
+    if (above <= bottomLimit && above - gap >= 120) bottomLimit = above;
+  }
+  card.style.maxHeight = 'none';               // 先量自然高度（两层的实际内容）
+  const natural = card.getBoundingClientRect().height;
+  const h = Math.min(natural, Math.max(0, bottomLimit - gap));
+  const top = Math.max(gap, bottomLimit - h);
+  card.style.top = top + 'px';
+  card.style.maxHeight = Math.max(0, bottomLimit - top) + 'px';
 }
 
 // 按当前会话/草稿状态重画整张卡（第一层 + 第二层列表）
@@ -7391,6 +7422,7 @@ function mcShowLayer(n) {
   mcLayer = n;
   $('mc-lv').classList.toggle('hidden', n !== 1);
   $('mc-models').classList.toggle('hidden', n !== 2);
+  requestAnimationFrame(mcFitCard); // 两层高度差很大：切层后按新高度重新贴视口
 }
 
 // 指针横坐标 → 档位下标（夹取在轨道两端之间，六等分就近取整）
@@ -7451,6 +7483,7 @@ function mcRenderList(view) {
   list.scrollTop = keepTop;
   list.classList.toggle('busy', mcBusy);
   list.querySelectorAll('.mc-item').forEach((b) => { b.onclick = () => mcPickModel(b.dataset.key); });
+  requestAnimationFrame(mcFitCard); // 条目数变了 → 重新按视口夹高度
 }
 
 // 点模型：立即切会话模型（PATCH /api/sessions/{id}），档位保持不变，然后翻回第一层
@@ -8797,6 +8830,10 @@ $('sub-model-chip').onclick = () => openModelCard(subView);
   $('mc-model').onclick = () => { mcShowLayer(2); mcRenderList(popView); $('mc-list').scrollTop = 0; };
   $('mc-back').onclick = () => mcShowLayer(1);
   $('mc-refresh').onclick = () => mcRefreshModels();
+  // 窗口变化（拖窗 / 旋屏 / 软键盘收起）：卡片还开着就重新贴视口（横向也对齐一次）
+  window.addEventListener('resize', () => {
+    if (!$('model-card').classList.contains('hidden')) requestAnimationFrame(() => mcFitCard(true));
+  });
 }
 jxDiag('init:绑定B sub/chips 完成');
 // 工作目录面板：每次打开重置搜索；搜索实时过滤目录列表

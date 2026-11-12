@@ -2,13 +2,16 @@
 //
 // 模型遇到时效性问题（新闻、版本、价格、时事——训练知识之外的内容）时，
 // 先用 web_search 拿「标题 + 链接 + 摘要」的结果列表，需要某个结果的全文
-// 再用 web_fetch 抓那个链接。搜索本身不在客户端实现：统一打服务端
-// （jxai-server）的搜索网关，由服务端持 key 调上游（首版上游 = 智谱联网
-// 搜索 MCP，吃 GLM Coding Plan 额度）——客户端永远接触不到上游 key，
-// 换/加引擎（博查、Firecrawl 等）也不需要发客户端版本。
+// 再用 web_fetch 抓那个链接。
 //
-// 与服务端的协议契约（服务端半边见 jxaiserver 仓库 search.go 头注释，改动
-// 需双侧同步）：
+// 搜索按「供应商」组织（见 websearch_providers.go）：配置里有一组启用/排序过的
+// 供应商（公司网关 / DeepSeek / Tavily / AnySearch / 博查 / 智谱），按 order
+// 逐个尝试、**只有失败才回落下一家**。空结果是有效答案（不回落）——用户问了个
+// 冷门东西时逐家重试只会让一次搜索多等几秒、结果还是空。全部失败时错误文案
+// 附加改道指引（改用「本机网络搜索」技能）。
+//
+// 公司网关那条的协议契约（服务端半边见 jxaiserver 仓库 search.go 头注释，
+// 改动需双侧同步）：
 //
 //	POST <服务端地址>/api/search   JSON：{"query":"…","count":8}
 //	  → 200 {"results":[{"title","url","snippet","site","date"}],
@@ -27,12 +30,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -44,7 +44,7 @@ func (a *App) webSearchTool() Tool {
 			"联网搜索，获取模型知识之外的最新信息（新闻、版本发布、价格、时事等）。"+
 				"返回若干条结果的标题、链接与摘要；需要某个结果的完整内容时，再用 web_fetch 抓取该链接。"+
 				"时效性强的问题（最近发生/发布的事）优先搜索而不是凭记忆回答；回答中引用结果时用 markdown 链接注明来源。"+
-				"需要服务端（设置·网络访问里的服务端地址）开启搜索能力。",
+				"搜索按「设置 · 网络访问 · 联网搜索」里配置的供应商顺位自动回落（公司网关 / DeepSeek / Tavily / AnySearch 等）。",
 			objSchema(map[string]any{
 				"query": strProp("搜索词，一句话关键词（不要整段问题照搬）"),
 				"count": intProp("返回条数，默认 8，上限 20"),
@@ -58,22 +58,27 @@ func (a *App) webSearchTool() Tool {
 // 不同对话交替）；缺省退化按用户身份轮询。
 const searchConversationHeader = "X-Jxai-Conversation"
 
-// searchResponse 服务端 /api/search 的响应契约。
-type searchResponse struct {
-	Results []struct {
-		Title   string `json:"title"`
-		URL     string `json:"url"`
-		Snippet string `json:"snippet"`
-		Site    string `json:"site"`
-		Date    string `json:"date"`
-	} `json:"results"`
-	Engine  string `json:"engine"`
-	Cached  bool   `json:"cached"`
-	Answer  string `json:"answer"`
-	Error   string `json:"error"`
+// searchHit 一条搜索结果（服务端网关与各家供应商归一到同一形状）。
+type searchHit struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+	Site    string `json:"site"`
+	Date    string `json:"date"`
 }
 
-// runWebSearch 执行一次搜索：定位服务端 → POST /api/search → 渲染结果列表。
+// searchResponse 搜索结果：服务端 /api/search 的响应契约，也是各家供应商归一后
+// 的统一形状。Rank 是这次实际用到的供应商顺位（1 起），Engine 是来源标注。
+type searchResponse struct {
+	Results []searchHit `json:"results"`
+	Engine  string      `json:"engine"`
+	Cached  bool        `json:"cached"`
+	Answer  string      `json:"answer"`
+	Error   string      `json:"error"`
+	Rank    int         `json:"rank,omitempty"`
+}
+
+// runWebSearch 执行一次搜索：按供应商顺位逐个尝试，首家成功即返回（含 0 条结果）。
 func (a *App) runWebSearch(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
 		Query string `json:"query"`
@@ -99,41 +104,55 @@ func (a *App) runWebSearch(t *toolContext, args json.RawMessage) (string, error)
 	if _, err := t.authorize(permAction{Op: "net", Tool: "web_search"}); err != nil {
 		return "", err
 	}
+	providers := a.searchProvidersFor(func(c SearchProviderCaps) bool { return c.Search })
+	if len(providers) == 0 {
+		// 一家可用的都没有（公司网关没配地址、也没配别的供应商）：走老链路，
+		// 行为与老版本完全一致——报「未配置服务端地址」并给出设置指引。
+		return a.runWebSearchGatewayOnly(t, query, count)
+	}
+	// 总耗时是预算而不是各家超时相加：用户在等的是「一次搜索」。
+	budget := time.Duration(a.Cfg.searchBudgetSec()) * time.Second
+	ctx, cancel := context.WithTimeout(t.ctx, budget)
+	defer cancel()
+	call := providerSearchCall{query: query, count: count, sessID: t.sess.ID}
+	fails := make([]string, 0, len(providers))
+	for _, pv := range providers {
+		if ctx.Err() != nil {
+			fails = append(fails, fmt.Sprintf("总预算 %d 秒已用完，第%d位及之后的供应商没机会尝试",
+				a.Cfg.searchBudgetSec(), pv.rank))
+			break
+		}
+		pctx, pcancel := providerCtx(ctx, pv.cfg.timeout())
+		out, err := a.runProviderSearch(pctx, pv, call)
+		pcancel()
+		if err == nil {
+			out.Rank = pv.rank
+			return renderSearchResults(query, out), nil
+		}
+		fails = append(fails, fmt.Sprintf("第%d位 %s — %s", pv.rank, pv.cfg.displayName(), err.Error()))
+	}
+	return "", a.searchErrHint(fmt.Errorf("搜索失败：所有可用的搜索供应商都失败了（可按供应商顺位在 设置 · 网络访问 · 联网搜索 里调整）：%s",
+		strings.Join(fails, "；")))
+}
+
+// runWebSearchGatewayOnly 老链路（只有一个公司网关时）：地址解析不出来就报
+// 未配置（指引去设置里填），其余错误交给 searchErrHint 附加改道指引。
+func (a *App) runWebSearchGatewayOnly(t *toolContext, query string, count int) (string, error) {
 	base, err := a.searchEndpointBase()
 	if err != nil {
 		return "", a.searchErrHint(err)
 	}
+	pv := activeSearchProvider{
+		cfg:  SearchProviderCfg{ID: "gateway", Name: "公司网关", Kind: spKindGateway},
+		base: base, rank: 1,
+	}
 	ctx, cancel := context.WithTimeout(t.ctx, 35*time.Second)
 	defer cancel()
-	payload, _ := json.Marshal(map[string]any{"query": query, "count": count})
-	req, err := a.marketRequest(ctx, http.MethodPost, base+"/api/search", bytes.NewReader(payload))
+	out, err := a.searchViaGateway(ctx, pv, providerSearchCall{query: query, count: count, sessID: t.sess.ID})
 	if err != nil {
 		return "", a.searchErrHint(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	// sess 在 authorize（permModeOf）处已保证非空；服务端按此头对对话轮询搜索引擎
-	req.Header.Set(searchConversationHeader, t.sess.ID)
-	client := newCompanyHTTPClient(35 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", a.searchErrHint(fmt.Errorf("连接服务端失败（%s）: %w", base, err))
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	var out searchResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		if resp.StatusCode >= 400 {
-			return "", a.searchErrHint(fmt.Errorf("搜索失败（HTTP %d）: %s", resp.StatusCode, truncateRunes(string(body), 300)))
-		}
-		return "", a.searchErrHint(fmt.Errorf("服务端响应无法解析（HTTP %d）", resp.StatusCode))
-	}
-	if resp.StatusCode >= 400 {
-		msg := out.Error
-		if msg == "" {
-			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		}
-		return "", a.searchErrHint(fmt.Errorf("搜索失败: %s", msg))
-	}
+	out.Rank = 1
 	return renderSearchResults(query, out), nil
 }
 
@@ -176,7 +195,11 @@ func renderSearchResults(query string, out searchResponse) string {
 	if out.Cached {
 		cached = "，缓存命中"
 	}
-	fmt.Fprintf(&b, "搜索「%s」：%d 条结果（引擎 %s%s）\n", query, len(out.Results), out.Engine, cached)
+	engine := out.Engine
+	if out.Rank > 0 {
+		engine = fmt.Sprintf("%s，第%d位", engine, out.Rank)
+	}
+	fmt.Fprintf(&b, "搜索「%s」：%d 条结果（引擎 %s%s）\n", query, len(out.Results), engine, cached)
 	if len(out.Results) == 0 && strings.TrimSpace(out.Answer) != "" {
 		// 上游没给结构化结果、直接回了文本（answer）：原样转交，模型自行取材。
 		b.WriteString("\n" + strings.TrimSpace(out.Answer) + "\n")

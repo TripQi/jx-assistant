@@ -41,13 +41,7 @@ func TestSearchEndpointBase(t *testing.T) {
 
 func TestRenderSearchResults(t *testing.T) {
 	out := searchResponse{Engine: "zhipu-mcp"}
-	out.Results = []struct {
-		Title   string `json:"title"`
-		URL     string `json:"url"`
-		Snippet string `json:"snippet"`
-		Site    string `json:"site"`
-		Date    string `json:"date"`
-	}{
+	out.Results = []searchHit{
 		{Title: "结果一", URL: "https://a.com/1", Snippet: "摘要一", Site: "A站", Date: "2026-10-01"},
 		{Title: "结果二", URL: "https://b.com/2", Snippet: strings.Repeat("长", 300), Site: "B站"},
 	}

@@ -2008,7 +2008,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
 | `gitpanel.go`（+`gitpanel_windows.go`/`_other.go`） | Git 面板（组件 `git-panel` 的宿主半边）：仓库扫描、porcelain/图谱/分支解析、暂存/提交（白名单 argv 直调 git，永不过 shell） |
 | `gittools.go` | git_sync 模型工具（组件 `git-panel`）：与面板共用 gitSync 执行缝的宿主通道远程同步，绕开沙箱内远程 git 必败的限制（背景与实测见《Git远程同步工具-改动说明.md》） |
 | `server.go` | 路由、聊天 SSE、全局事件流、压缩接口、插件注入、内嵌前端 |
-| `usagestats.go` / `usagesearch.go` / `usagepricing.go` / `usagepeak.go` / `usageapi.go` | 「用量统计」（组件 `usage-stats` 的宿主半边）：逐次调用明细表 `usage_events`（kind 区分模型调用与搜索/抽取）+ 采集埋点 + 异步落库 + 保留策略；模型单价与渠道倍率、搜索按次单价（存 meta 表 `globaldata:usage.pricing`）；`/api/usage/*` 汇总/明细/搜索/单价/清理；`usagepeak.go` 收两条厂商规则（协议输入口径 splitUsageTokens、高峰/闲时段判定 usagePeakAt + 节假日常量）。见「用量统计」节 |
+| `usagestats.go` / `usagesearch.go` / `usagepricing.go` / `usagepeak.go` / `usageapi.go` | 「用量统计」（组件 `usage-stats` 的宿主半边）：逐次调用明细表 `usage_events`（kind 区分模型调用与搜索/抽取）+ 采集埋点 + 异步落库 + 保留策略；模型单价（**用户自填，程序不内置任何价**）与渠道倍率、搜索按次单价（存 meta 表 `globaldata:usage.pricing`）；`/api/usage/*` 汇总/明细/搜索/单价/清理；`usagepeak.go` 收两条厂商规则（协议输入口径 splitUsageTokens、**每模型一条**的高峰/空闲时段规则 usagePeakRule + 按时间戳判定）。见「用量统计」节 |
 | `web/` | 前端：工作区分组侧栏、子对话抽屉、子任务卡片、模型选择器、设置页、市场页（`app-market.js`：左侧栏底部入口、主区整页视图 body.market-mode、三 tab+搜索+一键装卸；组件装卸后 `CX.refresh()` 热生效） |
 > **服务端已独立成仓库**（`D:\智能体工作区\jxaiserver`，module jxai-server）：远程访问中继 + 技能/组件/插件市场（含 /admin 管理页）+ 更新分发（日期+V序号版本体系）+ 公司接入（登记/UDP 发现/按人发 new-api 令牌/每月额度）。本仓库只保留客户端半边（market.go 市场客户端、wizard.go 接入向导、update.go 更新检查——与服务端的协议契约见各自文件头注释）；其部署与用法见该仓库 README/部署。开发完全分开，两边接口变更需双侧同步。
 
@@ -2037,7 +2037,7 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   已有数据保留；前端页面与速度条随同一个开关消失（组件 dispose 摘干净）。
 - **保留**：启动跑一次 + 每天一次（`usageJanitor`）：超 90 天或超 20 万条删最旧，
   保留最新；页面另有「按日期范围清理」（二次确认，不可恢复）。
-- **计费（token 类）**：模型基础价按模型 id 配四个价（输入/输出/缓存读/缓存写，元 /
+- **计费（token 类）**：模型单价按模型 id 配四个价（输入/输出/缓存读/缓存写，元 /
   百万 tokens，填的是**峰值价**），渠道一个倍率（默认 1.0）。口径（2026-11-12 用户实测
   虚高 23 倍后定死）：
   **费用 = 未命中输入×输入价 + 缓存读取×缓存读价 + 缓存写入×缓存写价 + 输出×输出价，再乘渠道倍率**。
@@ -2045,15 +2045,31 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   （chat/responses）与 DeepSeek 的 `prompt_tokens` **已含**缓存命中，要减去
   `CacheRead`；Anthropic 原生 `input_tokens` 不含缓存（单列 `cache_read`/
   `cache_creation`），**不能减**。缓存写入按写价单独计（Anthropic 的 cache_creation）。
-  分时段价：`modelPrice.IdleFactor`（0.5＝官方空闲半价，缺省/1＝不分时段），时段按
-  **每次调用发生的时间戳**判定（`usagePeakAt`，不按「现在」，历史重算才对）：北京时间
-  周一至周五 9:00–12:00、14:00–18:00 为高峰，其余（含周末与法定节假日全天）为空闲；
-  节假日常量 `usageHolidayRanges`（2026 年按国办发明电〔2025〕7号，每年 11 月国务院
-  发布次年安排后追加，缺失年份按周一至周五判定）。未配单价的模型只显示 token，费用
-  列写「未配单价」。价格不进明细表，聚合时现算——改价后历史费用跟着变。页面固定标注
-  「按本地单价估算，不代表账单」；内置初始价见 `defaultUsagePricing`（美元价按
-  usdToCNY 折算、DeepSeek 用官方现行峰值价 + 空闲半价），页面另有「恢复内置价」把
-  内置表灌进表单（不立即保存）。
+- **单价全部由用户填，程序不内置任何模型价**（2026-11-12 用户定的第二条口径）：
+  `emptyUsagePricing` 就是空表，新装环境价表为空；某模型四个价全 0 ＝ 还没填，
+  页面写「未配单价」、**不产生费用**（宁可显示不出来，也不给兜底价）。唯一的价格便利是
+  「从渠道模型添加空行」——只把渠道里的模型 id 列成空行，**不填价格、不配规则**。
+  迁移口径：已存的自定义价表原样保留（`usagePeakRule` 平铺在 `modelPrice` 里，老版本的
+  `idleFactor` 原键位读得出来），改动不会清空用户已配的价格。
+- **时段规则按模型一条**（`usagepeak.go` 的 `usagePeakRule`，与价格存在同一行）：
+  `peakWindows`（高峰时段 "HH:MM-HH:MM"，可多个，起 > 止 表示跨天，如 `22:00-06:00`
+  的凌晨那段按**调用当天**的星期算）、`peakDays`（0=周日…6=周六，空＝每天）、
+  `holidays`（`MM-DD` 每年重复 / `YYYY-MM-DD` 只此一年，当天全天空闲）、
+  `idleFactor`（(0,1) 才生效，0.5＝空闲半价；其它值＝不分时段）。
+  **规则缺失（一个时段都没有）＝不分时段、全按高峰价**，页面明说「未配置时段规则」
+  （KPI 副标题、价表每行摘要、卡片顶部提示）。判定一律按**调用发生的时间戳**
+  （`usageTimeOf` 用 `time.Local` 解析，明细是秒级、聚合是分钟级），**不按「现在」**——
+  改规则后历史数据按新规则重算，结果与「按当时时刻逐条判定」一致。
+  页面可一键「复制规则」到某个/全部模型。
+- **聚合粒度：分钟桶**（`substr(ts,1,16)`）。时段可以由用户配成非整点（09:30–11:45），
+  所以不能用小时桶——**2026-11-12 的线上事故正是小时桶**：旧 `usagePeakAt` 只认
+  `'2006-01-02 15:04:05'`，拿到 `'YYYY-MM-DD HH'` 解析失败后走了「按高峰兜底」，
+  942 次调用全部按高峰价计费（页面 ¥11.9159 ＝ 全高峰价手算值），空闲折扣形同不存在。
+  `usageTimeOf` 现在三种写法都认，并有单测锁死「分钟桶与逐条明细判定一致」。
+- 未配单价的模型只显示 token，费用列写「未配单价」。价格不进明细表，聚合时现算——
+  改价/改规则后历史费用跟着变。页面固定标注「按本地单价估算，不代表账单」。KPI 的
+  「估算花费」副标题固定给出**分时段分解**「高峰 X 次 ¥A · 空闲 Y 次 ¥B」（只给总额看不出
+  时段规则有没有生效）。
 - **计费（搜索/抽取，按次）**：搜索不是按 token 计费，单独记在明细表同一张表里，用
   `kind` 区分（`search` / `extract` / 空串＝模型调用），token 列对搜索行恒 0，token
   合计与模型占比一律排除（`whereTokens`）。**每一次回落尝试各记一行**（第 1 家失败一行、
@@ -2070,14 +2086,17 @@ mcpHost 接口注入：插件侧 ccPluginHost 做 ${CLAUDE_PLUGIN_ROOT} 等替�
   None/Low/Medium/High/Extra High/Max，空值写「默认」，筛选下拉另有一档「默认」
   兜住老数据与不吃档位的调用；**行 hover 显示该次调用命中高峰还是空闲价**）、
   **搜索调用分区**（KPI：次数/成功/失败/回落率/费用/平均耗时 + 按供应商表 + 逐次尝试
-  明细）、单价与倍率（含**空闲折扣**列与**搜索单价**）、清理区。**不做热力图**（用户
+  明细）、单价与时段规则（每行可展开编辑高峰星期/时段/节假日/空闲折扣，可复制到其它
+  模型；含**搜索单价**）、清理区。**不做热力图**（用户
   明确不要）。
 - **采集点（搜索）**：`websearch_search.go` 的 `runProviderSearch`（搜索）与
   `websearch_extract.go` 的 `runProviderExtract`（抽取）是两家供应商调用的唯一出口，
   记账包在这两处（`recordSearchCall`，走同一条异步队列，不拖慢搜索）。
-- **验证**：`go test -run "Usage|Pricing|Cost" .`（落库/聚合/倍率/未配单价/清理/分页/
-  协议归一/峰值空闲/周末节假日/搜索回落与按次计费/组件关闭不记）；真机走
-  `node gui-test/usage-verify.mjs`（用量页与速度条）与
+- **验证**：`go test -run "Usage|Pricing|Cost|Peak|Search" .`（落库/聚合/倍率/未配单价/
+  清理/分页/协议归一/高峰空闲分别计价再相加/分钟级边界 8:59-9:00 11:59-12:00 13:59-14:00
+  17:59-18:00/周末与节假日全天空闲/未配规则＝不分时段/跨天时段/规则规整/搜索回落与按次
+  计费/组件关闭不记）；真机走
+  `node gui-test/usage-verify.mjs`（用量页与速度条，含 U8b 时段规则生效）与
   `node gui-test/usage-search-verify.mjs`（搜索回落记账：隔离实例里故意改坏第 1 家
   Key → 第 2 家成功，断言两行明细与总花费相加，截图落 `gui-test-screenshots/usage-search-*.png`）。
 

@@ -1,7 +1,7 @@
 // 组件 usage-stats「用量统计」的浏览器半边：
 //   1. 设置 → 用量 独立页（CX.registerSettings 带 pane）：渠道/日期筛选、
 //      KPI 卡片、每日趋势（手写 SVG 折线）、模型占比（环形图）、按模型消耗表、
-//      用量明细分页表、单价与倍率配置、按日期范围清理；
+//      用量明细分页表、单价与时段规则配置（规则按模型一条、可复制到其它模型）、按日期范围清理；
 //   2. 输入框下方的实时输出速度条：`↑ 42.3 tok/s · 本轮 1.2k tok`——流式过程中
 //      按已收字符估 token（与后端 estimateTokens 同一启发式 3/4），每步结束后用
 //      后端推来的真实 usage 定格，定格约 3 秒淡出。首字延迟不在这里显示（在
@@ -283,14 +283,16 @@
     cardSearch.appendChild(searchPager);
     wrap.appendChild(cardSearch);
 
-    // ---- 单价与倍率 ----
+    // ---- 单价与规则 ----
     var cardPrice = el('div', 'us-card');
-    cardPrice.appendChild(el('h4', '', '单价与倍率'));
+    cardPrice.appendChild(el('h4', '', '单价与时段规则'));
     cardPrice.appendChild(el('p', 'us-note',
-      '模型基础价单位「元 / 百万 tokens」（填的是峰值价）；计费口径：未命中输入×输入价 + 缓存读取×缓存读价 + ' +
+      '模型单价单位「元 / 百万 tokens」（填的是峰值价），由你自己填：程序不内置任何模型价，' +
+      '没填之前费用一律显示「未配单价」，不给兜底价。计费口径：未命中输入×输入价 + 缓存读取×缓存读价 + ' +
       '缓存写入×缓存写价 + 输出×输出价，命中缓存的输入不再按输入价重复计费。' +
-      '空闲折扣 1＝不分时段、0.5＝空闲时段半价（高峰＝北京时间周一至周五 9:00–12:00、14:00–18:00，法定节假日与周末全天按空闲）。' +
-      '渠道倍率默认 1.0，费用 = 算出的金额 × 倍率（同一模型挂不同中转站不必逐个配价）。未配单价的模型只统计 token，费用列显示「未配单价」。'));
+      '时段规则按模型配（高峰星期 / 高峰时段 / 节假日 / 空闲折扣），按调用发生的时刻判定；' +
+      '一个时段都不配＝不分时段（全天按高峰价）。' +
+      '渠道倍率默认 1.0，费用 = 算出的金额 × 倍率（同一模型挂不同中转站不必逐个配价）。'));
     var priceGrid = el('div', 'us-price-grid');
     cardPrice.appendChild(priceGrid);
     var statusLine = el('p', 'us-status');
@@ -482,6 +484,17 @@
 
   /* ---------- KPI ---------- */
 
+  // costBreakdown 「估算花费」卡的副说明：高峰/空闲两档的次数与金额分开列。
+  // 只给总额的话，时段规则有没有真生效是看不出来的（2026-11-12 用户实测的坑）。
+  function costBreakdown(k) {
+    var parts = [];
+    if (!k.ruleReady) parts.push('未配置时段规则');
+    parts.push('高峰 ' + fmtInt(k.peakCalls) + ' 次 ' + fmtCost(k.peakCost));
+    parts.push('空闲 ' + fmtInt(k.idleCalls) + ' 次 ' + fmtCost(k.idleCost));
+    if (!k.priced) parts.push('有 ' + fmtInt(k.unpricedCalls) + ' 次未配单价');
+    return parts.join(' · ');
+  }
+
   function renderSummary(ctx, d) {
     var k = d.kpi || {};
     var cards = [
@@ -502,8 +515,10 @@
         // 未配单价且一分钱都算不出来：直接写「未配单价」，写 ¥0 会让人误以为免费
         label: '估算花费',
         val: (!k.priced && !k.cost) ? '未配单价' : (k.priced ? fmtCost(k.cost) : fmtCost(k.cost) + '+'),
-        sub: k.priced ? '按调用时段计价' : ('按调用时段计价 · 有 ' + fmtInt(k.unpricedCalls) + ' 次未配单价'),
-        title: '模型调用的估算花费：未命中输入 + 缓存读写 + 输出各自按单价计，按每次调用发生的时间判定峰值/空闲价；不代表账单',
+        // 分时段分解：只写总额看不出时段规则有没有生效，这里把两档的次数与金额分开展示
+        sub: costBreakdown(k),
+        title: '模型调用的估算花费：未命中输入 + 缓存读写 + 输出各自按单价计，按每次调用发生的时间与' +
+          '该模型的时段规则判定峰值/空闲价；不代表账单',
       },
       {
         // 总花费 = 模型（token）+ 搜索（按次），两边的口径完全不同，必须分开注明
@@ -924,33 +939,268 @@
     }
   }
 
-  /* ---------- 单价与倍率 ---------- */
+  /* ---------- 单价与时段规则（用户手动配置：程序不内置任何模型价） ---------- */
+
+  var DAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
+
+  // parseWindow 后端口径 "HH:MM-HH:MM" → {from, to}（脏值返回 null，保存时丢掉）
+  function parseWindow(raw) {
+    var p = String(raw || '').split('-');
+    if (p.length !== 2) return null;
+    var a = String(p[0]).trim();
+    var b = String(p[1]).trim();
+    if (!/^\d{1,2}:\d{2}$/.test(a) || !/^\d{1,2}:\d{2}$/.test(b)) return null;
+    return { from: normTime(a), to: normTime(b) };
+  }
+
+  function normTime(s) {
+    var p = String(s || '').split(':');
+    var h = parseInt(p[0], 10);
+    var m = parseInt(p[1], 10);
+    if (!isFinite(h) || !isFinite(m)) return '';
+    return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2);
+  }
+
+  // rowState 后端一行价表 → 页面行态（规则字段一律给数组，前端不用判 null）
+  function rowState(m) {
+    var numOf = function (v) { return typeof v === 'number' && isFinite(v) ? v : 0; };
+    var wins = [];
+    (m && m.peakWindows ? m.peakWindows : []).forEach(function (w) {
+      var pw = parseWindow(w);
+      if (pw) wins.push(pw);
+    });
+    return {
+      id: m && m.id ? m.id : '',
+      input: numOf(m && m.input),
+      output: numOf(m && m.output),
+      cacheRead: numOf(m && m.cacheRead),
+      cacheWrite: numOf(m && m.cacheWrite),
+      days: m && m.peakDays ? m.peakDays.slice() : [],
+      windows: wins,
+      holidays: m && m.holidays ? m.holidays.slice() : [],
+      idle: m && m.idleFactor > 0 && m.idleFactor < 1 ? m.idleFactor : 1,
+      expanded: false,
+    };
+  }
+
+  // daysLabel 星期多选 → 人话（不勾＝每天，与后端口径一致）
+  function daysLabel(days) {
+    if (!days || !days.length) return '每天';
+    var sorted = days.slice().sort();
+    var key = sorted.join(',');
+    if (key === '1,2,3,4,5') return '周一至周五';
+    if (key === '0,6') return '周末';
+    return '周' + sorted.map(function (d) { return DAY_NAMES[d]; }).join('、');
+  }
+
+  // ruleSummary 一行规则的摘要：**没配时段就明说**，别让人以为空闲价在生效
+  function ruleSummary(row) {
+    if (!row.windows.length) return '未配置时段规则（全按高峰价）';
+    var parts = [daysLabel(row.days),
+      row.windows.map(function (w) { return w.from + '–' + w.to; }).join('、')];
+    parts.push(row.idle > 0 && row.idle < 1 ? '空闲 ×' + row.idle : '不分时段');
+    if (row.holidays.length) parts.push('节假日 ' + row.holidays.length + ' 天');
+    return parts.join(' · ');
+  }
+
+  function copyRule(from, to) {
+    to.days = from.days.slice();
+    to.windows = from.windows.map(function (w) { return { from: w.from, to: w.to }; });
+    to.holidays = from.holidays.slice();
+    to.idle = from.idle;
+  }
+
+  // fillRuleBox 渲染一条规则的编辑器（增删时段/节日后整块重建，价格输入不受影响）
+  function fillRuleBox(box, row, api) {
+    box.innerHTML = '';
+    var rebuild = api.rebuild;
+
+    // 高峰星期
+    var lineDays = el('div', 'us-rule-line');
+    lineDays.appendChild(el('span', 'us-rule-label', '高峰星期'));
+    for (var d = 0; d < 7; d++) {
+      (function (day) {
+        var lab = el('label', 'us-day');
+        var cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = row.days.indexOf(day) >= 0;
+        cb.onchange = function () {
+          var at = row.days.indexOf(day);
+          if (cb.checked && at < 0) row.days.push(day);
+          if (!cb.checked && at >= 0) row.days.splice(at, 1);
+          api.refresh();
+        };
+        lab.appendChild(cb);
+        lab.appendChild(el('span', '', '周' + DAY_NAMES[day]));
+        lineDays.appendChild(lab);
+      })(d);
+    }
+    lineDays.appendChild(el('span', 'us-note', '都不勾＝每天'));
+    box.appendChild(lineDays);
+
+    // 高峰时段（可多个；起止用时分选择器，跨天如 22:00 至 06:00）
+    var lineWin = el('div', 'us-rule-line');
+    lineWin.appendChild(el('span', 'us-rule-label', '高峰时段'));
+    var winList = el('div', 'us-rule-list');
+    row.windows.forEach(function (w, idx) {
+      var item = el('div', 'us-rule-item');
+      var from = el('input', 'us-time');
+      from.type = 'time';
+      from.value = w.from;
+      from.onchange = function () { row.windows[idx].from = normTime(from.value); api.refresh(); };
+      var to = el('input', 'us-time');
+      to.type = 'time';
+      to.value = w.to;
+      to.onchange = function () { row.windows[idx].to = normTime(to.value); api.refresh(); };
+      var del = el('button', 'us-btn tiny', '删除');
+      del.type = 'button';
+      del.onclick = function () { row.windows.splice(idx, 1); rebuild(); api.refresh(); };
+      item.appendChild(from);
+      item.appendChild(el('span', 'us-sep', '至'));
+      item.appendChild(to);
+      item.appendChild(del);
+      winList.appendChild(item);
+    });
+    if (!row.windows.length) {
+      winList.appendChild(el('span', 'us-note', '一个时段都没配＝不分时段'));
+    }
+    var addWin = el('button', 'us-btn tiny', '添加时段');
+    addWin.type = 'button';
+    addWin.onclick = function () { row.windows.push({ from: '09:00', to: '12:00' }); rebuild(); api.refresh(); };
+    winList.appendChild(addWin);
+    lineWin.appendChild(winList);
+    box.appendChild(lineWin);
+
+    // 节假日（全天按空闲）：MM-DD 每年重复，YYYY-MM-DD 只此一次
+    var lineHol = el('div', 'us-rule-line');
+    lineHol.appendChild(el('span', 'us-rule-label', '节假日'));
+    var holList = el('div', 'us-rule-list');
+    row.holidays.forEach(function (h, idx) {
+      var item = el('div', 'us-rule-item');
+      var inp = el('input', 'us-holiday');
+      inp.type = 'text';
+      inp.value = h;
+      inp.placeholder = '10-01 或 2026-10-01';
+      inp.onchange = function () { row.holidays[idx] = inp.value.trim(); api.refresh(); };
+      var del = el('button', 'us-btn tiny', '删除');
+      del.type = 'button';
+      del.onclick = function () { row.holidays.splice(idx, 1); rebuild(); api.refresh(); };
+      item.appendChild(inp);
+      item.appendChild(del);
+      holList.appendChild(item);
+    });
+    var addHol = el('button', 'us-btn tiny', '添加节假日');
+    addHol.type = 'button';
+    addHol.onclick = function () { row.holidays.push(''); rebuild(); api.refresh(); };
+    holList.appendChild(addHol);
+    lineHol.appendChild(holList);
+    box.appendChild(lineHol);
+
+    // 空闲折扣
+    var lineIdle = el('div', 'us-rule-line');
+    lineIdle.appendChild(el('span', 'us-rule-label', '空闲折扣'));
+    var idleInp = el('input', 'us-idle');
+    idleInp.type = 'number';
+    idleInp.min = '0';
+    idleInp.max = '1';
+    idleInp.step = '0.05';
+    idleInp.value = String(row.idle);
+    idleInp.oninput = function () {
+      var v = parseFloat(idleInp.value);
+      // 只认 (0,1)：1 与非法值都当「不分时段」（与后端 normalize 同口径）
+      if (isFinite(v) && v > 0 && v < 1) { row.idle = v; api.refresh(); }
+    };
+    idleInp.onchange = function () {
+      var v = parseFloat(idleInp.value);
+      row.idle = isFinite(v) && v > 0 && v < 1 ? v : 1;
+      idleInp.value = String(row.idle);
+      api.refresh();
+    };
+    lineIdle.appendChild(idleInp);
+    lineIdle.appendChild(el('span', 'us-note', '空闲时段 = 峰值价 × 折扣；1＝不分时段，0.5＝半价'));
+    box.appendChild(lineIdle);
+
+    // 复制规则到其它模型（配好一个，其余一键同步，不必逐个重配）
+    var lineCopy = el('div', 'us-rule-line');
+    lineCopy.appendChild(el('span', 'us-rule-label', '复制规则'));
+    var sel = el('select');
+    var others = api.rows.filter(function (r) { return r !== row; });
+    if (!others.length) {
+      var only = el('option', '', '（没有其它模型）');
+      only.value = '';
+      sel.appendChild(only);
+      sel.disabled = true;
+    }
+    others.forEach(function (r) {
+      var o = el('option', '', r.id || '（未填 id 的行）');
+      o.value = String(api.rows.indexOf(r));
+      sel.appendChild(o);
+    });
+    var btnCopy = el('button', 'us-btn tiny', '复制');
+    btnCopy.type = 'button';
+    btnCopy.onclick = function () {
+      var tgt = api.rows[parseInt(sel.value, 10)];
+      if (!tgt) return;
+      copyRule(row, tgt);
+      if (tgt.rebuildRule) tgt.rebuildRule();
+      api.refresh();
+      api.status('已把时段规则复制到 ' + (tgt.id || '目标行'), false);
+    };
+    var btnCopyAll = el('button', 'us-btn tiny', '复制到全部');
+    btnCopyAll.type = 'button';
+    btnCopyAll.onclick = function () {
+      var n = 0;
+      api.rows.forEach(function (r) {
+        if (r === row) return;
+        copyRule(row, r);
+        if (r.rebuildRule) r.rebuildRule();
+        n++;
+      });
+      api.refresh();
+      api.status(n ? ('已把时段规则复制到其它 ' + n + ' 个模型') : '没有其它模型可复制', !n);
+    };
+    lineCopy.appendChild(sel);
+    lineCopy.appendChild(btnCopy);
+    lineCopy.appendChild(btnCopyAll);
+    box.appendChild(lineCopy);
+
+    box.appendChild(el('p', 'us-note',
+      '时段按「调用发生的时刻」判定（改规则后历史数据按新规则重算）：高峰星期不勾＝每天；' +
+      '时段可配多个，跨天写 22:00 至 06:00（凌晨那段按调用当天的星期算）；' +
+      '节假日的 MM-DD 每年重复、YYYY-MM-DD 只此一年，节假日当天全天按空闲；' +
+      '时段一个都不配＝不分时段（全天按高峰价）。'));
+  }
 
   function renderPricing(ctx, p) {
     var grid = ctx.priceGrid;
     grid.innerHTML = '';
 
-    // 模型价表
+    var rows = []; // 行态（价格、规则都在这；DOM 只是它的投影）
+
     var head = el('div', 'us-filters');
-    head.appendChild(el('span', 'us-note', '模型基础价'));
-    var btnSave = el('button', 'us-btn primary', '保存单价与倍率');
+    head.appendChild(el('span', 'us-note', '模型单价（元 / 百万 tokens，填峰值价）与时段规则'));
+    var btnSave = el('button', 'us-btn primary', '保存单价与规则');
     btnSave.type = 'button';
     var btnAdd = el('button', 'us-btn', '新增模型');
     btnAdd.type = 'button';
-    var btnDefaults = el('button', 'us-btn', '恢复内置价');
-    btnDefaults.type = 'button';
-    btnDefaults.title = '把内置单价（含 DeepSeek 官方峰值价与空闲半价）填进表格；不会立刻保存，确认后点「保存单价与倍率」生效';
+    var btnFill = el('button', 'us-btn', '从渠道模型添加空行');
+    btnFill.type = 'button';
+    btnFill.title = '把当前各渠道已配的模型 id 列成空行（不填价格、不配规则）；逐行填价后保存即生效';
     head.appendChild(btnSave);
     head.appendChild(btnAdd);
-    head.appendChild(btnDefaults);
+    head.appendChild(btnFill);
     head.style.justifyContent = 'flex-start';
     grid.appendChild(head);
+
+    // 顶部提示：价表空 → 先说「未配单价」怎么办；有价没规则 → 说明现在全按高峰价
+    var warnBox = el('div');
+    grid.appendChild(warnBox);
 
     var wrapT = el('div', 'us-table-wrap');
     var t = el('table', 'us-table us-price-table');
     var thead = el('thead');
     var htr = el('tr');
-    ['模型 id', '输入', '输出', '缓存读取', '缓存写入', '空闲折扣', ''].forEach(function (h) {
+    ['模型 id', '输入', '输出', '缓存读取', '缓存写入', '时段规则', ''].forEach(function (h) {
       htr.appendChild(el('th', h === '模型 id' ? 'l' : '', h));
     });
     thead.appendChild(htr);
@@ -960,94 +1210,200 @@
     wrapT.appendChild(t);
     grid.appendChild(wrapT);
 
-    var draft = {}; // model id → {input, output, cacheRead, cacheWrite, idleFactor}
-    (p.models || []).forEach(function (m) {
-      draft[m.id] = {
-        input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite,
-        idleFactor: m.idleFactor != null ? m.idleFactor : 1,
-      };
-    });
+    function refreshWarn() {
+      warnBox.innerHTML = '';
+      if (!rows.length) {
+        warnBox.appendChild(el('p', 'us-note us-warn',
+          '价表是空的：程序不内置任何模型单价。点「从渠道模型添加空行」把当前渠道的模型列出来，' +
+          '再逐行填单价——没填价之前，费用一律显示「未配单价」（不会用任何兜底价）。'));
+        return;
+      }
+      var withRule = rows.filter(function (r) { return r.windows.length > 0; }).length;
+      if (!withRule) {
+        warnBox.appendChild(el('p', 'us-note us-warn',
+          '未配置时段规则：所有调用都按高峰价计费。点某行的「规则」展开，配高峰星期/时段/节假日与空闲折扣' +
+          '（配好一个再「复制到全部」，不用逐个配）。'));
+      } else if (withRule < rows.length) {
+        warnBox.appendChild(el('p', 'us-note',
+          '还有 ' + (rows.length - withRule) + ' 个模型没配时段规则，它们按不分时段（全按高峰价）计费。'));
+      }
+    }
 
-    var mkRow = function (id, vals) {
+    // buildRuleRow 展开行：价格输入只在主行，规则整块重建不影响它们
+    function buildRuleRow(row) {
+      var tr = el('tr', 'us-rule-row');
+      tr.style.display = row.expanded ? '' : 'none';
+      var td = el('td');
+      td.colSpan = 7;
+      var box = el('div', 'us-rule');
+      td.appendChild(box);
+      tr.appendChild(td);
+      var api = {
+        rows: rows,
+        status: function (msg, isErr) { setStatus(ctx.statusLine, msg, isErr); },
+        refresh: function () { if (row.refreshSummary) row.refreshSummary(); refreshWarn(); },
+        rebuild: function () { fillRuleBox(box, row, api); },
+      };
+      fillRuleBox(box, row, api);
+      return tr;
+    }
+
+    // mountRow 把一行行态挂成 DOM（再挂它的规则展开行）
+    function mountRow(row) {
       var tr = el('tr');
       var idCell = el('td', 'l');
       var idIn = el('input');
       idIn.type = 'text';
-      idIn.value = id;
+      idIn.value = row.id;
       idIn.dataset.kind = 'id';
+      idIn.oninput = function () { row.id = idIn.value; refreshWarn(); };
       idCell.appendChild(idIn);
       tr.appendChild(idCell);
-      ['input', 'output', 'cacheRead', 'cacheWrite', 'idleFactor'].forEach(function (k) {
+      [['input', '峰值输入单价（未命中部分，元/百万 tokens）'],
+        ['output', '峰值输出单价'],
+        ['cacheRead', '缓存读取单价（命中部分；留 0 表示不计费）'],
+        ['cacheWrite', '缓存写入单价（Anthropic 的 cache_creation）']].forEach(function (pair) {
+        var k = pair[0];
         var td = el('td');
         var inp = el('input');
         inp.type = 'number';
-        inp.step = k === 'idleFactor' ? '0.05' : '0.01';
+        inp.step = '0.01';
         inp.min = '0';
-        if (k === 'idleFactor') inp.max = '1';
-        inp.value = vals && vals[k] != null ? String(vals[k]) : (k === 'idleFactor' ? '1' : '0');
+        inp.value = String(row[k]);
         inp.dataset.kind = k;
-        inp.title = {
-          input: '峰值输入单价（未命中部分，元/百万 tokens）',
-          output: '峰值输出单价',
-          cacheRead: '缓存读取单价（命中部分）',
-          cacheWrite: '缓存写入单价（Anthropic 的 cache_creation）',
-          idleFactor: '空闲折扣：1＝不分时段，0.5＝空闲时段半价（DeepSeek 官方口径）。高峰＝北京时间周一至周五 9:00–12:00、14:00–18:00（法定节假日除外）',
-        }[k];
+        inp.title = pair[1];
+        inp.oninput = function () {
+          var v = parseFloat(inp.value);
+          row[k] = isFinite(v) && v >= 0 ? v : 0;
+        };
+        inp.onchange = function () {
+          var v = parseFloat(inp.value);
+          row[k] = isFinite(v) && v >= 0 ? v : 0;
+          inp.value = String(row[k]); // 失焦时归整（输入过程中不改写，免得抢光标）
+        };
         td.appendChild(inp);
         tr.appendChild(td);
       });
+      var sumCell = el('td', 'us-rule-sum');
+      var sumText = el('span', 'us-rule-text');
+      var btnRule = el('button', 'us-btn tiny', '规则');
+      btnRule.type = 'button';
+      sumCell.appendChild(sumText);
+      sumCell.appendChild(btnRule);      row.refreshSummary = function () {
+        sumText.textContent = ruleSummary(row);
+        sumCell.className = 'us-rule-sum' + (row.windows.length ? '' : ' warn');
+      };
+      row.refreshSummary();
+      tr.appendChild(sumCell);
       var delCell = el('td');
-      var del = el('button', 'us-btn', '删除');
+      var del = el('button', 'us-btn tiny', '删除');
       del.type = 'button';
-      del.onclick = function () { tr.remove(); };
+      del.onclick = function () {
+        var at = rows.indexOf(row);
+        if (at >= 0) rows.splice(at, 1);
+        tr.remove();
+        ruleTr.remove();
+        refreshWarn();
+      };
       delCell.appendChild(del);
       tr.appendChild(delCell);
+
+      var ruleTr = buildRuleRow(row);
+      // 规则块整体重建（增删时段/节假日、复制规则后调）：展开行一并换新
+      row.rebuildRule = function () {
+        var next = buildRuleRow(row);
+        ruleTr.replaceWith(next);
+        ruleTr = next;
+      };
+      btnRule.onclick = function () {
+        row.expanded = !row.expanded;
+        // 展开时重建一次：规则里的「复制规则到其它模型」要列出**当前**全部行
+        //（本行挂载时后面的行可能还没挂上，列表会停在挂载那一刻）
+        if (row.expanded) row.rebuildRule();
+        ruleTr.style.display = row.expanded ? '' : 'none';
+        btnRule.textContent = row.expanded ? '收起' : '规则';
+      };
       tb.appendChild(tr);
-      return tr;
-    };
+      tb.appendChild(ruleTr);
+      return row;
+    }
 
-    // 已有的模型（按 id 排序由后端给出）逐行建表
-    Object.keys(draft).sort().forEach(function (id) { mkRow(id, draft[id]); });
+    function addRow(vals) {
+      var row = rowState(vals || null);
+      rows.push(row);
+      mountRow(row);
+      refreshWarn();
+      return row;
+    }
 
-    // 恢复内置价：只填表不保存（用户确认后点保存），避免一按就把自定义价覆盖掉
-    var applyModels = function (list) {
-      tb.innerHTML = '';
-      (list || []).forEach(function (m) {
-        mkRow(m.id, {
-          input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite,
-          idleFactor: m.idleFactor != null ? m.idleFactor : 1,
-        });
-      });
-    };
-    btnDefaults.onclick = function () {
-      applyModels(p.defaults || []);
-      setStatus(ctx.statusLine, '已填入内置单价（含峰值价与空闲折扣），点「保存单价与倍率」后生效', false);
-    };
+    // 已有价表逐行挂上
+    (p.models || []).forEach(function (m) {
+      var row = rowState(m);
+      rows.push(row);
+      mountRow(row);
+    });
+    refreshWarn();
 
     btnAdd.onclick = function () {
-      var tr = mkRow('', null);
-      var first = tr.querySelector('input[data-kind="id"]');
-      if (first) first.focus();
-      tb.appendChild(tr); // 新增行排到最后
+      var row = addRow(null);
+      var inputs = tb.querySelectorAll('tr:last-child input[data-kind="id"]');
+      if (inputs.length) inputs[0].focus();
+      return row;
+    };
+
+    btnFill.onclick = function () {
+      // 从渠道模型添加空行：只落地模型 id，价格与规则一律留空/不配（用户口径）
+      var have = {};
+      rows.forEach(function (r) { if (r.id) have[r.id] = true; });
+      var added = 0;
+      (p.providers || []).forEach(function (pv) {
+        (pv.models || []).forEach(function (id) {
+          if (!id || have[id]) return;
+          have[id] = true;
+          addRow({ id: id });
+          added++;
+        });
+      });
+      setStatus(ctx.statusLine, added
+        ? ('已添加 ' + added + ' 个模型空行（价格与规则都没填，逐行填价后保存）')
+        : '当前渠道的模型都已在价表里', !added);
     };
 
     var collect = function () {
       var models = [];
-      tb.querySelectorAll('tr').forEach(function (tr) {
-        var ins = tr.querySelectorAll('input');
-        if (!ins.length) return;
-        var id = (ins[0].value || '').trim();
+      var badWin = '';
+      var badHol = '';
+      rows.forEach(function (r) {
+        var id = String(r.id || '').trim();
         if (!id) return;
-        var num = function (idx) {
-          var v = parseFloat(ins[idx].value);
-          return isFinite(v) && v >= 0 ? v : 0;
-        };
-        models.push({ id: id, input: num(1), output: num(2), cacheRead: num(3), cacheWrite: num(4),
-          idleFactor: num(5) });
+        var wins = [];
+        r.windows.forEach(function (w) {
+          if (!w.from || !w.to) { badWin = id; return; }
+          wins.push(w.from + '-' + w.to);
+        });
+        var hols = [];
+        r.holidays.forEach(function (h) {
+          h = String(h || '').trim();
+          if (!h) return;
+          if (!/^\d{2}-\d{2}$/.test(h) && !/^\d{4}-\d{2}-\d{2}$/.test(h)) { badHol = id; return; }
+          hols.push(h);
+        });
+        models.push({
+          id: id,
+          input: Number(r.input) || 0,
+          output: Number(r.output) || 0,
+          cacheRead: Number(r.cacheRead) || 0,
+          cacheWrite: Number(r.cacheWrite) || 0,
+          peakDays: r.days.slice().sort(),
+          peakWindows: wins,
+          holidays: hols,
+          idleFactor: r.idle,
+        });
       });
-      return models;
+      return { models: models, badWin: badWin, badHol: badHol };
     };
 
+    // ---- 渠道倍率 ----
     var mulBox = el('div', 'us-price-grid');
     mulBox.appendChild(el('h4', '', '渠道倍率'));
     var mulList = el('div', 'us-mul-list');
@@ -1070,10 +1426,9 @@
     mulBox.appendChild(mulList);
     mulBox.appendChild(el('p', 'us-note',
       '倍率作用于该渠道的全部模型：如中转站按官方价 1.5 倍计费，填 1.5；不填即 1.0。'));
-    // 倍率列表很长时表头的保存按钮要滚回去才看得到：底部再放一个同款
-    var btnSave2 = el('button', 'us-btn primary', '保存单价与倍率');
-    btnSave2.type = 'button';
     var saveBar = el('div', 'us-filters');
+    var btnSave2 = el('button', 'us-btn primary', '保存单价与规则');
+    btnSave2.type = 'button';
     saveBar.appendChild(btnSave2);
     mulBox.appendChild(saveBar);
     grid.appendChild(mulBox);
@@ -1108,7 +1463,15 @@
     grid.appendChild(searchBox);
 
     var doSave = function () {
-      var models = collect();
+      var got = collect();
+      if (got.badWin) {
+        setStatus(ctx.statusLine, '「' + got.badWin + '」有没填完的时段（起止都要选），先补全再保存', true);
+        return;
+      }
+      if (got.badHol) {
+        setStatus(ctx.statusLine, '「' + got.badHol + '」的节假日格式不对：写 MM-DD（每年）或 YYYY-MM-DD（一次性）', true);
+        return;
+      }
       var multipliers = {};
       mulList.querySelectorAll('input[data-provider]').forEach(function (inp) {
         var v = parseFloat(inp.value);
@@ -1119,15 +1482,19 @@
         var v = parseFloat(inp.value);
         if (isFinite(v) && v >= 0) searchPrices[inp.dataset.search] = v;
       });
+      var unpriced = got.models.filter(function (m) {
+        return !(m.input || m.output || m.cacheRead || m.cacheWrite);
+      }).length;
       setStatus(ctx.statusLine, '保存中…', false);
-      apiPost('/api/usage/pricing', { models: models, multipliers: multipliers, searchPrices: searchPrices })
+      apiPost('/api/usage/pricing', { models: got.models, multipliers: multipliers, searchPrices: searchPrices })
         .then(function (np) {
           state.pricing = np;
           renderPricing(ctx, np);
-          setStatus(ctx.statusLine, '已保存（' + models.length + ' 个模型单价、' +
+          setStatus(ctx.statusLine, '已保存（' + got.models.length + ' 个模型单价、' +
             Object.keys(multipliers).length + ' 个渠道倍率、' +
-            Object.keys(searchPrices).length + ' 个搜索单价）', false);
-          refreshData(ctx); // 改了价，费用与页面立刻按新价重算
+            Object.keys(searchPrices).length + ' 个搜索单价' +
+            (unpriced ? '；其中 ' + unpriced + ' 个模型还没填价，费用显示「未配单价」' : '') + '）', false);
+          refreshData(ctx); // 改了价或规则，费用与页面立刻按新口径重算
         }).catch(function (e) {
           setStatus(ctx.statusLine, '保存失败：' + (e && e.message ? e.message : e), true);
         });

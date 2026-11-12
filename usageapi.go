@@ -41,6 +41,13 @@ type usageKPI struct {
 	SearchCalls   int64   `json:"searchCalls"`   // 搜索/抽取的供应商尝试次数
 	Priced        bool    `json:"priced"`        // 是否全部模型都配了单价
 	UnpricedCalls int64   `json:"unpricedCalls"` // 未配单价的调用数
+	// 分时段分解（页面「高峰 X 次 ¥A + 空闲 Y 次 ¥B」）：调用按各自时段价的档位累计，
+	// 用来核对时段规则是否真的生效——只看总额看不出这件事。
+	PeakCalls int64   `json:"peakCalls"`
+	PeakCost  float64 `json:"peakCost"`
+	IdleCalls int64   `json:"idleCalls"`
+	IdleCost  float64 `json:"idleCost"`
+	RuleReady bool    `json:"ruleReady"` // 是否至少有一个模型配了时段规则（否则「未配置时段规则」）
 }
 
 // usageDailyPoint 是趋势图的一个点（天）。
@@ -93,14 +100,17 @@ type usageProviderView struct {
 	Name       string                 `json:"name"`
 	Multiplier float64                `json:"multiplier"`
 	Keys       []usageProviderKeyView `json:"keys"`
+	// Models 该渠道已配的模型 id（去重）：页面「从渠道模型添加空行」按它加行，
+	// 只加空行不填价（用户口径：程序不内置任何单价）。
+	Models []string `json:"models"`
 }
 
 type usagePricingResp struct {
 	Models    []usagePricingModel    `json:"models"`
-	Defaults  []usagePricingModel    `json:"defaults"` // 内置价表（页面「恢复内置价」用）
 	Providers []usageProviderView    `json:"providers"`
 	Search    []usageSearchPriceView `json:"search"` // 搜索/抽取供应商的按次价
 	Note      string                 `json:"note"`
+	RuleReady bool                   `json:"ruleReady"` // 是否至少一个模型配了时段规则
 }
 
 // usageSearchPriceView 是「搜索单价」配置里的一行：一个搜索供应商 + 它的元/次价。
@@ -158,13 +168,14 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 	resp := usageSummaryResp{Enabled: a.usageEnabled(), From: f.From, To: f.To,
 		Daily: []usageDailyPoint{}, ByModel: []usageModelStat{}}
 
-	// 日级：先按天累加 token 与费用（费用逐小时桶按时段价、逐渠道按倍率算），
-	// 再按日期排序成趋势数据
+	// 日级：先按天累加 token 与费用（费用逐**分钟桶**按该模型的时段价、逐渠道按
+	// 倍率算），再按日期排序成趋势数据
 	dayIdx := map[string]*usageDailyPoint{}
 	var kpi usageKPI
 	kpi.Priced = true
+	kpi.RuleReady = pricing.anyRuleConfigured()
 	for _, d := range days {
-		day := usageDayOf(d.HourTS)
+		day := usageDayOf(d.SlotTS)
 		p := dayIdx[day]
 		if p == nil {
 			p = &usageDailyPoint{Day: day, Priced: true}
@@ -176,7 +187,7 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		p.CacheWrite += d.CacheWrite
 		p.Calls += d.Calls
 		p.Errors += d.Errors
-		if cost, ok := pricing.cost(d.Model, d.ProviderID, d.Protocol, d.HourTS, usageTokens{Input: d.Input, Output: d.Output,
+		if cost, _, ok := pricing.cost(d.Model, d.ProviderID, d.Protocol, d.SlotTS, usageTokens{Input: d.Input, Output: d.Output,
 			CacheRead: d.CacheRead, CacheWrite: d.CacheWrite}); ok {
 			p.Cost += cost
 		} else {
@@ -214,9 +225,17 @@ func (a *App) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		s.CacheWrite += m.CacheWrite
 		s.Calls += m.Calls
 		s.Errors += m.Errors
-		if cost, ok := pricing.cost(m.Model, m.ProviderID, m.Protocol, m.HourTS, usageTokens{Input: m.Input, Output: m.Output,
-			CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}); ok {
+		// 分时段分解按桶累计：一个桶（同一分钟）里的调用必然同档，次数与金额都对得上
+		if cost, peak, ok := pricing.cost(m.Model, m.ProviderID, m.Protocol, m.SlotTS,
+			usageTokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}); ok {
 			s.Cost += cost
+			if peak {
+				kpi.PeakCalls += m.Calls
+				kpi.PeakCost += cost
+			} else {
+				kpi.IdleCalls += m.Calls
+				kpi.IdleCost += cost
+			}
 		} else {
 			s.Priced = false
 			kpi.UnpricedCalls += m.Calls
@@ -276,6 +295,9 @@ func (a *App) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	// 渠道名与 Key 备注由后端补上（前端不必再拿配置对一遍）
 	names, labels := a.usageChannelNames()
+	// 这次调用落在高峰还是空闲：按**该模型自己的规则**判定（规则改过，历史明细的
+	// 标记跟着变，与重算出来的金额保持一致）
+	pricing := a.loadUsagePricing()
 	items := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, map[string]any{
@@ -287,7 +309,7 @@ func (a *App) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 			"total": r.Total, "ttftMs": r.TTFTMs, "durationMs": r.DurationMs,
 			"ok": r.OK, "error": r.Error, "stream": r.Stream,
 			// 这次调用命中峰值价还是空闲价（按明细 ts 判定），页面 hover 显示
-			"peak": r.Peak,
+			"peak": pricing.peakAt(r.Model, r.TS),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"total": total, "limit": limit, "offset": offset, "items": items})
@@ -311,18 +333,19 @@ func (a *App) usageChannelNames() (map[string]string, map[string]string) {
 	return names, labels
 }
 
-// ---------- 单价与倍率 ----------
+// ---------- 单价与规则 ----------
 
 func (a *App) usagePricingView() usagePricingResp {
 	p := a.loadUsagePricing()
 	resp := usagePricingResp{
 		Models:    p.modelsSorted(),
-		Defaults:  defaultUsagePricing().modelsSorted(),
 		Providers: []usageProviderView{},
 		Search:    []usageSearchPriceView{},
-		Note: "单价单位：元 / 百万 tokens；费用 = 未命中输入×输入价 + 缓存读取×缓存读价 + " +
-			"缓存写入×缓存写价 + 输出×输出价，再乘渠道倍率。缓存命中的输入不再按输入价重复计费；" +
-			"空闲折扣按时段自动生效（1＝不分时段）。按本地单价估算，不代表账单。",
+		RuleReady: p.anyRuleConfigured(),
+		Note: "单价单位：元 / 百万 tokens，由用户自行填写（程序不内置任何模型价，未填的行按「未配单价」处理）；" +
+			"费用 = 未命中输入×输入价 + 缓存读取×缓存读价 + 缓存写入×缓存写价 + 输出×输出价，再乘渠道倍率。" +
+			"缓存命中的输入不再按输入价重复计费；时段规则按调用发生的时刻判定，未配时段规则＝不分时段（全按高峰价）。" +
+			"按本地单价估算，不代表账单。",
 	}
 	if a.Cfg == nil {
 		return resp
@@ -332,8 +355,19 @@ func (a *App) usagePricingView() usagePricingResp {
 		for _, k := range pv.KeyList() {
 			keys = append(keys, usageProviderKeyView{ID: k.ID, Label: k.Label})
 		}
+		// 已配的模型 id（多 Key 时会重名，去重后给页面「添加空行」用）
+		seen := map[string]bool{}
+		ids := []string{}
+		for _, pm := range pv.AllModels() {
+			id := strings.TrimSpace(pm.Model.ID)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
 		resp.Providers = append(resp.Providers, usageProviderView{
-			ID: pv.ID, Name: pv.Name, Multiplier: p.multiplierOf(pv.ID), Keys: keys,
+			ID: pv.ID, Name: pv.Name, Multiplier: p.multiplierOf(pv.ID), Keys: keys, Models: ids,
 		})
 	}
 	for _, sv := range a.Cfg.SearchProviders {
@@ -372,13 +406,16 @@ func (a *App) handleUsagePricingSet(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "模型「"+id+"」的单价不能是负数")
 			return
 		}
-		// 空闲折扣：1（或不填）＝不分时段；0.5＝官方空闲半价
-		idle := m.IdleFactor
-		if idle <= 0 || idle >= 1 {
-			idle = 0
-		}
+		// 时段规则的脏值在 normalize 里统一丢掉（非法时段/日期不会把计费算歪）；
+		// 这里先按页面交上来的填，折扣的 (0,1) 归一也在 normalize 里做
 		p.Models[id] = modelPrice{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead,
-			CacheWrite: m.CacheWrite, IdleFactor: idle}
+			CacheWrite: m.CacheWrite,
+			usagePeakRule: usagePeakRule{
+				PeakWindows: m.PeakWindows,
+				PeakDays:    m.PeakDays,
+				Holidays:    m.Holidays,
+				IdleFactor:  m.IdleFactor,
+			}}
 	}
 	for id, mul := range body.Multipliers {
 		if mul > 0 {

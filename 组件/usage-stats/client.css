@@ -15,6 +15,8 @@
   font-size: 12px;
   color: var(--text-3);
   line-height: 1.6;
+  /* 设置页正文继承了 nowrap；说明文字必须能折行，否则把容器撑出横向滚动条 */
+  white-space: normal;
 }
 
 .us-note b {
@@ -336,15 +338,38 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 单价与倍率 */
+/* 单价与时段规则 */
 .us-price-grid {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
+/* 单价表用固定表格布局：规则编辑块（colspan 整行）里的时段/按钮不许把表格撑宽，
+   否则右侧「时段规则」与「删除」列会被挤出卡片外 */
+.us-price-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.us-price-table th:nth-child(1) {
+  width: 21%;
+}
+
+.us-price-table th:nth-child(2),
+.us-price-table th:nth-child(3),
+.us-price-table th:nth-child(4),
+.us-price-table th:nth-child(5) {
+  width: 11%;
+}
+
+.us-price-table th:nth-child(7) {
+  width: 44px;
+}
+
 .us-price-table input {
-  width: 72px;
+  width: 100%;
+  max-width: 62px;
   font-family: inherit;
   font-size: 12px;
   padding: 3px 5px;
@@ -355,9 +380,9 @@
   text-align: right;
 }
 
-/* 空闲折扣只填 1 或 0.5，列宽再收一点：6 列的单价格在窄弹层里要放得下 */
-.us-price-table input[data-kind="idleFactor"] {
-  width: 52px;
+.us-price-table th,
+.us-price-table td {
+  padding: 6px 6px;
 }
 
 .us-price-table input:focus {
@@ -367,7 +392,149 @@
 
 .us-price-table td.l input {
   text-align: left;
-  width: 118px;
+  width: 100%;
+  max-width: 130px;
+}
+
+/* 小号按钮：规则里「添加时段/删除/复制」这类行内动作，别把行撑高 */
+.us-btn.tiny {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  border-radius: 6px;
+}
+
+/* 提示级文案：价表为空、未配时段规则这类「你必须知道」的现状 */
+.us-note.us-warn {
+  color: var(--warn, #e8a33d);
+}
+
+/* 规则摘要列：未配置时整格用警示色，眼睛一扫就能看出哪几行还没配。
+   摘要可能很长（星期+多时段+折扣+节假日），允许换行，别把表格撑出卡片外 */
+.us-rule-sum {
+  text-align: left;
+  white-space: normal;
+  max-width: 260px;
+}
+
+.us-rule-sum .us-rule-text {
+  font-size: 11.5px;
+  color: var(--text-2);
+  margin-right: 6px;
+}
+
+.us-rule-sum.warn .us-rule-text {
+  color: var(--warn, #e8a33d);
+}
+
+/* 展开的规则编辑块（整行铺开，跟在价格行下面） */
+.us-rule-row > td {
+  background: var(--chip);
+  padding: 10px 12px;
+}
+
+.us-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  white-space: normal;
+}
+
+.us-rule-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.us-rule-label {
+  flex: 0 0 60px;
+  color: var(--text-3);
+}
+
+.us-rule-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.us-rule-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.us-rule-item .us-sep {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+/* 星期多选：复选框 + 一个字，排一行 */
+.us-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.us-day input {
+  margin: 0;
+}
+
+.us-rule input.us-time {
+  width: 104px;
+  max-width: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.us-rule input.us-idle {
+  width: 62px;
+  max-width: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: right;
+}
+
+.us-rule input.us-holiday {
+  width: 132px;
+  max-width: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.us-rule select {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  max-width: 200px;
+}
+
+.us-rule .us-note {
+  flex-basis: 100%;
 }
 
 .us-mul-list {

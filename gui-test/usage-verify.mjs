@@ -334,7 +334,7 @@ try {
   });
   await sleep(300);
 
-  // ---- U7 单价与倍率：页面里改价，费用立刻按新价重算 ----
+  // ---- U7 单价与时段规则：页面里填价/配规则，费用立刻按新口径重算 ----
   const recList = await api('GET', '/api/usage/records?limit=5');
   const usedModel = ((recList.json.items || [])[0] || {}).model || '';
   const addRes = await read(client, `(() => {
@@ -342,22 +342,28 @@ try {
     const add = [...pane.querySelectorAll('.us-btn')].find((b) => b.textContent === '新增模型');
     if (!add) return 'no-add-btn';
     add.click();
-    const rows = [...pane.querySelectorAll('.us-price-table tbody tr')];
-    const ins = rows[rows.length - 1].querySelectorAll('input');
-    ins[0].value = ${JSON.stringify(usedModel)};
-    ins[1].value = '10'; // 输入 元/M
-    ins[2].value = '40'; // 输出 元/M
-    ins[3].value = '1';  // 缓存读 元/M
-    ins[4].value = '10'; // 缓存写 元/M
-    ins[5].value = '1';  // 空闲折扣（1＝不分时段）
+    const priceRows = [...pane.querySelectorAll('.us-price-table tbody tr')]
+      .filter((r) => r.querySelector('input[data-kind="id"]'));
+    const ins = priceRows[priceRows.length - 1].querySelectorAll('input');
+    // 页面行态由事件驱动（不是读 DOM 值），必须派发 input/change 才生效
+    const set = (n, v) => {
+      n.value = v;
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+      n.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    set(ins[0], ${JSON.stringify(usedModel)});
+    set(ins[1], '10'); // 输入 元/M
+    set(ins[2], '40'); // 输出 元/M
+    set(ins[3], '1');  // 缓存读 元/M
+    set(ins[4], '10'); // 缓存写 元/M
     return ins.length;
   })()`);
-  const clickSave = `[...document.querySelectorAll('#set-pane-component-usage-stats .us-btn')].find((b) => b.textContent === '保存单价与倍率').click()`;
+  const clickSave = `[...document.querySelectorAll('#set-pane-component-usage-stats .us-btn')].find((b) => b.textContent === '保存单价与规则').click()`;
   await read(client, clickSave);
   await sleep(1600);
   const paid = (await api('GET', '/api/usage/summary?date=30d')).json;
   ok('U7 配价后费用立刻可算（含未配单价转已配）',
-    addRes === 6 && paid.kpi.priced === true && paid.kpi.cost > 0,
+    addRes === 5 && paid.kpi.priced === true && paid.kpi.cost > 0,
     'model=' + usedModel + ' cost=' + paid.kpi.cost + ' priced=' + paid.kpi.priced + ' inputs=' + addRes);
   const cost1 = paid.kpi.cost;
 
@@ -372,6 +378,34 @@ try {
   const ratio = cost1 > 0 ? paid2.kpi.cost / cost1 : 0;
   ok('U8 渠道倍率生效（×2 费用翻倍）', Math.abs(ratio - 2) < 0.02,
     'cost ' + cost1 + ' → ' + paid2.kpi.cost + '（×' + ratio.toFixed(3) + '）');
+
+  // ---- U8b 时段规则：配成「每天 03:00-03:01 高峰 + 空闲折扣 0.5」，绝大多数调用
+  // 落在窗口外 → 费用应当约减半。这条看护「规则真的接进了计费」，而不是只存进了配置。
+  const ruleRes = await read(client, `(() => {
+    const pane = document.getElementById('set-pane-component-usage-stats');
+    const priceRows = [...pane.querySelectorAll('.us-price-table tbody tr')]
+      .filter((r) => r.querySelector('input[data-kind="id"]'));
+    const row = priceRows.find((r) => r.querySelector('input[data-kind="id"]').value === ${JSON.stringify(usedModel)});
+    if (!row) return 'no-row';
+    [...row.querySelectorAll('.us-btn')].find((b) => b.textContent === '规则').click();
+    [...row.nextElementSibling.querySelectorAll('.us-btn')].find((b) => b.textContent === '添加时段').click();
+    // 「添加时段」会整块重建规则行，元素要重新取
+    const ruleRow = row.nextElementSibling;
+    const times = ruleRow.querySelectorAll('input.us-time');
+    const set = (n, v) => { n.value = v; n.dispatchEvent(new Event('change', { bubbles: true })); };
+    set(times[0], '03:00');
+    set(times[1], '03:01');
+    set(ruleRow.querySelector('input.us-idle'), '0.5');
+    return ruleRow.querySelector('.us-rule-sum') || 'edited';
+  })()`);
+  await read(client, clickSave);
+  await sleep(1600);
+  const paid3 = (await api('GET', '/api/usage/summary?date=30d')).json;
+  const ruleRatio = paid2.kpi.cost > 0 ? paid3.kpi.cost / paid2.kpi.cost : 0;
+  ok('U8b 时段规则生效（空闲折扣 0.5 → 费用约减半，且高峰/空闲分解都有数）',
+    Math.abs(ruleRatio - 0.5) < 0.15 && (paid3.kpi.idleCalls > 0 || paid3.kpi.peakCalls > 0),
+    'cost ' + paid2.kpi.cost + ' → ' + paid3.kpi.cost + '（×' + ruleRatio.toFixed(3) + '）' +
+    ' 高峰 ' + paid3.kpi.peakCalls + ' 次 / 空闲 ' + paid3.kpi.idleCalls + ' 次');
 
   // ---- U9 按日期范围清理：二次确认（取消不删、确认才删） ----
   const beforeClean = (await api('GET', '/api/usage/records?limit=1')).json.total;

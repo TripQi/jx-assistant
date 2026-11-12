@@ -383,7 +383,7 @@ func (f usageFilter) where() (string, []any) {
 }
 
 // whereTokens 只取模型调用：token 合计与模型占比不能被搜索/抽取明细污染
-//（它们没有 token，只按次计费）。
+// （它们没有 token，只按次计费）。
 func (f usageFilter) whereTokens() (string, []any) {
 	conds, args := f.baseConds()
 	conds = append(conds, "kind IN ('', 'llm')")
@@ -397,15 +397,16 @@ func (f usageFilter) whereKind(kind string) (string, []any) {
 	return whereClause(conds, append(args, kind))
 }
 
-// usageDayGroupRow 是「每日用量趋势」的原始聚合：按 (小时, 模型, 协议, 渠道) 分组
+// usageDayGroupRow 是「每日用量趋势」的原始聚合：按 (分钟, 模型, 协议, 渠道) 分组
 // —— 天级费用必须逐渠道按各自倍率、逐时段按峰值/空闲价算完再合并，SQL 里算不了
-//（价格、节假日表都是 Go 侧的配置）。
+// （价格、时段规则都是 Go 侧的配置）。
 //
-// 为什么精确到小时而不是天：官方的高峰/空闲时段边界都落在整点，按小时分桶与逐条
-// 按 ts 判定完全等价；而费用必须按**调用发生的时段**算，不能按「现在」——否则
-// 历史数据重算出来的钱是错的。
+// 为什么精确到分钟而不是天或小时：时段规则由用户配（可以是 09:30–11:45 这种非整点），
+// 费用必须按**调用发生的时刻**算，不能按「现在」——否则历史数据重算出来的钱是错的；
+// 也不能粗到小时，否则跨非整点边界的那一小时会整小时按一档计价。分钟桶里所有调用
+// 的时刻落在同一分钟内，判定结果必然相同，与逐条按 ts 判定完全等价。
 type usageDayGroupRow struct {
-	HourTS     string `json:"hourTs"` // 'YYYY-MM-DD HH'（时段判定的最小粒度）
+	SlotTS     string `json:"slotTs"` // 'YYYY-MM-DD HH:MM'（时段判定的最小粒度）
 	Model      string `json:"model"`
 	Protocol   string `json:"protocol"`
 	ProviderID string `json:"providerId"`
@@ -417,11 +418,11 @@ type usageDayGroupRow struct {
 	Errors     int64  `json:"errors"`
 }
 
-// usageModelRow 是「按模型消耗统计」的一行原始聚合：按 (小时, 模型, 协议, 渠道)
-// 分组——渠道必须单独出来（费用按各自渠道倍率算），小时也必须单独出来（费用按
-// 各自时段价算）。
+// usageModelRow 是「按模型消耗统计」的一行原始聚合：按 (分钟, 模型, 协议, 渠道)
+// 分组——渠道必须单独出来（费用按各自渠道倍率算），时刻也必须单独出来（费用按
+// 各自时段的价算）。
 type usageModelRow struct {
-	HourTS     string `json:"hourTs"`
+	SlotTS     string `json:"slotTs"`
 	Model      string `json:"model"`
 	Protocol   string `json:"protocol"`
 	ProviderID string `json:"providerId"`
@@ -433,23 +434,23 @@ type usageModelRow struct {
 	Errors     int64  `json:"errors"`
 }
 
-// usageDayOf 从小时桶取日期（'YYYY-MM-DD HH' → 'YYYY-MM-DD'）。
-func usageDayOf(hourTS string) string {
-	if len(hourTS) >= 10 {
-		return hourTS[:10]
+// usageDayOf 从分钟桶取日期（'YYYY-MM-DD HH:MM' → 'YYYY-MM-DD'）。
+func usageDayOf(slotTS string) string {
+	if len(slotTS) >= 10 {
+		return slotTS[:10]
 	}
-	return hourTS
+	return slotTS
 }
 
-// UsageDailyGroups 按 (小时, 模型, 协议, 渠道) 聚合（升序）。调用方在 Go 侧合并成
+// UsageDailyGroups 按 (分钟, 模型, 协议, 渠道) 聚合（升序）。调用方在 Go 侧合并成
 // 天级数据，并逐条按时段价、逐渠道按倍率算钱。
 func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
 	where, args := f.whereTokens()
-	q := `SELECT substr(ts,1,13) AS hour_ts, model, protocol, provider_id,
+	q := `SELECT substr(ts,1,16) AS slot_ts, model, protocol, provider_id,
 			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 			COUNT(*), COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0)
-		FROM usage_events` + where + ` GROUP BY hour_ts, model, protocol, provider_id ORDER BY hour_ts`
+		FROM usage_events` + where + ` GROUP BY slot_ts, model, protocol, provider_id ORDER BY slot_ts`
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(q, args...)
@@ -460,7 +461,7 @@ func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
 	out := []usageDayGroupRow{}
 	for rows.Next() {
 		var r usageDayGroupRow
-		if err := rows.Scan(&r.HourTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
+		if err := rows.Scan(&r.SlotTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
 			&r.CacheRead, &r.CacheWrite, &r.Calls, &r.Errors); err != nil {
 			return nil, err
 		}
@@ -469,15 +470,15 @@ func (s *Store) UsageDailyGroups(f usageFilter) ([]usageDayGroupRow, error) {
 	return out, rows.Err()
 }
 
-// UsageByModel 按 (小时, 模型, 协议, 渠道) 聚合。
+// UsageByModel 按 (分钟, 模型, 协议, 渠道) 聚合。
 func (s *Store) UsageByModel(f usageFilter) ([]usageModelRow, error) {
 	where, args := f.whereTokens()
-	q := `SELECT substr(ts,1,13) AS hour_ts, model, protocol, provider_id,
+	q := `SELECT substr(ts,1,16) AS slot_ts, model, protocol, provider_id,
 			COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 			COUNT(*), COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0)
 		FROM usage_events` + where + `
-		GROUP BY hour_ts, model, protocol, provider_id ORDER BY COUNT(*) DESC`
+		GROUP BY slot_ts, model, protocol, provider_id ORDER BY COUNT(*) DESC`
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(q, args...)
@@ -488,7 +489,7 @@ func (s *Store) UsageByModel(f usageFilter) ([]usageModelRow, error) {
 	out := []usageModelRow{}
 	for rows.Next() {
 		var r usageModelRow
-		if err := rows.Scan(&r.HourTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
+		if err := rows.Scan(&r.SlotTS, &r.Model, &r.Protocol, &r.ProviderID, &r.Input, &r.Output,
 			&r.CacheRead, &r.CacheWrite, &r.Calls, &r.Errors); err != nil {
 			return nil, err
 		}
@@ -525,6 +526,7 @@ type usageRecord struct {
 	Error      string `json:"error,omitempty"`
 	Stream     bool   `json:"stream"`
 	// Peak 这次调用落在高峰（按峰值价计费）还是空闲（按空闲价）；页面 hover 显示。
+	// 由 handler 按该模型的时段规则填（Store 不认价格配置，见 usageapi.go）。
 	Peak bool `json:"peak"`
 	// ---- 搜索/抽取调用专用 ----
 	Kind    string `json:"kind,omitempty"`    // search | extract（模型调用为空）
@@ -584,7 +586,6 @@ func (s *Store) scanUsageRecords(where string, args []any, limit, offset int) ([
 		r.OK = ok != 0
 		r.Stream = stream != 0
 		r.Total = r.Input + r.Output
-		r.Peak = usagePeakAt(r.TS)
 		out = append(out, r)
 	}
 	return out, total, rows.Err()

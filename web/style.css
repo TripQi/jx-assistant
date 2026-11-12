@@ -2139,11 +2139,18 @@ mark {
    .mc-slider 左右内边距 9px 必须一致）。宽 300px、窄屏（460px 视口）夹在视口内。 */
 .model-card { width: 300px; min-width: 0; max-width: calc(100vw - 24px); padding: 12px 14px 10px; }
 .model-card .mc-layer.hidden { display: none; }
-.mc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.mc-big { font-size: 22px; font-weight: 700; line-height: 1.15; color: var(--text); letter-spacing: -.2px; }
+/* 标题行：没有底色（卡片顶部就是卡片底色），档位大字水平居中、主题强调色；
+   刷新按钮绝对定位钉在右上角，不参与居中排版 */
+.mc-top { position: relative; padding: 1px 0 0; }
+.mc-big {
+  display: block; text-align: center;
+  font-size: 21px; font-weight: 600; line-height: 1.35; letter-spacing: .1px;
+  color: var(--accent);
+}
 /* 右上角刷新＝重新拉模型列表（loading 时转圈）；不是重置档位 */
 .mc-refresh {
-  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  position: absolute; top: -5px; right: -6px;
+  display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; padding: 0; border: none; border-radius: 8px;
   background: none; color: var(--text-3); cursor: pointer;
 }
@@ -2152,12 +2159,16 @@ mark {
 .mc-refresh.spin svg { animation: mc-spin .9s linear infinite; }
 .mc-refresh:disabled { cursor: default; }
 @keyframes mc-spin { to { transform: rotate(360deg); } }
-/* 模型行：小字模型名 + 「>」指示，点它翻到第二层 */
+/* 模型行：小字模型名 + 「>」指示，与档位大字同一列居中对齐；点它翻到第二层 */
 .mc-model {
-  display: flex; align-items: center; gap: 4px; max-width: 100%;
-  margin: 2px 0 10px; padding: 2px 0; border: none; background: none;
-  font-size: 12.5px; color: var(--text-2); cursor: pointer; text-align: left;
+  display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%;
+  margin: 1px 0 9px; padding: 2px 20px; border: none; background: none;
+  font-size: 12.5px; color: var(--text-2); cursor: pointer; text-align: center;
 }
+.mc-model:hover { color: var(--accent); }
+.mc-model span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-model .mc-go { width: 13px; height: 13px; flex: none; color: var(--text-3); }
+.mc-model:hover .mc-go { color: var(--accent); }
 .mc-model:hover { color: var(--accent); }
 .mc-model span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-model .mc-go { width: 13px; height: 13px; flex: none; color: var(--text-3); }
@@ -2198,7 +2209,7 @@ mark {
 .mc-follow input:focus-visible ~ .sw-mini { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mc-follow-text { flex: 1; min-width: 0; }
 .model-card.following .mc-slider { display: none; } /* 跟随服务端默认：滑杆收起，大字显示 Default */
-/* 第二层：平铺模型列表（不分组、不放「默认模型」条目，当前模型带勾） */
+/* 第二层：按供应商分组的模型列表（灰色小字分组标题 + 缩进列模型；不放「默认模型」条目） */
 .mc-models-head { display: flex; align-items: center; gap: 6px; padding: 0 0 6px; }
 .mc-models-head b { font-size: 13px; font-weight: 600; color: var(--text); }
 .mc-back {
@@ -2210,6 +2221,10 @@ mark {
 .mc-back svg { width: 15px; height: 15px; }
 .mc-list { max-height: min(46vh, 300px); overflow-y: auto; overscroll-behavior: contain; }
 .mc-list.busy { opacity: .6; }
+/* 分组标题：字号/灰字沿用 .pop-group（不可点、不带勾），这里只管间距；模型缩进排在它下面 */
+.mc-group { padding: 8px 11px 2px; }
+.mc-group:first-child { padding-top: 3px; }
+.mc-list .mc-item { padding-left: 18px; }
 .mc-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-item.off { color: var(--text-3); }
 .mc-item .mc-check { width: 15px; height: 15px; flex: none; color: var(--accent); }
@@ -3001,6 +3016,8 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
 :root[data-theme='dark'] .mc-track { background: linear-gradient(90deg, rgba(72, 104, 220, .26), rgba(150, 90, 255, .26)); }
 :root[data-theme='dark'] .mc-fill { background: linear-gradient(90deg, #4a7bff, #b06bff); }
 :root[data-theme='dark'] .mc-thumb { box-shadow: 0 1px 4px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .12); }
+/* 暗色分组标题的灰要提亮一档（--text-3 在深底上偏暗） */
+:root[data-theme='dark'] .mc-group { color: #98a1ab; }
 :root[data-theme='dark'] .modal-card { background: #1d2026; }
 :root[data-theme='dark'] .composer-card:focus-within { border-color: #4a5158; }
 :root[data-theme='dark'] ::-webkit-scrollbar-thumb { background: #3d434d; }

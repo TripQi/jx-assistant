@@ -14,12 +14,15 @@
 //   F 键盘左右键各切一档并提交；role=slider + aria-valuemin/max/now/text
 //   G 跟随服务端默认：thinking 为空串、滑杆隐藏、大字与芯片显示 Default
 //   H 再关开关：恢复上一次手选档位（不是 Medium 兜底）
-//   I 点模型名翻到第二层：平铺（无分组头/无「默认模型」条目）、当前模型带勾、重名带渠道后缀
+//   I 点模型名翻到第二层：按供应商分组（灰字标题不可点、模型缩进、顺序跟接口一致）、
+//     同名模型不再带渠道后缀、当前模型带勾、无「默认模型」条目
 //   J 点某一项切模型：档位保持不变，回到第一层
 //   K 刷新图标：重新 GET /api/models（loading 转圈），失败给可见提示
 //   L 触摸拖动（pointer 事件）同样可用
 //   M 深色主题 / 460px 窄屏：卡片不越界、滑杆不横向溢出
 //   N Esc 与点外部关闭
+//   O 右栏子对话那枚芯片点开同一张卡
+// 视觉专项（B5–B8/C4）：档位大字居中、20–22px、主题蓝、标题区无灰底带、刷新图标仍在右上角。
 // 运行：仓库根目录 node gui-test/think-slider-verify.mjs
 import { newTab, read, click, shot, sleep, closeTab } from './cdp.mjs';
 import { mkdirSync, writeFileSync, rmSync, accessSync } from 'node:fs';
@@ -58,13 +61,17 @@ async function up() {
       port: PORT, bindHost: '127.0.0.1',
       baseURL: 'mock', apiKey: '', model: 'glm-5.3',
       wizardDone: true, // 首启接入向导不弹（弹了会挡住输入区）
+      // 两个供应商（顺序＝「设置 · 模型」里的顺序）：卡片第二层按供应商分组的顺序要跟着它
       providers: [{
         id: 'mock', name: 'Mock 服务', baseURL: 'mock', apiKey: '',
-        // 多 Key 结构：同渠道内两个 Key 拉到同名模型 → 列表里应带渠道后缀区分
+        // 同一供应商内两把 Key 拉到同名模型（deepseek-flash）：分组后不再加渠道后缀
         keys: [
           { id: 'k1', label: '默认分组', models: [{ id: 'glm-5.3', name: 'GLM-5.3' }, { id: 'deepseek-flash', name: 'deepseek-flash' }] },
           { id: 'k2', label: 'SnowAI', models: [{ id: 'gpt-6.1-terra', name: '6.1 Terra' }, { id: 'deepseek-flash', name: 'deepseek-flash' }] },
         ],
+      }, {
+        id: 'mock-alt', name: '备用渠道', baseURL: 'mock', apiKey: '',
+        models: [{ id: 'glm-5.3', name: 'GLM-5.3' }],
       }],
       workspace: join(TMP, 'ws'), updateURL: '',
     }));
@@ -126,6 +133,34 @@ const bigBox = (t) => read(t, `(() => ({
 const trackGeo = (t) => read(t, `(() => {
   const r = document.getElementById('mc-track').getBoundingClientRect();
   return { left: r.left, right: r.right, width: r.width, y: r.top + r.height / 2 };
+})()`);
+// 第一层标题区的几何/配色：档位大字与模型行是否与卡片水平中心对齐（贴字实测，不是盒子对齐）、
+// 字号是否落在 20–22px、颜色是否主题强调色（蓝）、标题区与大字都没有底色（去掉灰底带）、
+// 刷新图标是否仍然钉在右上角
+const headerGeo = (t) => read(t, `(() => {
+  const card = document.getElementById('model-card');
+  const c = card.getBoundingClientRect();
+  const big = document.getElementById('mc-big');
+  const rg = document.createRange(); rg.selectNodeContents(big);
+  const tb = rg.getBoundingClientRect();
+  const nameEl = document.getElementById('mc-model-name');
+  const nr = document.createRange(); nr.selectNodeContents(nameEl);
+  const nb = nr.getBoundingClientRect();
+  const go = document.querySelector('#mc-model .mc-go').getBoundingClientRect();
+  const cs = getComputedStyle(big);
+  const top = card.querySelector('.mc-top');
+  const rf = document.getElementById('mc-refresh').getBoundingClientRect();
+  const rgb = (cs.color.match(/\\d+/g) || []).map(Number);
+  const transparent = (v) => v === 'rgba(0, 0, 0, 0)' || v === 'transparent' || v === 'rgba(0, 0, 0, 0) none';
+  return {
+    cardCx: c.left + c.width / 2, cardTop: c.top, cardRight: c.right,
+    bigTextCx: tb.left + tb.width / 2, bigText: big.textContent,
+    rowCx: (Math.min(nb.left, go.left) + Math.max(nb.right, go.right)) / 2,
+    fontSize: parseFloat(cs.fontSize), fontWeight: cs.fontWeight, color: cs.color, rgb: rgb,
+    bigBg: cs.backgroundColor, topBg: getComputedStyle(top).backgroundColor,
+    noBand: transparent(cs.backgroundColor) && transparent(getComputedStyle(top).backgroundColor),
+    refreshRight: rf.right, refreshTop: rf.top, refreshW: rf.width,
+  };
 })()`);
 const lvX = (g, i) => g.left + (g.width * i) / 5;
 
@@ -242,6 +277,19 @@ async function main() {
     ok('B3 空档位：滑杆隐藏、开关打开', b.sliderDisplay === 'none' && b.follow, JSON.stringify({ d: b.sliderDisplay, f: b.follow }));
     ok('B4 滑杆 aria：role=slider、valuemin/max=0/5、valuetext',
       (await read(t, `(() => { const s = document.getElementById('mc-slider'); return [s.getAttribute('role'), s.getAttribute('aria-valuemin'), s.getAttribute('aria-valuemax'), s.getAttribute('aria-label')].join('|'); })()`)) === 'slider|0|5|思考档位', '');
+    // 视觉：Default 态同样居中、同字号、主题色、无灰底带（与非默认态一套规则）
+    const bGeoD = await headerGeo(t);
+    ok('B5 Default 态：大字与模型行都水平居中（与卡片中心差 <2px）',
+      Math.abs(bGeoD.bigTextCx - bGeoD.cardCx) < 2 && Math.abs(bGeoD.rowCx - bGeoD.cardCx) < 2,
+      JSON.stringify({ big: bGeoD.bigTextCx, row: bGeoD.rowCx, center: bGeoD.cardCx }));
+    ok('B6 标题区没有灰色背景带（大字与标题行都透明）', bGeoD.noBand,
+      JSON.stringify({ bigBg: bGeoD.bigBg, topBg: bGeoD.topBg }));
+    ok('B7 档位字号 20–22px、颜色为主题强调蓝（不是纯黑加粗）',
+      bGeoD.fontSize >= 20 && bGeoD.fontSize <= 22 && Number(bGeoD.fontWeight) < 700 && bGeoD.rgb[2] > 150 && bGeoD.rgb[2] > bGeoD.rgb[0],
+      JSON.stringify({ fontSize: bGeoD.fontSize, weight: bGeoD.fontWeight, color: bGeoD.color }));
+    ok('B8 刷新图标仍在右上角',
+      bGeoD.refreshRight > bGeoD.cardRight - 30 && bGeoD.refreshRight <= bGeoD.cardRight && bGeoD.refreshTop < bGeoD.cardTop + 20,
+      JSON.stringify({ rr: bGeoD.refreshRight, cr: bGeoD.cardRight, rt: bGeoD.refreshTop, ct: bGeoD.cardTop }));
 
     // ---------- C 关掉「跟随服务端默认」→ 恢复上次手选档位（无历史＝Medium） ----------
     await clickEl(t, `document.getElementById('mc-follow')`);
@@ -253,6 +301,12 @@ async function main() {
       (await bigText(t)) === 'Medium' && b.now === '2' && b.text === 'Medium' && (await chipText(t)) === 'GLM-5.3 · Medium',
       JSON.stringify({ big: await bigText(t), now: b.now, chip: await chipText(t) }));
     ok('C3 关开关：会话 thinking=medium', s.thinking === 'medium', s.thinking);
+    // 非默认态与 Default 态必须是同一套视觉（禁止一个居中一个左对齐）
+    const bGeoM = await headerGeo(t);
+    ok('C4 非默认态（Medium）与 Default 态视觉一致：同样居中、同字号、同色、无灰底',
+      Math.abs(bGeoM.bigTextCx - bGeoM.cardCx) < 2 && Math.abs(bGeoM.rowCx - bGeoM.cardCx) < 2
+      && bGeoM.fontSize === bGeoD.fontSize && bGeoM.color === bGeoD.color && bGeoM.noBand,
+      JSON.stringify({ big: bGeoM.bigTextCx, row: bGeoM.rowCx, center: bGeoM.cardCx, size: bGeoM.fontSize, color: bGeoM.color }));
 
     // ---------- D 拖到每一档：过程中零 PATCH、松手一次 PATCH、落库正确 ----------
     for (let i = 0; i < 6; i++) {
@@ -320,14 +374,28 @@ async function main() {
     await sleep(350);
     const l2 = await read(t, `(() => {
       const card = document.getElementById('model-card');
-      const items = [...card.querySelectorAll('.mc-item')];
+      const list = document.getElementById('mc-list');
+      const items = [...list.querySelectorAll('.mc-item')];
       const cur = items.find((x) => x.classList.contains('sel'));
+      const groupEls = [...list.querySelectorAll('.pop-group')];
+      const kids = [...list.children];
+      // 结构：每个分组标题后面紧跟它自己的模型行（分组标题 → 若干 .mc-item → 下一个标题）
+      const struct = kids.filter((k) => k.classList.contains('mc-item') || k.classList.contains('pop-group'))
+        .map((k) => (k.classList.contains('pop-group') ? 'G:' + k.textContent.trim() : 'M:' + k.textContent.trim()));
       return {
         layer1: !document.getElementById('mc-lv').classList.contains('hidden'),
         layer2: !document.getElementById('mc-models').classList.contains('hidden'),
         title: (card.querySelector('.mc-models-head b') || {}).textContent || '',
         labels: items.map((x) => x.textContent.trim()),
-        groups: card.querySelectorAll('#mc-models .pop-group').length,
+        groups: groupEls.map((g) => g.textContent.trim()),
+        struct: struct,
+        groupClickable: groupEls.some((g) => g.tagName === 'BUTTON' || !!g.onclick || !!g.closest('button')),
+        groupHasCheck: groupEls.some((g) => !!g.querySelector('.mc-check') || !!g.querySelector('svg')),
+        groupFontSize: groupEls.length ? parseFloat(getComputedStyle(groupEls[0]).fontSize) : 0,
+        groupColor: groupEls.length ? getComputedStyle(groupEls[0]).color : '',
+        groupPad: groupEls.length ? parseFloat(getComputedStyle(groupEls[0]).paddingLeft) : 0,
+        itemPad: items.length ? parseFloat(getComputedStyle(items[0]).paddingLeft) : 0,
+        scrollable: getComputedStyle(list).overflowY,
         curText: cur ? cur.textContent.trim() : '',
         curCheck: cur ? !!cur.querySelector('.mc-check') : false,
         hasDefault: items.some((x) => /^默认/.test(x.textContent.trim())),
@@ -335,13 +403,29 @@ async function main() {
     })()`);
     ok('I1 点模型名翻到第二层（第一层收起）', !l2.layer1 && l2.layer2, JSON.stringify({ l1: l2.layer1, l2: l2.layer2 }));
     ok('I2 标题为「选择模型」', l2.title === '选择模型', l2.title);
-    ok('I3 列表平铺：无渠道分组头', l2.groups === 0, String(l2.groups));
-    ok('I4 不放「默认模型」条目', !l2.hasDefault, JSON.stringify(l2.labels));
-    ok('I5 当前模型（GLM-5.3）带勾选标记', l2.curText === 'GLM-5.3' && l2.curCheck, JSON.stringify({ cur: l2.curText, check: l2.curCheck }));
-    ok('I6 重名模型带渠道后缀、不重名的保持干净',
-      l2.labels.includes('deepseek-flash（SnowAI）') && l2.labels.includes('deepseek-flash（默认分组）')
+    // 分组顺序＝/api/models 的返回顺序（与「设置 · 模型」的供应商顺序一致）
+    const modelsApi = await (await fetch(BASE + '/api/models')).json();
+    const provs = [];
+    for (const m of modelsApi.models || []) if (!provs.includes(m.providerName)) provs.push(m.providerName);
+    ok('I3 按供应商分组：分组标题数量与顺序跟接口一致', l2.groups.length === provs.length && l2.groups.join('|') === provs.join('|'),
+      JSON.stringify({ groups: l2.groups, apiOrder: provs }));
+    ok('I4 分组标题是小写灰字、不可点、无勾选', !l2.groupClickable && !l2.groupHasCheck && l2.groupFontSize < 12 && /rgb/.test(l2.groupColor),
+      JSON.stringify({ clickable: l2.groupClickable, check: l2.groupHasCheck, fontSize: l2.groupFontSize, color: l2.groupColor }));
+    ok('I5 模型缩进排在各自分组标题下（结构：G:供应商 → M:模型…）',
+      l2.struct.filter((x) => x.startsWith('G:')).length === provs.length
+      && l2.struct[0].startsWith('G:') && l2.struct.some((x) => x.startsWith('M:'))
+      && l2.itemPad > l2.groupPad,
+      JSON.stringify({ struct: l2.struct, itemPad: l2.itemPad, groupPad: l2.groupPad }));
+    ok('I6 不放「默认模型」条目', !l2.hasDefault, JSON.stringify(l2.labels));
+    ok('I7 当前模型（GLM-5.3）带勾选且只有一个',
+      l2.curText === 'GLM-5.3' && l2.curCheck && (await read(t, `document.querySelectorAll('#mc-list .mc-item.sel').length`)) === 1,
+      JSON.stringify({ cur: l2.curText, check: l2.curCheck }));
+    ok('I8 已分组：同名模型不再带渠道后缀',
+      l2.labels.filter((x) => x === 'deepseek-flash').length === 2
+      && !l2.labels.some((x) => x.includes('（') || x.includes('(SnowAI)'))
       && l2.labels.includes('6.1 Terra') && l2.labels.includes('GLM-5.3'),
       JSON.stringify(l2.labels));
+    ok('I9 列表可滚动', l2.scrollable === 'auto' || l2.scrollable === 'scroll', l2.scrollable);
     await shot(t, join(SCREEN, 'thinkslider-3-models.png'));
 
     // ---------- J 点某一项切模型：档位不变、回第一层 ----------

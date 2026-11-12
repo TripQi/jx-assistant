@@ -7310,9 +7310,10 @@ async function setThinking(level, view) {
 }
 
 /* ---------- 模型与思考档位卡片（一卡两层，入口是输入框下方那枚芯片） ----------
-   第一层：大字档位 + 模型行（点它翻到第二层）+ 渐变滑杆 + 「跟随服务端默认」开关
-           + 右上角刷新（重新拉 GET /api/models，不是重置档位）；
-   第二层：平铺模型列表（不按渠道分组，当前模型带勾），选中即切会话模型并翻回第一层。
+   第一层：居中档位大字（主题色）+ 居中的模型行（点它翻到第二层）+ 渐变滑杆
+           + 「跟随服务端默认」开关 + 右上角刷新（重新拉 GET /api/models，不是重置档位）；
+   第二层：按供应商分组的模型列表（灰色小字标题 + 缩进列模型，当前模型带勾），
+           选中即切会话模型并翻回第一层。
    设计要点（都是用户敲定的口径）：
    · 档位只有滑杆这一个入口，模型菜单里的档位二级菜单已删；两者互不影响——
      改档位只发 thinking，换模型只发 provider/providerKey/model；
@@ -7413,8 +7414,8 @@ function mcPreview(idx) {
 // 卡片被关掉（Esc 等）时丢掉未松手的拖动：松手前关闭不提交中间态
 function mcCancelDrag() { mcDrag = null; }
 
-// 第二层：平铺模型列表。同一渠道内重名的模型（不同 Key 拉到同名模型）加 Key 备注
-// 后缀区分，不重名的一律不加标签；不放「默认模型」这类条目。
+// 第二层：按供应商分组的模型列表——灰色小字分组标题 + 下面缩进列该供应商的模型。
+// 因为已经分组，重名模型不再加渠道后缀；不放「默认模型」这类条目。
 function mcRenderList(view) {
   const list = $('mc-list');
   const cur = currentModelKey(view || popView || mainView);
@@ -7428,19 +7429,21 @@ function mcRenderList(view) {
       if (hit) curKey = modelKeyOf(hit.providerId, hit.keyId, hit.modelId);
     }
   }
-  const dupCount = {};
-  for (const m of state.models || []) {
-    const k = m.providerId + '|' + m.modelId;
-    dupCount[k] = (dupCount[k] || 0) + 1;
-  }
   let h = '';
+  let lastProv = '';
   for (const m of state.models || []) {
+    // 按供应商分组：灰色小字标题（不可点、不带勾）+ 下面缩进列该供应商的模型。
+    // 顺序就是 /api/models 的返回顺序（与「设置 · 模型」里的供应商顺序一致）。
+    if (m.providerId !== lastProv) {
+      h += '<div class="pop-group mc-group">' + esc(m.providerName || m.providerId) + (m.providerOff ? '（已停用）' : '') + '</div>';
+      lastProv = m.providerId;
+    }
     const k = modelKeyOf(m.providerId, m.keyId, m.modelId);
-    const tag = dupCount[m.providerId + '|' + m.modelId] > 1 && m.keyLabel ? '（' + m.keyLabel + '）' : '';
     const on = k === curKey;
+    // 已按供应商分组，不再给重名模型加渠道后缀（同名模型各在自己渠道下面）
     h += '<button type="button" class="pop-item mc-item' + (on ? ' sel' : '') + (m.providerOff ? ' off' : '') + '"'
-      + ' data-key="' + esc(k) + '" title="' + esc((m.providerName || '') + ' · ' + m.modelId) + '">'
-      + '<span>' + esc((m.modelName || m.modelId) + tag) + '</span>' + (on ? MC_CHECK : '') + '</button>';
+      + ' data-key="' + esc(k) + '" title="' + esc(m.modelId) + '">'
+      + '<span>' + esc(m.modelName || m.modelId) + '</span>' + (on ? MC_CHECK : '') + '</button>';
   }
   if (!h && !mcBusy) h = '<div class="mc-empty">还没有可用模型（去 设置 · 模型 添加供应商）</div>';
   const keepTop = list.scrollTop;

@@ -1565,6 +1565,271 @@ function syncSearchState(c) {
   }
 }
 
+/* ---------- 网络访问页：联网搜索供应商（多供应商顺序回落，见 websearch_providers.go） ---------- */
+
+let spKinds = []; // 类型元数据（后端下发：默认地址/能力位），前端不硬编码各家细节
+let spRows = []; // 当前回显的供应商清单：Key 只有掩码，用户新填的才带 apiKey
+const spOpen = new Set(); // 展开编辑的行 id（重渲染后保持展开）
+
+function spKindMeta(kind) {
+  return spKinds.find((k) => k.kind === kind) || { kind, label: kind, search: false, extract: false, defaultBase: '' };
+}
+
+// 上下移＝换位置：order 按当前顺序重排后整表提交（后端 normalize 会兜底序号）
+function spRowsPayload() {
+  return spRows.map((p, i) => ({
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    baseURL: p.baseURL || '',
+    apiKey: p.apiKey || '', // 空串＝沿用已保存的 Key（前端只拿到掩码，不回传）
+    capabilities: {
+      search: !!(p.capabilities && p.capabilities.search),
+      extract: !!(p.capabilities && p.capabilities.extract),
+    },
+    enabled: p.enabled !== false,
+    order: i + 1,
+    engine: p.engine || '',
+    region: p.region || '',
+    freshness: p.freshness || '',
+    count: p.count || 0,
+    timeoutSec: p.timeoutSec || 0,
+  }));
+}
+
+async function spSave() {
+  const c = await api('/api/config', { method: 'POST', body: JSON.stringify({ searchProviders: spRowsPayload() }) });
+  renderSearchProviders(c);
+}
+
+// renderSearchProviders 渲染供应商列表；不带参数＝用当前内存清单重画（展开/收起等纯 UI 变化）
+function renderSearchProviders(c) {
+  if (c) {
+    spKinds = (c.searchKinds && c.searchKinds.length) ? c.searchKinds : spKinds;
+    spRows = (c.searchProviders || []).map((p) => ({ ...p }));
+    const bud = $('set-search-budget');
+    if (bud && document.activeElement !== bud) bud.value = c.searchTimeoutSec || 20;
+  }
+  const box = $('sp-list');
+  if (!box) return;
+  box.innerHTML = spRows.length
+    ? spRows.map((p, i) => spRowHTML(p, i)).join('')
+    : '<p class="sf-desc">还没配置任何供应商：搜索只会走上面的「搜索服务」网关（公司服务端持 Key）。'
+      + '点「添加供应商」可以接自己的 DeepSeek / Tavily / AnySearch 等。</p>';
+}
+
+function spRowHTML(p, i) {
+  const open = spOpen.has(p.id);
+  const caps = [];
+  if (p.capabilities && p.capabilities.search) caps.push('搜索');
+  if (p.capabilities && p.capabilities.extract) caps.push('抽取');
+  const tags = caps.map((t) => '<span class="sp-tag">' + esc(t) + '</span>').join('');
+  const warn = p.available === false
+    ? '<span class="sp-tag warn" title="' + esc(p.unavailableHint || '') + '">不可用</span>'
+    : '';
+  const key = p.kind === 'gateway' ? '服务端持 Key' : (p.apiKeyMasked || '未填 Key');
+  return '<div class="sp-row' + (open ? ' open' : '') + (p.enabled === false ? ' off' : '')
+    + '" data-id="' + esc(p.id) + '">'
+    + '<div class="sp-head">'
+    + '<label class="pr-toggle" title="启用 / 停用"><input type="checkbox" data-act="toggle"'
+    + (p.enabled === false ? '' : ' checked') + '><span></span></label>'
+    + '<span class="sp-order">' + (i + 1) + '</span>'
+    + '<span class="sp-name">' + esc(p.name || p.kindLabel || p.kind) + '</span>'
+    + '<span class="sp-tag kind">' + esc(p.kindLabel || p.kind) + '</span>' + tags + warn
+    + '<span class="sp-base" title="' + esc(p.baseURL || '') + '">' + esc(p.baseURL || '（内置默认地址）') + '</span>'
+    + '<span class="sp-key">' + esc(key) + '</span>'
+    + '<span class="sp-btns">'
+    + '<button type="button" data-act="up" title="上移（更先用）"' + (i === 0 ? ' disabled' : '') + '>↑</button>'
+    + '<button type="button" data-act="down" title="下移（更后用）"' + (i === spRows.length - 1 ? ' disabled' : '') + '>↓</button>'
+    + '<button type="button" data-act="edit">' + (open ? '收起' : '编辑') + '</button>'
+    + '<button type="button" data-act="test">测试</button>'
+    + '<button type="button" data-act="del" title="删除">✕</button>'
+    + '</span></div>'
+    + (open ? spBodyHTML(p) : '')
+    + '<div class="sp-result"></div>'
+    + '</div>';
+}
+
+function spFieldHTML(label, control) {
+  return '<label class="sp-f">' + esc(label) + control + '</label>';
+}
+
+function spBodyHTML(p) {
+  const m = spKindMeta(p.kind);
+  const parts = [spFieldHTML('名称', '<input type="text" data-f="name" value="' + esc(p.name || '') + '">')];
+  if (p.kind === 'gateway') {
+    parts.push('<p class="sf-desc" style="grid-column:1/-1;margin:0">地址与鉴权都取上面的「搜索服务」：'
+      + '这条只是把公司网关纳入同一套顺位与启停管理，没有可填的 Key。</p>');
+  } else {
+    parts.push(spFieldHTML('Base URL', '<input type="text" data-f="baseURL" value="' + esc(p.baseURL || '')
+      + '" placeholder="' + esc(m.defaultBase || 'https://…') + '" autocomplete="off" spellcheck="false">'));
+    parts.push(spFieldHTML('API Key', '<input type="password" data-f="apiKey" autocomplete="off" placeholder="'
+      + esc(p.apiKeyMasked ? '已保存 ' + p.apiKeyMasked + '（留空不改）' : '粘贴 Key') + '">'));
+  }
+  // 能力位：类型本身不支持的置灰（改了也没用，别让用户以为能开）
+  parts.push('<div class="sp-f">能力<div class="sp-caps">'
+    + '<label><input type="checkbox" data-f="capSearch"' + (p.capabilities && p.capabilities.search ? ' checked' : '')
+    + (m.search ? '' : ' disabled') + '>搜索</label>'
+    + '<label><input type="checkbox" data-f="capExtract"' + (p.capabilities && p.capabilities.extract ? ' checked' : '')
+    + (m.extract ? '' : ' disabled') + '>抽取正文</label>'
+    + '</div></div>');
+  if (p.kind === 'zhipu') {
+    const engines = ['search_pro', 'search_std', 'search_pro_sogou', 'search_pro_quark'];
+    parts.push(spFieldHTML('搜索引擎', '<select data-f="engine">'
+      + engines.map((e) => '<option value="' + e + '"' + ((p.engine || 'search_pro') === e ? ' selected' : '') + '>'
+        + e + '</option>').join('') + '</select>'));
+  }
+  if (p.kind === 'tavily') {
+    parts.push(spFieldHTML('新鲜度', '<select data-f="freshness">'
+      + [['', '不限'], ['day', '一天内'], ['week', '一周内'], ['month', '一月内'], ['year', '一年内']]
+        .map(([v, t]) => '<option value="' + v + '"' + ((p.freshness || '') === v ? ' selected' : '') + '>' + t + '</option>').join('')
+      + '</select>'));
+  }
+  if (p.kind === 'bocha') {
+    parts.push(spFieldHTML('新鲜度', '<select data-f="freshness">'
+      + [['noLimit', '不限'], ['oneDay', '一天内'], ['oneWeek', '一周内'], ['oneMonth', '一月内'], ['oneYear', '一年内']]
+        .map(([v, t]) => '<option value="' + v + '"' + ((p.freshness || 'noLimit') === v ? ' selected' : '') + '>' + t + '</option>').join('')
+      + '</select>'));
+  }
+  if (p.kind === 'anysearch') {
+    parts.push(spFieldHTML('地区（zone）', '<select data-f="region">'
+      + [['', '默认'], ['cn', 'cn（国内）'], ['intl', 'intl（国际）']]
+        .map(([v, t]) => '<option value="' + v + '"' + ((p.region || '') === v ? ' selected' : '') + '>' + t + '</option>').join('')
+      + '</select>'));
+  }
+  parts.push(spFieldHTML('默认条数', '<input type="number" data-f="count" min="0" max="50" value="'
+    + (p.count || '') + '" placeholder="8">'));
+  parts.push(spFieldHTML('单家超时（秒）', '<input type="number" data-f="timeoutSec" min="0" max="60" value="'
+    + (p.timeoutSec || '') + '" placeholder="10">'));
+  const note = m.note
+    ? '<p class="sf-desc" style="grid-column:1/-1;margin:0">' + esc(m.note) + '</p>'
+    : '';
+  return '<div class="sp-body">' + parts.join('') + note + '</div>';
+}
+
+// spTest 直接打一次真实搜索（后端 /api/search-providers/test）：耗时、条数、首条标题，
+// 失败说清是哪一类（Key 无效 / 额度用尽 / 被限流 / 连不上），不必等到真搜才发现 Key 错了
+async function spTest(id, box) {
+  if (!box) return;
+  box.innerHTML = '<span class="sp-test-run">正在打一次真实搜索…</span>';
+  try {
+    const r = await api('/api/search-providers/test', { method: 'POST', body: JSON.stringify({ id }) });
+    if (r.ok) {
+      const first = (r.first && r.first.title) ? '　首条：' + esc(r.first.title) : '';
+      box.innerHTML = '<span class="sp-ok">✓ ' + (r.ms || 0) + ' ms　' + (r.count || 0) + ' 条结果'
+        + first + '　（引擎 ' + esc(r.engine || '') + '）</span>';
+    } else {
+      const st = r.status ? '（HTTP ' + r.status + '）' : '';
+      box.innerHTML = '<span class="sp-bad">✗ ' + esc(r.kindText || '测试失败')
+        + (r.error ? '：' + esc(r.error) : '') + st + (r.ms ? '　' + r.ms + ' ms' : '') + '</span>';
+    }
+  } catch (e) {
+    box.innerHTML = '<span class="sp-bad">✗ ' + esc(e.message) + '</span>';
+  }
+}
+
+function spRowByEl(el) {
+  const row = el.closest ? el.closest('.sp-row') : null;
+  if (!row) return null;
+  const p = spRows.find((x) => x.id === row.dataset.id);
+  return p ? { row, p } : null;
+}
+
+$('sp-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn || btn.disabled) return;
+  const hit = spRowByEl(btn);
+  if (!hit) return;
+  const { row, p } = hit;
+  const act = btn.dataset.act;
+  const idx = spRows.indexOf(p);
+  if (act === 'edit') {
+    if (spOpen.has(p.id)) spOpen.delete(p.id); else spOpen.add(p.id);
+    renderSearchProviders();
+    return;
+  }
+  try {
+    if (act === 'up' && idx > 0) {
+      spRows.splice(idx - 1, 0, spRows.splice(idx, 1)[0]);
+      await spSave();
+    } else if (act === 'down' && idx < spRows.length - 1) {
+      spRows.splice(idx + 1, 0, spRows.splice(idx, 1)[0]);
+      await spSave();
+    } else if (act === 'del') {
+      if (!await confirmCenter('删除供应商「' + (p.name || p.kind) + '」？删除后不再参与搜索回落。')) return;
+      spOpen.delete(p.id);
+      spRows = spRows.filter((x) => x.id !== p.id);
+      await spSave();
+    } else if (act === 'test') {
+      await spTest(p.id, row.querySelector('.sp-result'));
+    }
+  } catch (err) {
+    alert('保存失败：' + err.message);
+    const cur = await api('/api/config').catch(() => null);
+    if (cur) renderSearchProviders(cur);
+  }
+});
+
+$('sp-list').addEventListener('change', async (e) => {
+  const hit = spRowByEl(e.target);
+  if (!hit) return;
+  const { p } = hit;
+  const t = e.target;
+  if (t.dataset.act === 'toggle') {
+    p.enabled = t.checked;
+    try { await spSave(); } catch (err) { alert('保存失败：' + err.message); }
+    return;
+  }
+  const f = t.dataset.f;
+  if (!f) return;
+  if (f === 'apiKey') {
+    const v = t.value.trim();
+    if (!v) return; // 留空＝不改
+    p.apiKey = v;
+  } else if (f === 'name') p.name = t.value.trim();
+  else if (f === 'baseURL') p.baseURL = t.value.trim();
+  else if (f === 'engine') p.engine = t.value;
+  else if (f === 'region') p.region = t.value;
+  else if (f === 'freshness') p.freshness = t.value;
+  else if (f === 'count') p.count = parseInt(t.value, 10) || 0;
+  else if (f === 'timeoutSec') p.timeoutSec = parseInt(t.value, 10) || 0;
+  else if (f === 'capSearch' || f === 'capExtract') {
+    p.capabilities = { search: false, extract: false, ...(p.capabilities || {}) };
+    if (f === 'capSearch') p.capabilities.search = t.checked;
+    else p.capabilities.extract = t.checked;
+  }
+  try {
+    await spSave();
+  } catch (err) {
+    alert('保存失败：' + err.message);
+    const cur = await api('/api/config').catch(() => null);
+    if (cur) renderSearchProviders(cur);
+  }
+});
+
+// 新增一条：默认挑一种支持搜索的第三方类型（公司网关只该有一条），加好即展开编辑
+$('sp-add').onclick = async () => {
+  const m = spKinds.find((k) => k.kind !== 'gateway' && k.search) || spKinds[0] || { kind: 'deepseek', label: 'DeepSeek', search: true, extract: false, defaultBase: '' };
+  const id = 'sp-' + Date.now().toString(36);
+  spRows.push({
+    id, name: m.label, kind: m.kind, baseURL: m.defaultBase || '',
+    capabilities: { search: !!m.search, extract: !!m.extract },
+    enabled: true, order: spRows.length + 1, available: true,
+  });
+  spOpen.add(id);
+  try { await spSave(); } catch (err) { alert('保存失败：' + err.message); }
+};
+
+$('set-search-budget').onchange = async () => {
+  const v = parseInt($('set-search-budget').value, 10) || 0;
+  try {
+    const c = await api('/api/config', { method: 'POST', body: JSON.stringify({ searchTimeoutSec: v }) });
+    renderSearchProviders(c);
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+};
+
 function syncRemoteState(c) {
   const ra = c.remoteAccess || {};
   $('set-remote-state').textContent = ra.connected
@@ -1606,6 +1871,7 @@ function syncRemoteState(c) {
   // 由后端算好下发（searchEndpoint）
   if (document.activeElement !== $('set-search-url')) $('set-search-url').value = c.searchURL || '';
   syncSearchState(c);
+  renderSearchProviders(c); // 搜索供应商列表（顺位/启停/Key 掩码/可用性）
   if (document.activeElement !== $('set-registry-url')) $('set-registry-url').value = c.registryURL || '';
   if (document.activeElement !== $('set-update-url')) $('set-update-url').value = (c.updateURL === 'off' ? 'off' : (c.updateURL || ''));
   $('set-update-mode').value = (c.updateMode === 'manual' ? 'manual' : 'auto');

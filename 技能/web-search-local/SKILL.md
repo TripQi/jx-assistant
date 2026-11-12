@@ -54,6 +54,8 @@ key 配置（可选，二选一）：
 - 在本技能目录写 `config.json`：`{"zhipu_key":"…"}` 或 `{"bocha_key":"…"}`（注意：技能更新会覆盖整个技能目录，重要 key 别只放这里）
 - 环境变量（推荐，不怕覆盖）：`JX_SEARCH_ZHIPU_KEY` / `JX_SEARCH_BOCHA_KEY`
 
+博查接口域名可覆盖：官方正从 `api.bochaai.com` 迁到 `api.bocha.cn`（脚本默认用新域）。旧域下线或要走反代时，在 `config.json` 里加 `"bocha_base": "https://api.bochaai.com"`（也可写完整端点或带路径的根），或设环境变量 `JX_SEARCH_BOCHA_BASE`。
+
 一个引擎失败（超时/额度耗尽/网络不通）会自动试下一个；全部失败时脚本输出各引擎的失败原因并以非零码退出，如实把原因转告用户。
 
 ## 输出格式

@@ -17,8 +17,24 @@ import urllib.request
 TIMEOUT = 20
 
 ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
-BOCHA_URL = "https://open.bochaai.com/v1/web-search"
+# 博查接口域名：官方文档正从 api.bochaai.com 迁到 api.bocha.cn（两个域当前都活）。
+# 旧值是 open.bochaai.com——那是官网前端域名，打 /v1/web-search 实测 404，整条兜底链路
+# 以前是必然失败的。这里给新域，并允许用 config.json 的 bocha_base 覆盖（旧域下线时
+# 或换成反代地址时不用改脚本）。
+BOCHA_URL = "https://api.bocha.cn/v1/web-search"
 FIRECRAWL_URL = "https://api.firecrawl.dev/v2/search"
+
+
+def bocha_url(base=""):
+    """博查接口地址：base 可填域名、完整端点或带路径的根，缺省用 BOCHA_URL。"""
+    base = str(base or "").strip().rstrip("/")
+    if not base:
+        return BOCHA_URL
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + base
+    if base.endswith("/v1/web-search"):
+        return base
+    return base + "/v1/web-search"
 
 
 def load_keys():
@@ -29,7 +45,7 @@ def load_keys():
         with open(cfg, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            for name in ("zhipu_key", "bocha_key"):
+            for name in ("zhipu_key", "bocha_key", "bocha_base"):
                 v = data.get(name)
                 if isinstance(v, str) and v.strip():
                     keys[name] = v.strip()
@@ -40,6 +56,7 @@ def load_keys():
     for env_name, key_name in (
         ("JX_SEARCH_ZHIPU_KEY", "zhipu_key"),
         ("JX_SEARCH_BOCHA_KEY", "bocha_key"),
+        ("JX_SEARCH_BOCHA_BASE", "bocha_base"),
     ):
         v = os.environ.get(env_name, "").strip()
         if v:
@@ -96,9 +113,9 @@ def search_zhipu(query, count, key):
                 ("publish_date", "date"))
 
 
-def search_bocha(query, count, key):
+def search_bocha(query, count, key, base=""):
     data = post_json(
-        BOCHA_URL,
+        bocha_url(base),
         {"query": query, "freshness": "noLimit", "summary": True, "count": count},
         {"Authorization": "Bearer " + key},
     )
@@ -140,7 +157,7 @@ def main():
     if keys.get("zhipu_key"):
         engines.append(("zhipu", lambda: search_zhipu(query, count, keys["zhipu_key"])))
     if keys.get("bocha_key"):
-        engines.append(("bocha", lambda: search_bocha(query, count, keys["bocha_key"])))
+        engines.append(("bocha", lambda: search_bocha(query, count, keys["bocha_key"], keys.get("bocha_base", ""))))
     engines.append(("firecrawl", lambda: search_firecrawl(query, count)))
 
     failures = []

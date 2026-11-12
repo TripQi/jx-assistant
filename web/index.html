@@ -663,7 +663,20 @@
               <div class="sf-label">搜索服务</div>
               <input id="set-search-url" class="pf-input" placeholder="https://外网搜索网关地址（留空＝跟随市场服务器同源）" autocomplete="off" spellcheck="false">
               <p class="sf-desc" id="set-search-endpoint"></p>
-              <p class="sf-desc">AI 联网搜索走的 /api/search 网关：填了就用这个地址（可指到外网或另一台 jxai-server），留空则跟随上面的「市场服务器」同源。只接受 http(s) 地址，填好即用、改动即时生效（下次搜索就走新地址，不用重启）。</p>
+              <p class="sf-desc">AI 联网搜索走的 /api/search 网关：填了就用这个地址（可指到外网或另一台 jxai-server），留空则跟随上面的「市场服务器」同源。只接受 http(s) 地址，填好即用、改动即时生效（下次搜索就走新地址，不用重启）。这条网关就是下面列表里的「公司网关」供应商。</p>
+            </div>
+            <div class="set-field sp-field">
+              <div class="sf-label">搜索供应商（按顺序回落：一家失败才换下一家）</div>
+              <!-- 供应商列表由 app-settings.js 的 renderSearchProviders 渲染（增删/上下移/启停/
+                   展开编辑/测试）；公司网关也是其中一条，地址取上面的「搜索服务」 -->
+              <div id="sp-list" class="sp-list"></div>
+              <div class="sp-toolbar">
+                <button id="sp-add" class="pf-add sp-add" type="button">＋ 添加供应商</button>
+                <label class="sp-budget">一次搜索的总耗时预算
+                  <input id="set-search-budget" type="number" min="5" max="120" step="5"><span>秒</span>
+                </label>
+              </div>
+              <p class="sf-desc">按顺序逐个尝试，<b>只有失败才回落下一家</b>（网络/DNS 错误、超时、HTTP 非 2xx、响应解析失败）；<b>成功但 0 条结果不回落</b>——空结果也是答案。总耗时是预算（默认 20 秒，5–120），不是每家超时相加。点「编辑」可改 Key / 地址 / 能力，点「测试」直接打一次真实搜索，看耗时与结果条数。</p>
             </div>
           </div>
           <div class="gen-section">

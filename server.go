@@ -318,6 +318,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/providers/delete", a.handleDeleteProvider)
 	mux.HandleFunc("POST /api/providers/test", a.handleTestProvider)
 	mux.HandleFunc("POST /api/providers/fetch", a.handleFetchModels)
+	// 搜索供应商测试（websearch_providers.go 的设置页「测试」按钮）：直接打一次
+	// 最小搜索，回耗时/条数/首条标题与可读的失败类别。只给界面用，不进 AI 目录。
+	mux.HandleFunc("POST /api/search-providers/test", a.handleTestSearchProvider)
 	a.apiRoute(mux, "GET /api/sessions", a.handleListSessions, apiMeta{Summary: "会话列表", Params: "parent=按父会话查子对话", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/sessions", a.handleCreateSession, apiMeta{Summary: "新建会话", Params: "mode/workspace/title/provider/model/permission/planMode/parent/inheritContext 等", Perm: permWorkspace})
 	a.apiRoute(mux, "GET /api/sessions/{id}", a.handleGetSession, apiMeta{Summary: "会话详情（含运行态/排队/最近错误）", Perm: permReadOnly})
@@ -1523,6 +1526,11 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"searchURL":         a.Cfg.SearchURL,
 		"searchEndpoint":    searchBase,
 		"searchEndpointErr": searchBaseErrText,
+		// 搜索供应商（websearch_providers.go）：公司网关 + 用户自配的第三方服务，
+		// 按 order 顺序回落；Key 只回掩码（与模型提供方同口径）
+		"searchProviders":  a.searchProviderViews(),
+		"searchKinds":      searchKinds(), // 类型清单元数据（默认地址/能力位），前端不硬编码
+		"searchTimeoutSec": a.Cfg.searchBudgetSec(),
 		// 公司接入的「身份三件套」：只用于向导表单预填（重跑接入向导、以及新版
 		// 一次性重新接入失败时弹出的向导），不含任何密钥
 		"wizardCompany":   a.Cfg.WizardCompany,
@@ -1570,6 +1578,9 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		RemotePort         *int    `json:"remotePort"`     // 中继网关端口
 		MarketURL          *string `json:"marketURL"`      // 市场（技能/组件/插件）服务器清单地址
 		SearchURL          *string `json:"searchURL"`      // 搜索服务地址（web_search 的 /api/search 网关；空=跟随市场同源）
+		// 搜索供应商（websearch_providers.go）：整体替换；apiKey 空串 = 沿用同 id 已保存的
+		SearchProviders  *[]SearchProviderCfg `json:"searchProviders"`
+		SearchTimeoutSec *int                 `json:"searchTimeoutSec"` // 一次 web_search 的总耗时预算（秒，0=默认 20）
 		PublisherName      *string `json:"publisherName"`  // 发布者姓名（市场条目归属名；发布/删除自己条目时用）
 		WizardDone         *bool   `json:"wizardDone"`     // 首启向导：完成/跳过（不再自动弹）
 		CompanyLinkOff     *bool   `json:"companyLinkOff"` // 公司接入停用（设置·网络访问开关）：不弹向导、向导接口拒绝、同步器停转
@@ -1759,6 +1770,27 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		a.Cfg.SearchURL = u
+	}
+	// 搜索供应商（websearch_providers.go）：整体替换，空 Key 沿用同 id 已保存的
+	if v := body.SearchProviders; v != nil {
+		if err := a.applySearchProviders(*v); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if v := body.SearchTimeoutSec; v != nil {
+		sec := *v
+		if sec <= 0 {
+			a.Cfg.SearchTimeoutSec = 0 // 0 = 用默认 20 秒
+		} else {
+			if sec < 5 {
+				sec = 5
+			}
+			if sec > 120 {
+				sec = 120
+			}
+			a.Cfg.SearchTimeoutSec = sec
+		}
 	}
 	if v := body.PublisherName; v != nil {
 		name := strings.TrimSpace(*v)

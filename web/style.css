@@ -3570,3 +3570,68 @@ html.electron-shell .bpw-hint { display: none; }
 }
 .hk-conf-title { font-size: 12.5px; font-weight: 600; color: var(--danger); margin-bottom: 6px; }
 .hk-conf-item { font-size: 12px; color: var(--text-2); line-height: 1.7; }
+
+/* ---------- 设置 · 网络访问：联网搜索供应商列表（websearch_providers.go） ----------
+   一行一条供应商：启停 / 顺位 / 名称 / 类型 / 能力 / 地址 / Key 掩码 / 操作按钮；
+   点「编辑」在行内展开详情。窄屏靠 flex-wrap 折行，深色主题只用 CSS 变量上色。 */
+.sp-field { max-width: none; }
+.sp-list { display: flex; flex-direction: column; gap: 8px; }
+.sp-row {
+  border: 1px solid var(--border-2); border-radius: 10px;
+  background: var(--bg); padding: 8px 10px;
+}
+.sp-row.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-2)); }
+.sp-row.off { opacity: .6; }
+.sp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sp-order {
+  flex: 0 0 auto; min-width: 20px; height: 18px; line-height: 18px; text-align: center;
+  font-size: 11px; border-radius: 6px; background: var(--chip); color: var(--text-2);
+}
+.sp-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.sp-tag {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border-2); color: var(--text-2); white-space: nowrap;
+}
+.sp-tag.kind { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.sp-tag.warn { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.sp-base {
+  font-size: 11px; color: var(--text-3); max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sp-key {
+  font-size: 11px; color: var(--text-3);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+}
+.sp-btns { margin-left: auto; display: flex; gap: 4px; flex-wrap: nowrap; }
+.sp-btns button {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-2); background: var(--bg); color: var(--text-2);
+}
+.sp-btns button:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.sp-btns button:disabled { opacity: .4; cursor: default; }
+.sp-btns button[data-act="del"]:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.sp-body {
+  margin-top: 10px; display: grid; gap: 8px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.sp-body .sp-f { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-3); min-width: 0; }
+.sp-body .sp-f input, .sp-body .sp-f select {
+  width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px;
+  border: 1px solid var(--border-2); border-radius: 6px;
+  background: var(--bg); color: var(--text);
+}
+.sp-body .sp-f input:focus, .sp-body .sp-f select:focus { outline: none; border-color: var(--accent); }
+.sp-caps { display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--text-2); padding-top: 3px; }
+.sp-caps label { display: inline-flex; gap: 4px; align-items: center; }
+.sp-result { font-size: 11px; margin-top: 6px; }
+.sp-result:empty { display: none; }
+.sp-ok { color: #1a7f37; }
+.sp-bad { color: var(--danger); }
+.sp-test-run { color: var(--text-3); }
+.sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.sp-add { width: auto; margin-top: 0; padding: 7px 14px; }
+.sp-budget { font-size: 11px; color: var(--text-3); display: inline-flex; align-items: center; gap: 6px; }
+.sp-budget input {
+  width: 76px; padding: 5px 8px; font-size: 12px; box-sizing: border-box;
+  border: 1px solid var(--border-2); border-radius: 6px; background: var(--bg); color: var(--text);
+}

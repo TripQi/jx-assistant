@@ -3573,36 +3573,76 @@ html.electron-shell .bpw-hint { display: none; }
 
 /* ---------- 设置 · 网络访问：联网搜索供应商列表（websearch_providers.go） ----------
    一行一条供应商：启停 / 顺位 / 名称 / 类型 / 能力 / 地址 / Key 掩码 / 操作按钮；
-   点「编辑」在行内展开详情。窄屏靠 flex-wrap 折行，深色主题只用 CSS 变量上色。 */
+   点「编辑」在行内展开详情。深色主题只用 CSS 变量上色。
+
+   收起态**每行等高**（这是硬要求，别改回 flex-wrap 折行——内容长短不一就会撑出
+   参差行高）：一行固定三行槽位，行高写死、内容一律单行省略。
+     行1 .sp-head   启停/顺位/名称/类型/操作  26px
+     行2 .sp-meta   能力标签/地址/Key 掩码     16px
+     行3 .sp-status 不可用原因 + 测试结果      16px（无内容也占位，不塌陷）
+   长 baseURL 省略、不可用原因与测试结果共用第 3 行槽位，所以「点测试出结果」「网关
+   变成不可用」都不会让某一行跳高；展开编辑态（.open）多出 .sp-body 变高属于用户
+   主动操作，不在此约束内。 */
 .sp-field { max-width: none; }
 .sp-list { display: flex; flex-direction: column; gap: 8px; }
-.sp-row {
+.sp-item {
   border: 1px solid var(--border-2); border-radius: 10px;
   background: var(--bg); padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
 }
-.sp-row.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-2)); }
-.sp-row.off { opacity: .6; }
-.sp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sp-item.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-2)); }
+.sp-item.off { opacity: .6; }
+.sp-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+  height: 26px; min-width: 0;
+}
 .sp-order {
   flex: 0 0 auto; min-width: 20px; height: 18px; line-height: 18px; text-align: center;
   font-size: 11px; border-radius: 6px; background: var(--chip); color: var(--text-2);
 }
-.sp-name { font-size: 13px; font-weight: 600; color: var(--text); }
+/* 名称占剩余宽度、超长省略（flex-shrink 让长名字先缩，按钮永远钉在右边） */
+.sp-name {
+  flex: 0 1 auto; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .sp-tag {
-  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 999px;
   border: 1px solid var(--border-2); color: var(--text-2); white-space: nowrap;
 }
 .sp-tag.kind { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
-.sp-tag.warn { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+/* 第2行：能力标签槽位固定宽（0/1/2 个标签都占同样宽度，地址列各行的起点才对齐） */
+.sp-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+  height: 16px; min-width: 0;
+}
+.sp-capslot {
+  flex: 0 1 78px; min-width: 0; height: 16px; display: flex; gap: 4px;
+  align-items: center; overflow: hidden;
+}
+.sp-capslot .sp-tag {
+  font-size: 10.5px; padding: 0 6px; line-height: 14px;
+}
 .sp-base {
-  font-size: 11px; color: var(--text-3); max-width: 200px;
+  flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--text-3);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Key 掩码定宽（掩码长短不一也不推动地址列） */
 .sp-key {
-  font-size: 11px; color: var(--text-3);
+  flex: 0 0 auto; max-width: 118px; font-size: 11px; color: var(--text-3);
   font-family: ui-monospace, Consolas, "Courier New", monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sp-btns { margin-left: auto; display: flex; gap: 4px; flex-wrap: nowrap; }
+/* 第3行：不可用原因（左，可省）+ 测试结果（右），两者共用这一行、都不额外占高 */
+.sp-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+  height: 16px; min-width: 0; font-size: 11px;
+}
+.sp-hint {
+  flex: 0 1 auto; min-width: 0; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sp-hint .sp-warn { color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); border-radius: 999px; padding: 0 6px; margin-right: 2px; font-weight: 400; line-height: 14px; }
+.sp-btns { flex: 0 0 auto; margin-left: auto; display: flex; gap: 4px; flex-wrap: nowrap; }
 .sp-btns button {
   font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--border-2); background: var(--bg); color: var(--text-2);
@@ -3611,7 +3651,7 @@ html.electron-shell .bpw-hint { display: none; }
 .sp-btns button:disabled { opacity: .4; cursor: default; }
 .sp-btns button[data-act="del"]:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .sp-body {
-  margin-top: 10px; display: grid; gap: 8px 12px;
+  margin-top: 4px; display: grid; gap: 8px 12px;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
 .sp-body .sp-f { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-3); min-width: 0; }
@@ -3623,8 +3663,12 @@ html.electron-shell .bpw-hint { display: none; }
 .sp-body .sp-f input:focus, .sp-body .sp-f select:focus { outline: none; border-color: var(--accent); }
 .sp-caps { display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--text-2); padding-top: 3px; }
 .sp-caps label { display: inline-flex; gap: 4px; align-items: center; }
-.sp-result { font-size: 11px; margin-top: 6px; }
-.sp-result:empty { display: none; }
+/* 测试结果固定占一行：空着也留位（旧版 :empty{display:none} 会在出结果时把行撑高），
+   长结果单行省略、完整内容靠 title 或测试文本本身 */
+.sp-result {
+  flex: 1 1 auto; min-width: 0; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .sp-ok { color: #1a7f37; }
 .sp-bad { color: var(--danger); }
 .sp-test-run { color: var(--text-3); }

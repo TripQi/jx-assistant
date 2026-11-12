@@ -1618,26 +1618,32 @@ function renderSearchProviders(c) {
       + '点「添加供应商」可以接自己的 DeepSeek / Tavily / AnySearch 等。</p>';
 }
 
+// spRowHTML 一行一条供应商。收起态的行高由三行固定槽位决定（见 style.css 的 .sp-item
+// 注释）：长地址省略、不可用原因与测试结果共用第 3 行槽位——内容怎么变行高都不变。
+// 行容器类名用 .sp-item 而不是 .sp-row：语音组件的 client.css 已占用 .sp-row
+// （它注入页面后会把 gap/align-items/margin 套到本列表的每一行上）。
 function spRowHTML(p, i) {
   const open = spOpen.has(p.id);
   const caps = [];
   if (p.capabilities && p.capabilities.search) caps.push('搜索');
   if (p.capabilities && p.capabilities.extract) caps.push('抽取');
   const tags = caps.map((t) => '<span class="sp-tag">' + esc(t) + '</span>').join('');
-  const warn = p.available === false
-    ? '<span class="sp-tag warn" title="' + esc(p.unavailableHint || '') + '">不可用</span>'
-    : '';
+  // 不可用原因不单独占一行：状态槽位里给「不可用」小标签 + 原因（单行省略，title 看全）
+  const hint = p.available === false
+    ? '<span class="sp-hint" title="' + esc(p.unavailableHint || '') + '">'
+      + '<b class="sp-warn">不可用</b>'
+      + (p.unavailableHint ? esc(p.unavailableHint) : '') + '</span>'
+    : '<span class="sp-hint"></span>';
   const key = p.kind === 'gateway' ? '服务端持 Key' : (p.apiKeyMasked || '未填 Key');
-  return '<div class="sp-row' + (open ? ' open' : '') + (p.enabled === false ? ' off' : '')
+  const name = p.name || p.kindLabel || p.kind;
+  return '<div class="sp-item' + (open ? ' open' : '') + (p.enabled === false ? ' off' : '')
     + '" data-id="' + esc(p.id) + '">'
     + '<div class="sp-head">'
     + '<label class="pr-toggle" title="启用 / 停用"><input type="checkbox" data-act="toggle"'
     + (p.enabled === false ? '' : ' checked') + '><span></span></label>'
     + '<span class="sp-order">' + (i + 1) + '</span>'
-    + '<span class="sp-name">' + esc(p.name || p.kindLabel || p.kind) + '</span>'
-    + '<span class="sp-tag kind">' + esc(p.kindLabel || p.kind) + '</span>' + tags + warn
-    + '<span class="sp-base" title="' + esc(p.baseURL || '') + '">' + esc(p.baseURL || '（内置默认地址）') + '</span>'
-    + '<span class="sp-key">' + esc(key) + '</span>'
+    + '<span class="sp-name" title="' + esc(name) + '">' + esc(name) + '</span>'
+    + '<span class="sp-tag kind">' + esc(p.kindLabel || p.kind) + '</span>'
     + '<span class="sp-btns">'
     + '<button type="button" data-act="up" title="上移（更先用）"' + (i === 0 ? ' disabled' : '') + '>↑</button>'
     + '<button type="button" data-act="down" title="下移（更后用）"' + (i === spRows.length - 1 ? ' disabled' : '') + '>↓</button>'
@@ -1645,8 +1651,13 @@ function spRowHTML(p, i) {
     + '<button type="button" data-act="test">测试</button>'
     + '<button type="button" data-act="del" title="删除">✕</button>'
     + '</span></div>'
+    + '<div class="sp-meta">'
+    + '<span class="sp-capslot">' + tags + '</span>'
+    + '<span class="sp-base" title="' + esc(p.baseURL || '') + '">' + esc(p.baseURL || '（内置默认地址）') + '</span>'
+    + '<span class="sp-key" title="' + esc(key) + '">' + esc(key) + '</span>'
+    + '</div>'
+    + '<div class="sp-status">' + hint + '<span class="sp-result"></span></div>'
     + (open ? spBodyHTML(p) : '')
-    + '<div class="sp-result"></div>'
     + '</div>';
 }
 
@@ -1708,9 +1719,11 @@ function spBodyHTML(p) {
 }
 
 // spTest 直接打一次真实搜索（后端 /api/search-providers/test）：耗时、条数、首条标题，
-// 失败说清是哪一类（Key 无效 / 额度用尽 / 被限流 / 连不上），不必等到真搜才发现 Key 错了
+// 失败说清是哪一类（Key 无效 / 额度用尽 / 被限流 / 连不上），不必等到真搜才发现 Key 错了。
+// 结果写进第 3 行的固定槽位（单行省略），完整文字放 title，这样出结果不会把行撑高
 async function spTest(id, box) {
   if (!box) return;
+  box.title = '';
   box.innerHTML = '<span class="sp-test-run">正在打一次真实搜索…</span>';
   try {
     const r = await api('/api/search-providers/test', { method: 'POST', body: JSON.stringify({ id }) });
@@ -1726,10 +1739,11 @@ async function spTest(id, box) {
   } catch (e) {
     box.innerHTML = '<span class="sp-bad">✗ ' + esc(e.message) + '</span>';
   }
+  box.title = box.textContent.trim(); // 槽位单行省略，悬停能看全
 }
 
 function spRowByEl(el) {
-  const row = el.closest ? el.closest('.sp-row') : null;
+  const row = el.closest ? el.closest('.sp-item') : null;
   if (!row) return null;
   const p = spRows.find((x) => x.id === row.dataset.id);
   return p ? { row, p } : null;

@@ -1,6 +1,6 @@
 {
   "id": "web-search-local",
   "name": "本机网络搜索",
-  "version": "1.0.0",
-  "description": "web_search 工具连不上服务端时的本机联网搜索兜底：用本机网络直接调搜索 API（默认 Firecrawl 免 key 通道，可配智谱/博查 key），输出与服务端 web_search 同格式的结果列表。"
+  "version": "1.1.0",
+  "description": "web_search 全都调不通时的本机联网搜索兜底：用本机网络走 Firecrawl 免 Key 通道直接搜（不读任何 Key），输出与服务端 web_search 同格式的结果列表。按次计费的搜索引擎请配成 web_search 的搜索供应商。"
 }

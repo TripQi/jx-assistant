@@ -1615,7 +1615,7 @@ function renderSearchProviders(c) {
   box.innerHTML = spRows.length
     ? spRows.map((p, i) => spRowHTML(p, i)).join('')
     : '<p class="sf-desc">还没配置任何供应商：搜索只会走上面的「搜索服务」网关（公司服务端持 Key）。'
-      + '点「添加供应商」可以接自己的 DeepSeek / Tavily / AnySearch 等。</p>';
+      + '点「添加供应商」选一种接进来（DeepSeek / Tavily / AnySearch / 博查 / 智谱）。</p>';
 }
 
 // spRowHTML 一行一条供应商。收起态的行高由三行固定槽位决定（见 style.css 的 .sp-item
@@ -1633,7 +1633,11 @@ function spRowHTML(p, i) {
     ? '<span class="sp-hint" title="' + esc(p.unavailableHint || '') + '">'
       + '<b class="sp-warn">不可用</b>'
       + (p.unavailableHint ? esc(p.unavailableHint) : '') + '</span>'
-    : '<span class="sp-hint"></span>';
+    : (p.keyMissing
+      // 没填 Key 仍算可用（填上就活），但如实标出来：调用必然失败，别以为能搜
+      ? '<span class="sp-hint" title="这一家要自带 API Key，还没填：仍按顺位参与回落，但每次调用都会失败（Key 无效或无权限）">'
+        + '<b class="sp-warn">未填 Key</b>调用会失败</span>'
+      : '<span class="sp-hint"></span>');
   const key = p.kind === 'gateway' ? '服务端持 Key' : (p.apiKeyMasked || '未填 Key');
   const name = p.name || p.kindLabel || p.kind;
   return '<div class="sp-item' + (open ? ' open' : '') + (p.enabled === false ? ' off' : '')
@@ -1821,18 +1825,40 @@ $('sp-list').addEventListener('change', async (e) => {
   }
 });
 
-// 新增一条：默认挑一种支持搜索的第三方类型（公司网关只该有一条），加好即展开编辑
-$('sp-add').onclick = async () => {
-  const m = spKinds.find((k) => k.kind !== 'gateway' && k.search) || spKinds[0] || { kind: 'deepseek', label: 'DeepSeek', search: true, extract: false, defaultBase: '' };
+// 「添加供应商」下拉：类型清单直接按后端下发的 searchKinds 渲染（公司网关 / DeepSeek /
+// Tavily / AnySearch / 博查 / 智谱），选哪一种就加哪一种——原来固定加 DeepSeek，
+// 博查/智谱在界面上根本没有入口。公司网关只该有一条，已在列表里就置灰。
+$('sp-add').onclick = () => {
+  const box = $('sp-add-pop');
+  const hasGateway = spRows.some((p) => p.kind === 'gateway');
+  const kinds = spKinds.length ? spKinds : [];
+  box.innerHTML = kinds.length
+    ? kinds.map((k) => {
+      const dup = k.kind === 'gateway' && hasGateway;
+      const sub = k.kind === 'gateway' ? '服务端持 Key' : (k.extract ? '搜索 + 抽取' : '只搜索');
+      return '<button class="pop-item" type="button" data-kind="' + esc(k.kind) + '"'
+        + (dup ? ' disabled title="公司网关已在列表里，一条就够"' : '')
+        + '><span>' + esc(k.label) + '</span>'
+        + '<span class="pop-sub">' + esc(dup ? '已在列表' : sub) + '</span></button>';
+    }).join('')
+    : '<div class="pop-group">类型清单还没加载出来（刷新设置页再试）</div>';
+  openPopover('sp-add-pop', $('sp-add'));
+};
+
+$('sp-add-pop').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-kind]');
+  if (!btn || btn.disabled) return;
+  const m = spKindMeta(btn.dataset.kind);
+  closePopovers();
   const id = 'sp-' + Date.now().toString(36);
   spRows.push({
     id, name: m.label, kind: m.kind, baseURL: m.defaultBase || '',
     capabilities: { search: !!m.search, extract: !!m.extract },
     enabled: true, order: spRows.length + 1, available: true,
   });
-  spOpen.add(id);
+  spOpen.add(id); // 加好即展开编辑（Base URL 占位与能力位按该类型渲染）
   try { await spSave(); } catch (err) { alert('保存失败：' + err.message); }
-};
+});
 
 $('set-search-budget').onchange = async () => {
   const v = parseInt($('set-search-budget').value, 10) || 0;

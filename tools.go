@@ -1458,11 +1458,58 @@ func runWebFetch(t *toolContext, args json.RawMessage) (string, error) {
 		}
 		return "", local.err
 	}
-	// 本地抓到了但不可用（JS 空壳/正文过短）：如实说清楚，别把空壳当正文喂给模型
-	if len(fails) > 0 {
-		return "", fmt.Errorf("页面没有可用的正文（%s），供应商抽取也没成功：%s", local.reason, strings.Join(fails, "；"))
+	// 登录墙/付费墙不是「抓取失败」：点明原因，模型才知道该换公开来源/摘要页，
+	// 而不是把同一个地址反复重试。
+	hint := ""
+	if local.loginWall {
+		hint = "；这是登录墙/付费墙（正文需要登录或订阅才能看到），换公开来源或让用户自己登录后再看"
 	}
-	return "", fmt.Errorf("页面没有可用的正文（%s）；可在 设置 · 网络访问 · 联网搜索 里配置具备「抽取」能力的供应商兜底", local.reason)
+	// 本地抓到了但不可用（登录墙/JS 空壳/正文过短）：如实说清楚，别把壳页当正文喂给模型
+	if len(fails) > 0 {
+		return "", fmt.Errorf("页面没有可用的正文（%s）%s，供应商抽取也没成功：%s", local.reason, hint, strings.Join(fails, "；"))
+	}
+	return "", fmt.Errorf("页面没有可用的正文（%s）%s；可在 设置 · 网络访问 · 联网搜索 里配置具备「抽取」能力的供应商兜底", local.reason, hint)
+}
+
+// loginWallMaxChars 登录墙判定的字数门槛：正文短于此值才可能是「登录壳页」。
+// 实测知乎首页 498 字、x.com 443 字都是扫码/注册页——过了「正文过短」的 200
+// 门槛、也没有 JS 空壳标记，老判据于是把它们当正常正文喂给了模型。
+const loginWallMaxChars = 1200
+
+// loginWallMarkers 登录墙/付费墙特征词（小写比较，中英混放，以后要补就往这里加）。
+// 只收「单看就能定性」的组合词，不收「登录」「Sign in」这类单词词根：正常文章
+// 的评论区/页脚出现一句"请登录后评论"是常态，真正把关的是上面的字数门槛。
+var loginWallMarkers = []string{
+	// 中文站（知乎等）
+	"扫码登录", "扫码登陆", "验证码登录", "密码登录", "手机号登录", "微信登录",
+	"其他方式登录", "登录/注册", "登录或注册", "登录后查看", "登录后阅读",
+	"登录以继续", "登录以查看", "登录查看更多", "请先登录", "请登录后", "立即登录", "去登录",
+	// 付费墙
+	"订阅后查看", "付费后查看", "会员专享", "购买后查看",
+	// 英文站（x.com / Medium / 各类订阅站）
+	"sign in to continue", "log in to continue", "sign up to continue",
+	"sign in to view", "sign in to read", "log in to view",
+	"please log in", "please sign in", "login required", "sign in required",
+	"already have an account", "continue with google", "continue with apple",
+	"enable javascript and cookies to continue",
+	"subscribe to continue", "subscribe to read", "this content is for subscribers",
+}
+
+// looksLikeLoginWall 判断正文是不是「要先登录/订阅才能看」的壳页。命中特征词
+// **且** 正文很短（< loginWallMaxChars）才算——保守是刻意的：一篇正常长文里
+// 出现"登录"二字再常见不过，正文够长就一律不下这个判断。
+func looksLikeLoginWall(text string) (marker string, hit bool) {
+	n := len([]rune(text))
+	if n == 0 || n >= loginWallMaxChars {
+		return "", false
+	}
+	l := strings.ToLower(text)
+	for _, m := range loginWallMarkers {
+		if strings.Contains(l, m) {
+			return m, true
+		}
+	}
+	return "", false
 }
 
 // webFetchLocal 本地直抓的结果。reason 非空表示「需要供应商抽取兜底」：
@@ -1472,11 +1519,13 @@ type webFetchLocal struct {
 	text   string
 	err    error
 	reason string
+	// loginWall 判定为登录墙/付费墙：兜底也失败时要单独点明原因（不是普通抓取失败）
+	loginWall bool
 }
 
-// fetchWebPage 本地直抓一个页面并按「能不能直接给模型用」判定。需要兜底的四种
-// 情形（与调研报告 §8.6 一致）：非 2xx（403/429 常见于反爬）、响应类型不支持、
-// HTML 剥完正文过短（JS 空壳）、正文短且带 JS 壳特征。
+// fetchWebPage 本地直抓一个页面并按「能不能直接给模型用」判定。需要兜底的情形
+// （与调研报告 §8.6 一致）：非 2xx（403/429 常见于反爬）、响应类型不支持、
+// 登录墙/付费墙壳页、HTML 剥完正文过短（JS 空壳）、正文短且带 JS 壳特征。
 func fetchWebPage(ctx context.Context, pageURL string) webFetchLocal {
 	client := &http.Client{Timeout: 20 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
@@ -1514,6 +1563,12 @@ func fetchWebPage(ctx context.Context, pageURL string) webFetchLocal {
 	text = strings.TrimSpace(text)
 	if isHTML {
 		n := len([]rune(text))
+		// 登录墙先判：它的字数常常正好落在 200~500（知乎 498 / x.com 443），
+		// 既过不了「正文过短」也配不上 JS 空壳标记，必须单独认出来。
+		if marker, wall := looksLikeLoginWall(text); wall {
+			return webFetchLocal{status: resp.StatusCode, text: text, loginWall: true,
+				reason: fmt.Sprintf("疑似登录墙/付费墙（命中「%s」，正文仅 %d 字）", marker, n)}
+		}
 		if n < 200 {
 			return webFetchLocal{status: resp.StatusCode, text: text,
 				reason: fmt.Sprintf("正文只有 %d 字，疑似 JS 空壳页", n)}

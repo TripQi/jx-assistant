@@ -111,6 +111,83 @@ func TestWebFetchExtractFallback(t *testing.T) {
 	}
 }
 
+// 登录墙/付费墙：知乎首页 498 字、x.com 443 字这种扫码登录页字数和壳标记都过关，
+// 老判据把它们当成了正常正文。现在要认出来走抽取兜底，且不能误伤含「登录」的长文。
+func TestWebFetchLoginWall(t *testing.T) {
+	var extractHits int32
+	ext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&extractHits, 1)
+		w.Write([]byte(`{"title":"标题","content":"# 站外抽取到的正文"}`))
+	}))
+	defer ext.Close()
+	// 模拟知乎：正文只有登录框文案，字数 400+（过了「正文过短」的门槛）
+	loginPage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<html><body><div class="modal">` +
+			strings.Repeat("<p>知乎 - 有问题，就会有答案</p>", 10) +
+			`<p>验证码登录</p><p>密码登录</p><p>其他扫码方式：微信</p><p>登录/注册</p><p>忘记密码</p></div></body></html>`))
+	}))
+	defer loginPage.Close()
+
+	// ① 登录页正文 → 判为登录墙并走抽取兜底，结果标注来源
+	res := fetchWebPage(context.Background(), loginPage.URL)
+	if res.reason == "" || !res.loginWall {
+		t.Fatalf("登录页应判为需要兜底（reason=%q loginWall=%v）", res.reason, res.loginWall)
+	}
+	tc := &toolContext{ctx: context.Background(), app: searchTestApp(testDeepSeek(ext.URL, "sk-test", 1)),
+		sess: &SessionMeta{ID: "s", Permission: permFull}}
+	out, err := runWebFetch(tc, json.RawMessage(`{"url":"`+loginPage.URL+`"}`))
+	if err != nil {
+		t.Fatalf("登录墙应改由供应商抽取成功: %v", err)
+	}
+	if !strings.Contains(out, "经 DeepSeek 抽取") || !strings.Contains(out, "站外抽取到的正文") {
+		t.Fatalf("应标注抽取来源并给出正文:\n%s", out)
+	}
+	if strings.Contains(out, "验证码登录") {
+		t.Fatalf("登录壳页正文不该喂给模型:\n%s", out)
+	}
+	if n := atomic.LoadInt32(&extractHits); n != 1 {
+		t.Fatalf("抽取应被调用 1 次（实际 %d）", n)
+	}
+
+	// ② 正常长文里出现「登录」字样 → 不触发（抽取是按次计费的）
+	longHTML := "<html><body><article><p>" + strings.Repeat("这篇文章讨论登录鉴权的设计取舍。", 120) +
+		"</p><p>文末提醒：请登录后参与评论。</p></article></body></html>"
+	longPage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(longHTML))
+	}))
+	defer longPage.Close()
+	if res := fetchWebPage(context.Background(), longPage.URL); res.reason != "" || res.loginWall {
+		t.Fatalf("长文含「登录」不该判成登录墙：reason=%q", res.reason)
+	}
+	atomic.StoreInt32(&extractHits, 0)
+	out, err = runWebFetch(tc, json.RawMessage(`{"url":"`+longPage.URL+`"}`))
+	if err != nil {
+		t.Fatalf("长文不该报错: %v", err)
+	}
+	if atomic.LoadInt32(&extractHits) != 0 || strings.Contains(out, "抽取") {
+		t.Fatalf("长文不该走抽取:\n%s", out)
+	}
+
+	// ③ 兜底也失败 → 文案点明是登录墙，别让模型当成普通抓取失败反复重试
+	deadExt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(402)
+	}))
+	defer deadExt.Close()
+	tc2 := &toolContext{ctx: context.Background(), app: searchTestApp(testDeepSeek(deadExt.URL, "sk-test", 1)),
+		sess: &SessionMeta{ID: "s", Permission: permFull}}
+	_, err = runWebFetch(tc2, json.RawMessage(`{"url":"`+loginPage.URL+`"}`))
+	if err == nil {
+		t.Fatal("全失败时应返回错误")
+	}
+	for _, want := range []string{"登录", "登录墙", "额度或余额不足"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误文案应含 %q：%v", want, err)
+		}
+	}
+}
+
 // 抽取结果限长：几万字的正文不能整个塞进上下文。
 func TestExtractFallbackClip(t *testing.T) {
 	huge := strings.Repeat("很长的正文", 5000) // 25000 字

@@ -23,19 +23,71 @@ import (
 // 目的：不让某一类工具（历史上 job_output 曾达 512KB）一次吃掉大半个上下文窗口。
 const toolResultMaxBytes = 128 * 1024
 
-// clipToolResult 按字节上限截断一条工具结果，在 rune 边界收口（不劈开多字节
-// 字符），末尾附续读提示——模型据此改用 offset/分页参数继续读，而不是把整段
-// 原始输出塞回上下文。
+// 超限结果的保留比例：头 2/3 + 尾 1/3（整串共用 toolResultMaxBytes 这一份预算，
+// 不是各算一份，所以截断后总长度基本不变）。
+// 为什么留尾：编译错误、测试汇总、命令结论几乎都落在输出末尾。只留头部的老做法
+// 会把它们整段砍掉，模型读不到结论只能重跑命令——一次重跑就是一次全量输入的
+// 十几万 token。留一段尾部让它当场看到结论。（同类做法见 snow-app。）
+const (
+	toolResultHeadNum = 2 // 头部保留比例的分子
+	toolResultHeadDen = 3 // 头部保留比例的分母（尾部为剩下的 1/3）
+)
+
+// toolResultClipMarker 是截断标记的固定前缀。检测「是否已裁过」只认这个前缀，
+// 标记文案后半段可自由调整而不影响去重判断。
+const toolResultClipMarker = "工具结果过长已截断"
+
+// clipToolResult 按字节上限截断一条工具结果：保留头部 2/3 + 尾部 1/3，中间插入
+// 一段省略说明（总字节数、头尾各保留多少、省略了多少、如何分段读取完整内容）。
+// 两个切口都在 rune 边界收口（头部向前回退、尾部向后前进），不会劈开多字节字符。
 func clipToolResult(out string) string {
 	// 已裁过（个别工具如 read 自己就按同一上限裁）就不再重复裁，免得把提示也切掉
-	if len(out) <= toolResultMaxBytes || strings.Contains(out, "工具结果过长已截断") {
+	if len(out) <= toolResultMaxBytes || strings.Contains(out, toolResultClipMarker) {
 		return out
 	}
-	cut := toolResultMaxBytes
-	for cut > 0 && !utf8.RuneStart(out[cut]) {
+	// 头尾共用同一份字节预算：headLimit + tailLimit == toolResultMaxBytes
+	headLimit := toolResultMaxBytes * toolResultHeadNum / toolResultHeadDen
+	tailLimit := toolResultMaxBytes - headLimit
+
+	headCut := runeHeadCut(out, headLimit)              // 不超过 headLimit，且落在 rune 边界
+	tailStart := runeTailStart(out, len(out)-tailLimit) // 不早于该位置，且落在 rune 边界
+	// len(out) > toolResultMaxBytes 时必有 tailStart > headLimit >= headCut，omitted > 0
+	omitted := tailStart - headCut
+	marker := fmt.Sprintf(
+		"\n…（%s：原始共 %d 字节，已保留头部 %d 字节 + 尾部 %d 字节，中间省略 %d 字节；需要完整内容请用 offset / 分页参数分段读取）\n",
+		toolResultClipMarker, len(out), headCut, len(out)-tailStart, omitted)
+	return out[:headCut] + marker + out[tailStart:]
+}
+
+// runeHeadCut 返回 <= limit 的最大下标，且该下标落在 rune 起始字节上（向前回退，
+// 宁可少留一两个字节也不劈开多字节字符）。
+func runeHeadCut(s string, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit >= len(s) {
+		return len(s)
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return out[:cut] + fmt.Sprintf("\n…（工具结果过长已截断：共 %d 字节，仅保留前 %d 字节；需要更多请改用 offset / 分页参数分段读取）", len(out), cut)
+	return cut
+}
+
+// runeTailStart 返回 >= limit 的最小下标，且该下标落在 rune 起始字节上（向后前进）。
+func runeTailStart(s string, limit int) int {
+	if limit >= len(s) {
+		return len(s)
+	}
+	if limit <= 0 {
+		return 0
+	}
+	start := limit
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return start
 }
 
 // Event 是后端向前端推送的流式事件（SSE data 帧的载荷）。

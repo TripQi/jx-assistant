@@ -1427,7 +1427,8 @@ func runWebFetch(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return "", fmt.Errorf("仅支持 http/https 地址")
 	}
-	// 防 SSRF：非「完全访问」模式下拒绝内网 / 本机 / 链路本地目标
+	// 防 SSRF：非「完全访问」模式下拒绝内网 / 本机 / 链路本地目标。下面的
+	// 供应商抽取兜底同样受这一层约束（供应商也是代为访问，不能绕过）。
 	if permModeOf(t.sess) != permFull && isPrivateHost(parsed.Hostname()) {
 		return "", fmt.Errorf("权限拒绝：%s 是内网/本机地址，非「完全访问」模式下不允许抓取", parsed.Hostname())
 	}
@@ -1438,34 +1439,125 @@ func runWebFetch(t *toolContext, args json.RawMessage) (string, error) {
 	if maxChars > 100000 {
 		maxChars = 100000
 	}
+	// 先本地直抓（不花钱、不依赖第三方）；拿不到可用正文才走供应商抽取兜底。
+	local := fetchWebPage(t.ctx, u)
+	if local.reason == "" {
+		return renderWebFetch(u, local.status, "", local.text, maxChars), nil
+	}
+	var fails []string
+	if t.app != nil {
+		content, via, errs := t.app.extractFallback(t.ctx, u)
+		fails = errs
+		if via != "" {
+			return renderWebFetch(u, local.status, via, content, maxChars), nil
+		}
+	}
+	if local.err != nil {
+		if len(fails) > 0 {
+			return "", fmt.Errorf("%w（供应商抽取也没成功：%s）", local.err, strings.Join(fails, "；"))
+		}
+		return "", local.err
+	}
+	// 本地抓到了但不可用（JS 空壳/正文过短）：如实说清楚，别把空壳当正文喂给模型
+	if len(fails) > 0 {
+		return "", fmt.Errorf("页面没有可用的正文（%s），供应商抽取也没成功：%s", local.reason, strings.Join(fails, "；"))
+	}
+	return "", fmt.Errorf("页面没有可用的正文（%s）；可在 设置 · 网络访问 · 联网搜索 里配置具备「抽取」能力的供应商兜底", local.reason)
+}
+
+// webFetchLocal 本地直抓的结果。reason 非空表示「需要供应商抽取兜底」：
+// err 是老版本那条错误（直抓失败时的原样文案），text 是能拿到的部分正文。
+type webFetchLocal struct {
+	status int
+	text   string
+	err    error
+	reason string
+}
+
+// fetchWebPage 本地直抓一个页面并按「能不能直接给模型用」判定。需要兜底的四种
+// 情形（与调研报告 §8.6 一致）：非 2xx（403/429 常见于反爬）、响应类型不支持、
+// HTML 剥完正文过短（JS 空壳）、正文短且带 JS 壳特征。
+func fetchWebPage(ctx context.Context, pageURL string) webFetchLocal {
 	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return "", err
+		return webFetchLocal{err: err, reason: "请求构造失败"}
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; JXAssistant/0.1)")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求失败: %w", err)
+		return webFetchLocal{err: fmt.Errorf("请求失败: %w", err), reason: "连接失败"}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw := string(body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncateRunes(string(body), 300))
+		return webFetchLocal{
+			status: resp.StatusCode,
+			err:    fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncateRunes(raw, 300)),
+			reason: fmt.Sprintf("HTTP %d", resp.StatusCode),
+		}
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
-	text := string(body)
-	if strings.Contains(ct, "html") || looksLikeHTML(text) {
-		text = stripHTML(text)
+	isHTML := strings.Contains(ct, "html") || looksLikeHTML(raw)
+	text := raw
+	if isHTML {
+		text = stripHTML(raw)
 	} else if !strings.Contains(ct, "text") && !strings.Contains(ct, "json") &&
 		!strings.Contains(ct, "xml") && !strings.Contains(ct, "javascript") && ct != "" {
-		return "", fmt.Errorf("不支持的响应类型：%s（仅支持文本类内容）", ct)
+		return webFetchLocal{
+			status: resp.StatusCode,
+			err:    fmt.Errorf("不支持的响应类型：%s（仅支持文本类内容）", ct),
+			reason: "响应类型不支持（" + ct + "）",
+		}
+	}
+	text = strings.TrimSpace(text)
+	if isHTML {
+		n := len([]rune(text))
+		if n < 200 {
+			return webFetchLocal{status: resp.StatusCode, text: text,
+				reason: fmt.Sprintf("正文只有 %d 字，疑似 JS 空壳页", n)}
+		}
+		if n < 800 && hasJSShellMarker(raw) {
+			return webFetchLocal{status: resp.StatusCode, text: text, reason: "疑似 JS 空壳页"}
+		}
+	}
+	return webFetchLocal{status: resp.StatusCode, text: text}
+}
+
+// hasJSShellMarker 正文很短时再看原始 HTML 有没有「要浏览器渲染才有内容」的特征。
+// 只在短正文上做判断，避免正常页面里一句 inline 脚本就误触发（抽取是要花钱的）。
+func hasJSShellMarker(rawHTML string) bool {
+	l := strings.ToLower(rawHTML)
+	if len(l) > 65536 {
+		l = l[:65536]
+	}
+	for _, m := range []string{
+		"please enable javascript", "enable javascript", "javascript is disabled",
+		"cf-browser-verification", "checking your browser", "正在加载", "请开启 javascript",
+	} {
+		if strings.Contains(l, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderWebFetch 给模型看的正文：保持老格式「HTTP 状态｜地址」，抽取兜底的结果
+// 在后面注明经谁抽取，便于用户判断内容来自哪条链路。
+func renderWebFetch(pageURL string, status int, via, text string, maxChars int) string {
+	hdr := fmt.Sprintf("HTTP %d｜%s", status, pageURL)
+	if status <= 0 {
+		hdr = "本地直抓失败｜" + pageURL
+	}
+	if via != "" {
+		hdr += "（经 " + via + " 抽取）"
 	}
 	r := []rune(strings.TrimSpace(text))
 	if len(r) > maxChars {
 		r = r[:maxChars]
 	}
-	return fmt.Sprintf("HTTP %d｜%s\n\n%s", resp.StatusCode, u, string(r)), nil
+	return hdr + "\n\n" + string(r)
 }
 
 // looksLikeHTML 粗判正文是不是 HTML（Content-Type 缺失时的兜底）。

@@ -972,9 +972,8 @@ func spawnConfinedWindows(ctx context.Context, r sandboxRun) (string, error) {
 		truncateRunes(r.childCommandLine(), 120), r.Policy,
 		orUnknown(child.exitText()), time.Since(child.started).Round(time.Millisecond))
 	res := strings.TrimRight(decodeCmdOutput(buf.Bytes()), "\r\n")
-	if len(res) > 64*1024 {
-		res = res[:64*1024] + "\n[输出过长已截断]"
-	}
+	// 截断在解码之后（与前台 run_command 同口径）：头尾双保留，结论在末尾也看得见
+	res = clipHeadTail(res, cmdOutputMaxBytes, cmdTruncNote)
 	if timedOut {
 		res += "\n[命令超时或被取消，已终止]"
 	} else if code, ok := child.exitCodeOr(); ok && code != 0 {

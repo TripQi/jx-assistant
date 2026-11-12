@@ -167,6 +167,123 @@ func TestClipToolResultAlreadyClipped(t *testing.T) {
 	}
 }
 
+// ---------- 公用助手 clipHeadTail（执行层 5 处共用） ----------
+
+// 头尾都在、中间有省略提示、总长 ≈ 上限 + 标记。
+func TestClipHeadTail(t *testing.T) {
+	const headMark = "HEAD-命令开头\n"
+	const tailMark = "\nTAIL-最后一行：FAIL main_test.go:42"
+	big := headMark + strings.Repeat("warning: something looks off\n", cmdOutputMaxBytes/6) + tailMark
+	if len(big) <= cmdOutputMaxBytes {
+		t.Fatalf("测试数据必须超限，当前 %d 字节", len(big))
+	}
+	got := clipHeadTail(big, cmdOutputMaxBytes, cmdTruncNote)
+	if !strings.HasPrefix(got, headMark) {
+		t.Fatal("头部前缀丢失")
+	}
+	if !strings.HasSuffix(got, tailMark) {
+		t.Fatal("尾部结论丢失（执行层截断的核心问题）")
+	}
+	if len(got) < cmdOutputMaxBytes-8 || len(got) > cmdOutputMaxBytes+512 {
+		t.Fatalf("总长度应≈上限+标记: got %d, limit %d", len(got), cmdOutputMaxBytes)
+	}
+	// 标记必须交代三件事 + 下一步该怎么做
+	for _, want := range []string{
+		fmt.Sprintf("原始共 %d 字节", len(big)),
+		"已保留头部",
+		"字节 + 尾部",
+		"中间省略",
+		"重定向到文件后用 read 的 offset 分段读取，不要重复执行同一命令",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("标记文案缺少 %q", want)
+		}
+	}
+	// 未超限原样返回
+	small := "普通命令输出"
+	if got := clipHeadTail(small, cmdOutputMaxBytes, cmdTruncNote); got != small {
+		t.Fatal("未超限应原样返回")
+	}
+}
+
+// 多字节边界：中英/emoji 混排，两个切口都可能落在字符中间。
+func TestClipHeadTailRuneBoundary(t *testing.T) {
+	for _, pad := range []string{"", "x", "xy", "xyz", "a字"} {
+		for _, unit := range []string{"字", "😀", "a字😀"} {
+			src := pad + strings.Repeat(unit, cmdOutputMaxBytes)
+			got := clipHeadTail(src, cmdOutputMaxBytes, cmdTruncNote)
+			if !utf8.ValidString(got) {
+				t.Fatalf("pad=%q unit=%q: 结果不是合法 UTF-8", pad, unit)
+			}
+			if strings.Contains(got, "\uFFFD") {
+				t.Fatalf("pad=%q unit=%q: 出现替换字符（劈开了多字节字符）", pad, unit)
+			}
+			last, _ := utf8.DecodeLastRuneInString(src)
+			if gotLast, _ := utf8.DecodeLastRuneInString(got); gotLast != last {
+				t.Fatalf("pad=%q unit=%q: 末尾字符被破坏: want %q got %q", pad, unit, last, gotLast)
+			}
+		}
+	}
+}
+
+// limit 极小时不能 panic、不能返回非法 UTF-8（头预算可能被挤成 0）。
+func TestClipHeadTailSmallLimit(t *testing.T) {
+	src := strings.Repeat("字😀ab", 1000)
+	for _, limit := range []int{-1, 0, 1, 2, 3, 4, 5, 7, 8, 9, 13, 100} {
+		got := clipHeadTail(src, limit, cmdTruncNote)
+		if limit <= 0 {
+			if got != src {
+				t.Fatalf("limit=%d 应不裁切", limit)
+			}
+			continue
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("limit=%d: 结果不是合法 UTF-8", limit)
+		}
+		if len(got) > limit+512 {
+			t.Fatalf("limit=%d: 结果长度失控 %d", limit, len(got))
+		}
+	}
+}
+
+// 已裁过的不重复裁（二次调用结果不变）。
+func TestClipHeadTailDedupe(t *testing.T) {
+	src := "头" + strings.Repeat("内容", cmdOutputMaxBytes)
+	once := clipHeadTail(src, cmdOutputMaxBytes, cmdTruncNote)
+	if twice := clipHeadTail(once, cmdOutputMaxBytes, cmdTruncNote); twice != once {
+		t.Fatalf("已含截断标记的结果不应被再裁一次（%d -> %d）", len(once), len(twice))
+	}
+	// 正文里恰好有「已截断」字样但不到上限：不该被当成已裁过而跳过（没超限本来也不裁），
+	// 超限且带真正标记才豁免——这里验证「假标记 + 超限」不会被误判成已裁过。
+	fake := "日志里写着 已截断 两个字\n" + strings.Repeat("x", cmdOutputMaxBytes)
+	if got := clipHeadTail(fake, cmdOutputMaxBytes, cmdTruncNote); got == fake {
+		t.Fatal("只含「已截断」字样的超限文本仍应被裁切")
+	}
+}
+
+// 执行层拼装顺序：截断在追加超时/退出码提示之前，尾部与这些提示都不丢。
+func TestCmdTruncNoteOrdering(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("$ go build ./...\n")
+	for b.Len() < 200*1024 {
+		b.WriteString("warning: looks slightly off\n")
+	}
+	b.WriteString("FAIL github.com/foo/bar [build failed]\n./main.go:42:12: undefined: Widget.Do")
+	res := clipHeadTail(b.String(), cmdOutputMaxBytes, cmdTruncNote) + "\n[命令超时被终止]"
+	if !strings.Contains(res, "undefined: Widget.Do") {
+		t.Fatal("尾部结论丢失")
+	}
+	if !strings.HasPrefix(res, "$ go build ./...") {
+		t.Fatal("头部命令回显丢失")
+	}
+	if !strings.HasSuffix(res, "\n[命令超时被终止]") {
+		t.Fatal("超时提示必须在最后（不能被截断吞掉）")
+	}
+	if strings.Index(res, "undefined: Widget.Do") > strings.Index(res, "命令超时被终止") {
+		t.Fatal("结论应在超时提示之前")
+	}
+}
+
 // tailOf 返回字符串末尾 n 字节（失败信息用，避免打印整段）。
 func tailOf(s string, n int) string {
 	if len(s) <= n {

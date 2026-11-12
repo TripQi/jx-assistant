@@ -33,30 +33,66 @@ const (
 	toolResultHeadDen = 3 // 头部保留比例的分母（尾部为剩下的 1/3）
 )
 
+// cmdOutputMaxBytes 是执行层（前台 run_command / Windows 沙箱 / Linux 沙箱 /
+// Termux / 远程 SSH）单条命令输出的上限，比上下文层那 128KB 更小：命令输出
+// 很少需要上百 KB，早一点提示模型改用「重定向到文件 + read 分段读」更省钱。
+const cmdOutputMaxBytes = 64 * 1024
+
 // toolResultClipMarker 是截断标记的固定前缀。检测「是否已裁过」只认这个前缀，
 // 标记文案后半段可自由调整而不影响去重判断。
 const toolResultClipMarker = "工具结果过长已截断"
 
+// clipHeadTailMarkerKey 是 clipHeadTail 判断「这段文本已经被裁过」的依据：各处
+// 标记文案都必须包含这半句（两个标记都写了「…过长已截断：原始共 N 字节…」）。
+// 留得长一点是为了不误伤正文里恰好出现「已截断」字样的输出。
+const clipHeadTailMarkerKey = "过长已截断：原始共"
+
+// clipHeadTail 是「头尾双保留」裁切的公用助手：超限时保留头部 2/3 + 尾部 1/3
+// （头尾共用同一份 limit 预算，所以总长度基本不变），中间插入 marker 生成的
+// 省略说明；两个切口都在 rune 边界收口（头向前回退、尾向后前进），不会把中文 /
+// emoji 劈成半个字符。
+//
+// 调用方负责传入自己的文案（上下文层说「工具结果」，执行层说「输出」并附上
+// 「重定向到文件 + read 分段读」的下一步指引），比例与边界逻辑只此一份。
+func clipHeadTail(s string, limit int, marker func(total, head, tail int) string) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	// 已裁过就不再重复裁，免得到最后只剩一堆提示
+	if strings.Contains(s, clipHeadTailMarkerKey) {
+		return s
+	}
+	headLimit := limit * toolResultHeadNum / toolResultHeadDen
+	tailLimit := limit - headLimit
+
+	headCut := runeHeadCut(s, headLimit)            // 不超过 headLimit，且落在 rune 边界
+	tailStart := runeTailStart(s, len(s)-tailLimit) // 不早于该位置，且落在 rune 边界
+	// len(s) > limit 时必有 tailStart > headLimit >= headCut，tailStart-headCut > 0
+	return s[:headCut] + marker(len(s), headCut, len(s)-tailStart) + s[tailStart:]
+}
+
+// cmdTruncNote 是执行层的截断标记：说明保留了多少，并明确告诉模型下一步怎么做
+// ——重定向到文件后用 read 的 offset 分段读，别重复执行同一条命令（重跑就是一次
+// 全量输出，钱和时间都白花）。
+func cmdTruncNote(total, head, tail int) string {
+	return fmt.Sprintf(
+		"\n[输出过长已截断：原始共 %d 字节，已保留头部 %d 字节 + 尾部 %d 字节，中间省略 %d 字节。需要完整内容请重定向到文件后用 read 的 offset 分段读取，不要重复执行同一命令]\n",
+		total, head, tail, total-head-tail)
+}
+
 // clipToolResult 按字节上限截断一条工具结果：保留头部 2/3 + 尾部 1/3，中间插入
 // 一段省略说明（总字节数、头尾各保留多少、省略了多少、如何分段读取完整内容）。
-// 两个切口都在 rune 边界收口（头部向前回退、尾部向后前进），不会劈开多字节字符。
+// 两个切口都在 rune 边界收口，不会劈开多字节字符。
 func clipToolResult(out string) string {
 	// 已裁过（个别工具如 read 自己就按同一上限裁）就不再重复裁，免得把提示也切掉
 	if len(out) <= toolResultMaxBytes || strings.Contains(out, toolResultClipMarker) {
 		return out
 	}
-	// 头尾共用同一份字节预算：headLimit + tailLimit == toolResultMaxBytes
-	headLimit := toolResultMaxBytes * toolResultHeadNum / toolResultHeadDen
-	tailLimit := toolResultMaxBytes - headLimit
-
-	headCut := runeHeadCut(out, headLimit)              // 不超过 headLimit，且落在 rune 边界
-	tailStart := runeTailStart(out, len(out)-tailLimit) // 不早于该位置，且落在 rune 边界
-	// len(out) > toolResultMaxBytes 时必有 tailStart > headLimit >= headCut，omitted > 0
-	omitted := tailStart - headCut
-	marker := fmt.Sprintf(
-		"\n…（%s：原始共 %d 字节，已保留头部 %d 字节 + 尾部 %d 字节，中间省略 %d 字节；需要完整内容请用 offset / 分页参数分段读取）\n",
-		toolResultClipMarker, len(out), headCut, len(out)-tailStart, omitted)
-	return out[:headCut] + marker + out[tailStart:]
+	return clipHeadTail(out, toolResultMaxBytes, func(total, head, tail int) string {
+		return fmt.Sprintf(
+			"\n…（%s：原始共 %d 字节，已保留头部 %d 字节 + 尾部 %d 字节，中间省略 %d 字节；需要完整内容请用 offset / 分页参数分段读取）\n",
+			toolResultClipMarker, total, head, tail, total-head-tail)
+	})
 }
 
 // runeHeadCut 返回 <= limit 的最大下标，且该下标落在 rune 起始字节上（向前回退，

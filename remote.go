@@ -350,11 +350,10 @@ func (c *remoteClient) run(ctx context.Context, dir, command string, timeout tim
 	if ctx.Err() != nil {
 		note += "\n[远程命令被取消]"
 	}
-	if len(out) > 64*1024 {
-		out = out[:64*1024]
-		note += "\n[输出过长已截断]"
-	}
-	res := strings.TrimRight(decodeCmdOutput(out), "\r\n") + note
+	// 先解码再截断：字节层截断会把 GBK / UTF-8 多字节序列切断，尾部变乱码
+	// 注意：上面的 capWriter（bufCap=256KB）在采集阶段只留头部，超过 256KB 的远程
+	// 输出其真实结尾在到达这里之前就没了；本函数修的是 64KB 这一层的头尾双保留。
+	res := clipHeadTail(strings.TrimRight(decodeCmdOutput(out), "\r\n"), cmdOutputMaxBytes, cmdTruncNote) + note
 	if strings.TrimSpace(res) == "" {
 		res = "（命令执行完成，无输出）"
 	}

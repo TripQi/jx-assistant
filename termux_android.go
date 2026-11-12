@@ -72,11 +72,8 @@ func runTermuxBash(ctx context.Context, prefix string, r sandboxRun) (string, er
 	if ctx.Err() == context.DeadlineExceeded {
 		note += "\n[命令超时被终止]"
 	}
-	if len(out) > 64*1024 {
-		out = out[:64*1024]
-		note += "\n[输出过长已截断]"
-	}
-	res := strings.TrimRight(decodeCmdOutput(out), "\r\n") + note
+	// 先解码再截断：字节层截断会把 GBK / UTF-8 多字节序列切断，尾部变乱码
+	res := clipHeadTail(strings.TrimRight(decodeCmdOutput(out), "\r\n"), cmdOutputMaxBytes, cmdTruncNote) + note
 	if err != nil && ctx.Err() == nil {
 		res += fmt.Sprintf("\n[进程退出异常: %v]", err)
 	}

@@ -1292,11 +1292,10 @@ func runUnconfinedLocal(ctx context.Context, r sandboxRun) (string, error) {
 	if errors.Is(err, exec.ErrWaitDelay) {
 		note += "\n[命令进程已退出，但残留的后台子进程占着输出管道，已强制收口并终止其进程树。如需进程在本命令结束后继续运行：改用 run_in_background=true，且 command 直接写服务本体（如 node server.js / python -m http.server 8000）；不要用 Start-Process 把进程脱离 shell——脱离的进程会随本命令结束被连坐清理]"
 	}
-	if len(out) > 64*1024 {
-		out = out[:64*1024]
-		note += "\n[输出过长已截断]"
-	}
-	res := strings.TrimRight(decodeCmdOutput(out), "\r\n") + note
+	// 先解码再截断：字节层截断会把 GBK / UTF-8 的多字节序列从中间切断，尾部
+	// 变成乱码（解码是按整段判断的，切过的半个字符救不回来）。
+	res := strings.TrimRight(decodeCmdOutput(out), "\r\n")
+	res = clipHeadTail(res, cmdOutputMaxBytes, cmdTruncNote) + note
 	if err != nil && ctx.Err() == nil && !errors.Is(err, exec.ErrWaitDelay) {
 		res += fmt.Sprintf("\n[进程退出异常: %v]", err)
 	}

@@ -22,7 +22,12 @@
 //   M 深色主题 / 460px 窄屏：卡片不越界、滑杆不横向溢出
 //   N Esc 与点外部关闭
 //   O 右栏子对话那枚芯片点开同一张卡
+//   P 长列表：卡片贴视口不越界、列表内部滚动、细滚动条、切层/resize/重开高度不跳
+//   Q 模型很少（3 个）：列表按自然高度，不被强行撑到目标高度
+//   R 可用空间不足（矮窗口）：列表降级为 min(目标高度, 可用高度)，仍内部滚动不越界
 // 视觉专项（B5–B8/C4）：档位大字居中、20–22px、主题蓝、标题区无灰底带、刷新图标仍在右上角。
+// 高度专项（P14–P19/Q1–Q3/R1–R3）：列表固定目标高度 217px（＝7 行 × 31px，见 style.css
+// 的 --mc-list-h），卡片高度 = 装饰 54px + 列表高度，不随模型数量增长。
 // 运行：仓库根目录 node gui-test/think-slider-verify.mjs
 import { newTab, read, click, shot, sleep, closeTab } from './cdp.mjs';
 import { mkdirSync, writeFileSync, rmSync, accessSync } from 'node:fs';
@@ -583,22 +588,8 @@ async function main() {
     await sleep(300);
     ok('O4 Esc 关闭子对话卡片', !(await bigBox(t)).card, '');
 
-    // ---------- P 长列表（≥20 个模型）与 460×600 窄屏：卡片/列表都不越出视口 ----------
-    // 造一个大供应商（真接口 POST /api/providers），再用卡片右上角刷新把模型拉进列表
-    const bulkModels = Array.from({ length: 22 }, (_, i) => ({ id: 'bulk-' + (i + 1), name: '5.5 系列模型 ' + (i + 1) }));
-    const addRes = await fetch(BASE + '/api/providers', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 'mock-bulk', name: '大模型池', baseURL: 'mock', apiKey: '', models: bulkModels }),
-    });
-    ok('P0 预备：加一个 22 个模型的供应商', addRes.ok, 'HTTP ' + addRes.status);
-    // 真点：开卡片 → 刷新（拉 /api/models）→ 进第二层
-    await clickEl(t, `document.getElementById('model-chip')`);
-    await clickEl(t, `document.getElementById('mc-refresh')`);
-    await sleep(800);
-    await clickEl(t, `document.getElementById('mc-model')`);
-    await sleep(400);
-    // 语义化的「最后一项不越界」：把列表滚到底，量最后一项的底边
-    const listGeo = () => read(t, `(() => {
+    // 列表几何：滚到底后量最后一项的位置，同时回报目标高度/滚动条/自然高
+    const listGeo = (t) => read(t, `(() => {
       const vh = window.innerHeight;
       const card = document.getElementById('model-card');
       const list = document.getElementById('mc-list');
@@ -609,13 +600,70 @@ async function main() {
       const lb = last ? last.getBoundingClientRect() : { top: 0, bottom: 0 };
       const lr = list.getBoundingClientRect();
       const cs = getComputedStyle(card);
+      const ls = getComputedStyle(list);
       return { vh, count: items.length, cardTop: c.top, cardBottom: c.bottom, cardH: c.height,
         lastTop: lb.top, lastBottom: lb.bottom, listBottom: lr.bottom,
         overflowY: cs.overflowY, overflow: cs.overflow, clipped: cs.overflow === 'hidden' || cs.overflowY === 'hidden',
         listScroll: list.scrollHeight > list.clientHeight + 1, listClient: list.clientHeight, listScrollH: list.scrollHeight,
-        listPadBottom: parseFloat(getComputedStyle(list).paddingBottom) };
+        listMaxH: parseFloat(ls.maxHeight) || 0, sbWidth: ls.scrollbarWidth || '',
+        sbGutter: (list.offsetWidth - list.clientWidth) > 0,
+        itemH: items.length ? items[0].getBoundingClientRect().height : 0,
+        listPadBottom: parseFloat(ls.paddingBottom) };
     })()`);
-    const big = await listGeo();
+
+    // ---------- Q 列表拿到固定目标高度：模型少时按自然高度，不被强行撑高 ----------
+    // 重建供应商，让模型正好剩 3 个（单渠道、单 Key 结构）：删掉原 mock/mock-alt → 新建 3 个模型
+    // （upsert 的 keys 是合并语义，靠它精确减到 3 个不可靠，直接重建最干净）
+    await fetch(BASE + '/api/providers/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'mock' }) });
+    const delAlt = await fetch(BASE + '/api/providers/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'mock-alt' }) });
+    const fewRes = await fetch(BASE + '/api/providers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'mock', name: 'Mock 服务', baseURL: 'mock', apiKey: '',
+        models: [{ id: 'glm-5.3', name: 'GLM-5.3' }, { id: 'deepseek-flash', name: 'deepseek-flash' }, { id: 'gpt-6.1-terra', name: '6.1 Terra' }],
+      }),
+    });
+    const modelsNow = await (await fetch(BASE + '/api/models')).json();
+    const nowList = (modelsNow.models || []).map((m) => m.providerId + '/' + m.modelId);
+    ok('Q0a 预备：模型正好 3 个（重建供应商）', delAlt.ok && fewRes.ok && nowList.length === 3,
+      JSON.stringify({ del: delAlt.status, up: fewRes.status, now: nowList }));
+    // 真点：开卡片 → 刷新 → 进第二层（刷新按钮在第一层头部，必须等卡片真的摆好再点）
+    await clickEl(t, `document.getElementById('model-chip')`);
+    await sleep(300);
+    await clickEl(t, `document.getElementById('mc-refresh')`);
+    await sleep(800);
+    await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(400);
+    const few = await listGeo(t);
+    const target = few.listMaxH; // 目标高度取自样式表（--mc-list-h → 计算后的 max-height）
+    ok('Q0 列表目标高度取自样式（≈7 行）', target >= 200 && target <= 300, 'target=' + target);
+    ok('Q1 只有 3 个模型：列表按自然高度（没有被强行撑到目标高度）',
+      few.count === 3 && few.listClient <= few.listScrollH + 1 && few.listClient < target - 20,
+      JSON.stringify({ n: few.count, ch: few.listClient, sh: few.listScrollH, target: target }));
+    ok('Q2 只有 3 个模型：不出现滚动（scrollHeight ≈ clientHeight）',
+      Math.abs(few.listScrollH - few.listClient) <= 1, JSON.stringify({ sh: few.listScrollH, ch: few.listClient }));
+    const chromeH = few.cardH - few.listClient; // 列表之外的固定高度（卡片内边距 + 返回栏）
+    ok('Q3 3 个模型时卡片 = 固定装饰 + 自然列表高', Math.abs(few.cardH - (chromeH + few.listClient)) < 1,
+      JSON.stringify({ cardH: few.cardH, chrome: chromeH, list: few.listClient }));
+    await shot(t, join(SCREEN, 'thinkslider-11-few-models.png'));
+
+    // ---------- P 长列表（≥20 个模型）与 460×600 窄屏：固定目标高度、内部滚动、不越出视口 ----------
+    // 造一个大供应商（真接口 POST /api/providers），再用卡片右上角刷新把模型拉进列表
+    const bulkModels = Array.from({ length: 22 }, (_, i) => ({ id: 'bulk-' + (i + 1), name: '5.5 系列模型 ' + (i + 1) }));
+    const addRes = await fetch(BASE + '/api/providers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'mock-bulk', name: '大模型池', baseURL: 'mock', apiKey: '', models: bulkModels }),
+    });
+    ok('P0 预备：加一个 22 个模型的供应商', addRes.ok, 'HTTP ' + addRes.status);
+    // 刷新按钮在第一层头部：先回第一层（若当前在第二层），点刷新拉 /api/models，再进第二层
+    if (!(await bigBox(t)).card) { await clickEl(t, `document.getElementById('model-chip')`); await sleep(300); }
+    if (!(await bigBox(t)).layer1) { await clickEl(t, `document.getElementById('mc-back')`); await sleep(250); }
+    await clickEl(t, `document.getElementById('mc-refresh')`);
+    await sleep(800);
+    await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(450);
+    // 列表几何（listGeo 在 Q 小节之前定义）：滚到底后量最后一项的位置，同时回报目标高度/滚动条/自然高
+    const big = await listGeo(t);
     ok('P1 模型 ≥20 项已进列表', big.count >= 22, 'items=' + big.count);
     ok('P2 卡片整体在视口内（底边留 ≥8px、顶边不越界）',
       big.cardBottom <= big.vh - 8 + 0.5 && big.cardTop >= 7.5,
@@ -628,7 +676,31 @@ async function main() {
       big.listScroll && big.listScrollH > big.listClient,
       JSON.stringify({ sh: big.listScrollH, ch: big.listClient }));
     ok('P6 列表底部留 12px 内边距', big.listPadBottom >= 12, String(big.listPadBottom));
+    // 固定目标高度：27 项与 3 项时列表高度都不膨胀
+    ok('P14 27 项时列表高度 == 目标高度（±2px）',
+      Math.abs(big.listClient - target) <= 2, JSON.stringify({ ch: big.listClient, target: target, itemH: big.itemH }));
+    ok('P15 卡片总高 == 固定装饰 + 目标高度（±2px），不随模型数增长',
+      Math.abs(big.cardH - (chromeH + target)) <= 2,
+      JSON.stringify({ cardH: big.cardH, chrome: chromeH, target: target, expect: chromeH + target }));
+    ok('P16 细滚动条生效（scrollbar-width:thin）', big.sbWidth === 'thin' || big.sbGutter,
+      JSON.stringify({ scrollbarWidth: big.sbWidth, gutter: big.sbGutter }));
+    ok('P17 目标高度约合 6–8 行（按实测行高）',
+      target / (big.itemH || 34) >= 6 && target / (big.itemH || 34) <= 8,
+      JSON.stringify({ target: target, itemH: big.itemH, rows: +(target / (big.itemH || 34)).toFixed(2) }));
     await shot(t, join(SCREEN, 'thinkslider-9-longlist.png'));
+    // 深色主题下的长列表：滚动条颜色单独配过，这里看一眼并留档
+    await read(t, `(document.documentElement.setAttribute('data-theme', 'dark'), 1)`);
+    await sleep(350);
+    const darkList = await read(t, `(() => {
+      const list = document.getElementById('mc-list');
+      const ls = getComputedStyle(list);
+      return { sbWidth: ls.scrollbarWidth, sbColor: ls.scrollbarColor, scroll: list.scrollHeight > list.clientHeight + 1 };
+    })()`);
+    ok('P19 深色主题：列表仍是细滚动条且配色生效', darkList.sbWidth === 'thin' && /rgba?\(/.test(darkList.sbColor) && darkList.scroll,
+      JSON.stringify(darkList));
+    await shot(t, join(SCREEN, 'thinkslider-13-dark-longlist.png'));
+    await read(t, `(document.documentElement.setAttribute('data-theme', 'light'), 1)`);
+    await sleep(300);
     // 切模型后回第一层要复位（高度收回去、底边仍在视口内）
     await clickEl(t, `document.querySelector('#mc-list .mc-item.sel')`);
     await sleep(500);
@@ -640,13 +712,24 @@ async function main() {
     ok('P7 回第一层复位：层切回、卡片收短且底边仍在视口内',
       backGeo.layer1 && backGeo.h < big.cardH && backGeo.bottom <= backGeo.vh - 8 + 0.5,
       JSON.stringify(backGeo));
+    // 重新打开卡片再进第二层：高度不能「上次很高这次很矮」（必须与第一次一致 ±2px）
+    await clickEl(t, `document.getElementById('model-chip')`); // 收起
+    await sleep(200);
+    await clickEl(t, `document.getElementById('model-chip')`); // 重开
+    await sleep(250);
+    await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(400);
+    const reopen = await listGeo(t);
+    ok('P18 关掉重开再进列表：卡片与列表高度与首次一致（无跳动）',
+      Math.abs(reopen.cardH - big.cardH) <= 2 && Math.abs(reopen.listClient - big.listClient) <= 2,
+      JSON.stringify({ cardH: reopen.cardH, first: big.cardH, list: reopen.listClient, listFirst: big.listClient }));
 
     // 460×600 窄视口（旋屏/小窗）：卡片开着不动，只改视口 —— 验 resize 时动态重算
     await t.send('Emulation.setDeviceMetricsOverride', { width: 460, height: 600, deviceScaleFactor: 1, mobile: false });
     await sleep(900);
     if ((await bigBox(t)).layer1) await clickEl(t, `document.getElementById('mc-model')`);
     await sleep(450);
-    const narrow2 = await listGeo();
+    const narrow2 = await listGeo(t);
     ok('P8 460×600 窄屏：卡片开着、改视口后仍停在列表层', narrow2.count >= 22 && narrow2.vh === 600, JSON.stringify({ n: narrow2.count, vh: narrow2.vh }));
     ok('P9 460×600 窄屏（resize 动态重算）：卡片底边 ≤ 视口高 − 8、顶边不越界',
       narrow2.cardBottom <= narrow2.vh - 8 + 0.5 && narrow2.cardTop >= 7.5,
@@ -664,13 +747,31 @@ async function main() {
     await sleep(250);
     if ((await bigBox(t)).layer1) await clickEl(t, `document.getElementById('mc-model')`);
     await sleep(400);
-    const narrow3 = await listGeo();
+    const narrow3 = await listGeo(t);
     ok('P12 460×600 窄屏重开：卡片与最后一项都不越界',
       narrow3.cardBottom <= narrow3.vh - 8 + 0.5 && narrow3.cardTop >= 7.5 && narrow3.lastBottom <= narrow3.vh - 8 + 0.5,
       JSON.stringify({ top: narrow3.cardTop, bottom: narrow3.cardBottom, last: narrow3.lastBottom, vh: narrow3.vh }));
+    // ---------- R 可用空间不足时降级为 min(目标高度, 可用高度) ----------
+    // 1280×280 矮窗口：卡片塞不下「装饰 + 217」，列表被压矮但仍在内部滚动、整体不越界
+    await t.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 280, deviceScaleFactor: 1, mobile: false });
+    await sleep(900);
+    if ((await bigBox(t)).layer1) await clickEl(t, `document.getElementById('mc-model')`);
+    await sleep(450);
+    const shortH = await listGeo(t);
+    ok('R1 矮窗口（280px）：列表降级到 min(目标, 可用)（< 目标 −4px）',
+      shortH.vh === 280 && shortH.listClient < target - 4 && shortH.listClient > 60,
+      JSON.stringify({ ch: shortH.listClient, target: target, vh: shortH.vh }));
+    ok('R2 矮窗口：仍然内部滚动、卡片 overflow:hidden、卡片在视口内',
+      shortH.listScroll && shortH.clipped && shortH.cardBottom <= shortH.vh - 8 + 0.5 && shortH.cardTop >= 7.5,
+      JSON.stringify({ scroll: shortH.listScroll, clipped: shortH.clipped, top: shortH.cardTop, bottom: shortH.cardBottom }));
+    await shot(t, join(SCREEN, 'thinkslider-12-short-window.png'));
     // 复原视口与配置，避免影响后续
     await t.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(500);
+    // 回到正常视口后高度要复原（不残留矮窗口的压扁状态）
+    const restored = await listGeo(t);
+    ok('R3 视口复原后列表高度回到目标高度（±2px）',
+      Math.abs(restored.listClient - target) <= 2, JSON.stringify({ ch: restored.listClient, target: target }));
     await pressKey(t, 'Escape');
     await sleep(250);
     await fetch(BASE + '/api/providers/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'mock-bulk' }) });

@@ -7451,12 +7451,13 @@ function mcCancelDrag() { mcDrag = null; }
 function mcRenderList(view) {
   const list = $('mc-list');
   const cur = currentModelKey(view || popView || mainView);
-  // 老会话只存了模型名（没有 Key 归属）时按「同渠道同模型的第一项」认勾选，
-  // 免得列表里一个勾都没有
+  // 当前模型键在清单里找不到时（老会话只存了模型名、或渠道的 Key 被删/改过），
+  // 退化为「同渠道同模型的第一项」认勾选，免得列表里一个勾都没有
   let curKey = cur;
   if (cur !== '__default__') {
     const p = cur.split('|');
-    if (!p[1]) {
+    const exact = (state.models || []).some((m) => modelKeyOf(m.providerId, m.keyId, m.modelId) === cur);
+    if (!exact || !p[1]) {
       const hit = (state.models || []).find((m) => m.providerId === p[0] && m.modelId === p[2]);
       if (hit) curKey = modelKeyOf(hit.providerId, hit.keyId, hit.modelId);
     }

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -108,26 +109,138 @@ type remoteClient struct {
 	helperPath string // 远端沙箱 helper 路径（上传后缓存）
 }
 
-// capWriter 是截断到上限的输出收集器（远程命令输出防爆）。
+// 采集阶段的头尾分配：头部窗口占 3/4、滚动尾部窗口占 1/4。尾巴不必太大——
+// 下游 clipHeadTail 还要在这 256KB 上再切一次（64KB 的 1/3≈21KB），留 64KB 够用。
+const (
+	remoteCaptureHeadNum = 3
+	remoteCaptureHeadDen = 4
+)
+
+// capWriter 是带上限的远程命令输出收集器：总量封顶，但「头尾都留」。
+//
+// 布局：头部窗口先填满（占上限 3/4），之后的内容进滚动尾部窗口（占 1/4）——新
+// 内容不断挤掉窗口里最老的字节，所以留下的是**真正的结尾**，而不是「前 256KB 的
+// 后一小段」。被挤掉的累计字节数记在 dropped 里：下游据此把「原始总量 / 中间省略」
+// 说成实数，否则按采集到的长度报数会让人以为看到的是完整输出的首尾。
+//
+// ssh 会话的 stdout / stderr 由两个 goroutine 各自写入，这里加锁（原实现直接往
+// bytes.Buffer 里写，两个方向并发写是数据竞争）。
 type capWriter struct {
-	cap int
-	buf bytes.Buffer
+	cap     int
+	head    bytes.Buffer // 头部固定窗口（cap*3/4）
+	tail    []byte       // 尾部窗口的底层存储：有效部分是 tail[tailOff:]
+	tailOff int          // 有效尾部窗口的起始下标（滚出去的老字节留在前面，攒够再搬）
+	dropped int64        // 采集阶段真正丢弃（被滚出窗口）的字节数
+	mu      sync.Mutex
 }
+
+func (w *capWriter) headLimit() int { return w.cap * remoteCaptureHeadNum / remoteCaptureHeadDen }
+
+func (w *capWriter) tailLimit() int { return w.cap - w.headLimit() }
+
+// tailBytes 返回当前有效的尾部窗口（只含最新的 tailLimit 字节）。
+func (w *capWriter) tailBytes() []byte { return w.tail[w.tailOff:] }
 
 func (w *capWriter) Write(p []byte) (int, error) {
-	if w.buf.Len() >= w.cap {
-		return len(p), nil
+	n := len(p)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if room := w.headLimit() - w.head.Len(); room > 0 {
+		if len(p) <= room {
+			w.head.Write(p)
+			return n, nil
+		}
+		w.head.Write(p[:room])
+		p = p[room:]
 	}
-	room := w.cap - w.buf.Len()
-	if len(p) > room {
-		w.buf.Write(p[:room])
-		return len(p), nil
-	}
-	return w.buf.Write(p)
+	w.appendTail(p)
+	return n, nil
 }
 
-func (w *capWriter) Bytes() []byte  { return w.buf.Bytes() }
-func (w *capWriter) String() string { return w.buf.String() }
+// appendTail 把 p 压进滚动尾部窗口；溢出时把最老的字节挤出窗口并计入 dropped。
+// 挤出靠移动 tailOff 完成（不搬数据），攒到一定量才整体整理一次，写入量大时
+// 也不会退化成 O(n²)。
+func (w *capWriter) appendTail(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	limit := w.tailLimit()
+	if limit <= 0 {
+		w.dropped += int64(len(p))
+		return
+	}
+	if len(p) >= limit {
+		// 这一次写入就不止一个窗口：旧内容全丢，只留最新的 limit 字节
+		w.dropped += int64(len(w.tailBytes()) + len(p) - limit)
+		w.tail = append(w.tail[:0], p[len(p)-limit:]...)
+		w.tailOff = 0
+		return
+	}
+	// 攒得够久（或容量不够）就整理一次，摊还 O(1)
+	if cap(w.tail)-len(w.tail) < len(p) || w.tailOff > limit {
+		w.tail = append(w.tail[:0], w.tail[w.tailOff:]...)
+		w.tailOff = 0
+	}
+	w.tail = append(w.tail, p...)
+	if over := len(w.tail) - w.tailOff - limit; over > 0 {
+		w.dropped += int64(over)
+		w.tailOff += over
+	}
+}
+
+// Bytes 返回「头部窗口 + 尾部窗口」（中间被滚掉的部分不在其中）。接缝在取用时
+// 按 rune 边界收口：ssh 按 chunk 写入，头尾切点很容易落在多字节字符中间，若不
+// 修正，下游 decodeCmdOutput 会把整段误判成非 UTF-8 而走 GB18030，尾部变乱码。
+func (w *capWriter) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.bytesLocked()
+}
+
+func (w *capWriter) bytesLocked() []byte {
+	head := w.head.Bytes()
+	tail := w.tailBytes()
+	if len(tail) == 0 {
+		out := make([]byte, len(head))
+		copy(out, head)
+		return out
+	}
+	// 先看原样拼接是否已经合法（纯 ASCII 的常见情况什么都不用动；GBK 数据本来就
+	// 不是合法 UTF-8，找不到能变合法的切法时也按原样返回，交给下游解码兜底）
+	build := func(hCut, tCut int) []byte {
+		out := make([]byte, 0, len(head)-hCut+len(tail)-tCut)
+		out = append(out, head[:len(head)-hCut]...)
+		return append(out, tail[tCut:]...)
+	}
+	if b := build(0, 0); utf8.Valid(b) {
+		return b
+	}
+	for hCut := 0; hCut <= utf8.UTFMax-1 && hCut < len(head); hCut++ {
+		for tCut := 0; tCut <= utf8.UTFMax-1 && tCut < len(tail); tCut++ {
+			if b := build(hCut, tCut); utf8.Valid(b) {
+				return b
+			}
+		}
+	}
+	return build(0, 0)
+}
+
+// Captured 返回已采集的字节数（头窗口 + 尾窗口，不含被滚掉的）。
+func (w *capWriter) Captured() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.head.Len() + len(w.tailBytes())
+}
+
+// Dropped 返回采集阶段被滚动窗口挤掉的字节数（0 = 输出完整，什么都没丢）。
+func (w *capWriter) Dropped() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dropped
+}
+
+// String 调试/日志用：与 Bytes 同内容。
+func (w *capWriter) String() string { return string(w.Bytes()) }
 
 // remotePool 按会话缓存连接；keepalive 失败的连接在下次取用时重拨。
 type remotePool struct {
@@ -350,10 +463,16 @@ func (c *remoteClient) run(ctx context.Context, dir, command string, timeout tim
 	if ctx.Err() != nil {
 		note += "\n[远程命令被取消]"
 	}
-	// 先解码再截断：字节层截断会把 GBK / UTF-8 多字节序列切断，尾部变乱码
-	// 注意：上面的 capWriter（bufCap=256KB）在采集阶段只留头部，超过 256KB 的远程
-	// 输出其真实结尾在到达这里之前就没了；本函数修的是 64KB 这一层的头尾双保留。
-	res := clipHeadTail(strings.TrimRight(decodeCmdOutput(out), "\r\n"), cmdOutputMaxBytes, cmdTruncNote) + note
+	// 先解码再截断：字节层截断会把 GBK / UTF-8 多字节序列切断，尾部变乱码。
+	// 采集层（capWriter 滚动窗口）已丢掉的字节要算进「原始总量」：否则标记里的
+	// 「原始共 N 字节 / 中间省略 X 字节」只统计了采集到的部分，看上去像是把一份
+	// 完整输出从中间挖掉一段，而不是「本来还有更多、采集阶段就滚掉了」。口径都是
+	// 字节数（GBK 输出解码后长度会变，量级仍如实）。
+	dropped := buf.Dropped()
+	text := strings.TrimRight(decodeCmdOutput(out), "\r\n")
+	res := clipHeadTail(text, cmdOutputMaxBytes, func(total, head, tail int) string {
+		return cmdTruncNote(total+int(dropped), head, tail)
+	}) + note
 	if strings.TrimSpace(res) == "" {
 		res = "（命令执行完成，无输出）"
 	}

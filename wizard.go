@@ -80,6 +80,10 @@ type provisionPayload struct {
 	// PublicServer 服务端自己的公网地址（管理页手动配置，空=未启用外网下发）：
 	// 存进 WizardPublicServer，出公司后作为公告拉取的兜底来源。
 	PublicServer string `json:"publicServer,omitempty"`
+	// PortalURL 门户充值入口（2026-11-12）：服务端 portal 启用才下发（=服务端
+	// 根地址）。存 Cfg.PortalURL——向导一完成「去充值」入口即可用，不等下一轮
+	// 公告（10 分钟）。
+	PortalURL string `json:"portalURL,omitempty"`
 	API          *struct {
 		BaseURL      string `json:"baseURL"`
 		PublicBaseURL string `json:"publicBaseURL,omitempty"` // 外网模型通道（被授权才下发）
@@ -414,6 +418,9 @@ func (a *App) handleWizardConnect(w http.ResponseWriter, r *http.Request) {
 		"apiDetail": payload.API, // 明细（含 monthlyQuotaUSD）供向导成功页展示
 		"apiError":  payload.APIError,
 		"marketURL": payload.MarketURL, "updateURL": payload.UpdateURL,
+		// 门户充值入口（2026-11-12）：portal 启用的服务端才非空；成功页据此附
+		//「充值/查余额」链接。
+		"portalURL": strings.TrimRight(payload.PortalURL, "/"),
 	}
 	if models := a.applyProvisionPayload(&payload); models != nil {
 		respBody["defaultModel"] = firstModelID(models)
@@ -424,6 +431,7 @@ func (a *App) handleWizardConnect(w http.ResponseWriter, r *http.Request) {
 	a.Cfg.WizardCompany = payload.Company
 	a.Cfg.WizardServer = server
 	a.Cfg.WizardPublicServer = payload.PublicServer // 空=服务端没配公网地址，出公司即自动停用公司通道
+	a.Cfg.PortalURL = strings.TrimRight(payload.PortalURL, "/") // 门户充值入口（2026-11-12）：portal 启用才非空
 	// 向导里填的姓名即默认「发布者姓名」（市场条目的归属名 owner）：发布技能时
 	// 随包上报，市场卡片据此判断哪些条目能「更新发布 / 删除」。重跑向导按新填的
 	// 姓名覆盖（向导填的就是"我是谁"）；只想改名去 设置 · 网络访问。

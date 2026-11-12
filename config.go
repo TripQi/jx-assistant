@@ -131,7 +131,12 @@ type Config struct {
 	WizardCompany      string `json:"wizardCompany,omitempty"`
 	WizardServer       string `json:"wizardServer,omitempty"`
 	WizardPublicServer string `json:"wizardPublicServer,omitempty"` // 服务端公网地址（仅由服务端公告/provision 下发，本地永不写死）：内网失联时改从它拉公告——公司通道配了外网地址就出公司也能用，否则自动停用
-	WizardRev          string `json:"wizardRev,omitempty"`          // 最近应用的服务端公告哈希（仅记录）
+	// PortalURL 门户充值入口（2026-11-12 充值入口）：服务端 portal 启用时随公告/
+	// provision 下发（=服务端根地址，即个人中心/充值页）。模型弹层（额度归零时
+	// 原位替换徽标）/设置页的「去充值」入口靠它显隐；空=门户未启用（或服务端
+	// 已关），不显示。
+	PortalURL string `json:"portalURL,omitempty"`
+	WizardRev string `json:"wizardRev,omitempty"` // 最近应用的服务端公告哈希（仅记录）
 	// CompanyQuota 公司内部通道的额度快照（服务端 /announce 与 /provision 下发，
 	// 客户端只存不算；回显在设置页公司通道卡片与模型菜单）。nil = 服务端没下发
 	// （老服务端或未配模型通道）——此时不显示额度。

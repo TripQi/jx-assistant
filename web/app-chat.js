@@ -5393,6 +5393,8 @@ function showRunError(view, text) {
   retry.type = 'button';
   retry.textContent = '重试';
   retry.onclick = () => retryRun(view);
+  // 注：这里不放「去充值」——余额类报错分不清是员工额度用完还是中转站上游
+  // 缺额度（2026-11-12 用户口径：误导性的引导宁可不做）。
   // 反馈：把这条报错一键带进 设置→关于 的反馈表单（远程用户的主报修通道）
   const fb = document.createElement('button');
   fb.className = 're-btn re-retry';
@@ -7200,6 +7202,7 @@ async function loadModels() {
     state.defaultProvider = d.defaultProvider || '';
     state.defaultModel = d.defaultModel || '';
     state.companyQuota = d.companyQuota || null; // 公司通道额度（服务端随公告下发）
+    state.portalURL = d.portalURL || '';         // 门户充值入口（2026-11-12：portal 启用才有；「去充值」按钮显隐）
     syncComposer();
   } catch (e) { state.models = []; }
 }
@@ -7309,7 +7312,9 @@ function renderModelPop(view) {
       // （通道仍可用，只是走的公网地址——不再让用户误以为不可用）
       const viaBadge = !m.providerOff && m.providerVia === 'wan'
         ? '（<span style="color:var(--green,#1f9d55)">外网通道中</span>）' : '';
-      // 公司通道这一组：分组头右侧直接带额度（服务端随公告下发，只读）
+      // 公司通道这一组：分组头右侧直接带额度（服务端随公告下发，只读）。
+      // 额度已用完（status=2 或剩余≤0）时**原位换成「充值」按钮**（2026-11-12
+      // 用户口径：只有积分归零才出现充值按钮，不做低额度渐进提示）。
       let quotaBadge = '';
       if (m.providerId === 'company-internal' && companyQuota) {
         const q = companyQuota;
@@ -7320,7 +7325,12 @@ function renderModelPop(view) {
         tip += ' · 规则：' + (q.periodText || '') + (q.points ? '，每次 ' + fmtPoints(q.points) + ' 积分' : '');
         tip += q.nextAt ? ' · 下次重置 ' + q.nextAt.replace('T', ' ').slice(0, 16) : ' · 不自动重置';
         tip += '（由公司服务端与中转站结算；设置·模型的公司通道卡片里可刷新）';
-        quotaBadge = `<span class="pop-quota" title="${esc(tip)}">${esc(txt)}</span>`;
+        const exhausted = !q.unlimited && (q.status === 2 || (q.remainPoints || 0) <= 0);
+        if (exhausted && state.portalURL) {
+          quotaBadge = `<button class="pop-quota-pay" title="额度已用完——打开个人中心充值页" onclick="event.stopPropagation();openURLSystem(${JSON.stringify(state.portalURL)})">额度已用完 · 充值</button>`;
+        } else {
+          quotaBadge = `<span class="pop-quota" title="${esc(tip)}">${esc(txt)}</span>`;
+        }
       }
       html += `<div class="pop-group">${esc(m.providerName)}${m.providerOff ? '（已停用）' : viaBadge}${quotaBadge}</div>`;
       lastProv = m.providerId;

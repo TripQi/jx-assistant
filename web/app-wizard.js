@@ -106,6 +106,7 @@ async function wzConnect() {
       bits.push('<span style="color:var(--amber)">模型通道未配置：' + esc(res.apiError || '服务端未接 new-api') + '（市场/更新已配好，模型可到 设置·模型 手动填）</span>');
     }
     bits.push('技能/组件市场与软件更新：已指向公司服务端');
+    if (res.portalURL) bits.push('充值与余额：<a href="#" onclick="openURLSystem(' + JSON.stringify(res.portalURL) + ');return false">打开个人中心</a>（模型菜单与设置·模型里也有「去充值」入口）');
     wzSetResult('ok', bits.join('<br>'));
     go.textContent = '完成';
     go.disabled = false;

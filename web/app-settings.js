@@ -124,6 +124,7 @@ function loadProvDraft(c) {
     publicBaseURL: p.publicBaseURL || '', // 外网备用地址（服务端下发，只读展示）
     via: p.via || '',               // 公司通道当前线路：lan=内网 / wan=外网
     quota: p.quota || null,         // 公司通道额度快照（服务端随公告下发）
+    portalURL: p.portalURL || '',   // 门户充值入口（2026-11-12）：额度区「去充值」按钮显隐
     models: (p.models || []).map((m) => ({
       id: m.id || '', name: m.name || '',
       contextWindow: m.contextWindow || 0, maxOutput: m.maxOutput || 0,
@@ -871,6 +872,16 @@ function buildProvCard(p, key) {
       }
     };
     form.appendChild(refresh);
+    // 去充值（2026-11-12 充值入口）：服务端门户启用（p.portalURL 非空）就显示；
+    // 打开个人中心充值页，可给公司通道设备令牌或门户钱包充值
+    if (p.portalURL) {
+      const pay = document.createElement('button');
+      pay.className = 'pf-cancel';
+      pay.style.color = 'var(--accent)';
+      pay.textContent = '去充值';
+      pay.onclick = (e) => { e.stopPropagation(); openURLSystem(p.portalURL); };
+      form.appendChild(pay);
+    }
   }
 
   // API 密钥：绝不回显，只标「已配置」，输入可替换

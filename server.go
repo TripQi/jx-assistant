@@ -1063,6 +1063,8 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		"defaultModel":    t.Model,
 		// 公司通道额度快照（模型菜单顶部显示；服务端下发才有，私人通道场景为空）
 		"companyQuota": a.Cfg.CompanyQuota,
+		// 门户充值入口（2026-11-12）：模型弹层「去充值」按钮显隐用
+		"portalURL": a.Cfg.PortalURL,
 	})
 }
 
@@ -1307,6 +1309,9 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		Via           string     `json:"via,omitempty"`           // 公司通道当前线路：lan/wan（配了外网地址才有值）
 		// Quota 公司通道的额度快照（服务端随公告下发；老服务端/私人通道为空）
 		Quota *CompanyQuotaCfg `json:"quota,omitempty"`
+		// PortalURL 门户充值入口（2026-11-12，服务端 portal 启用才下发）：公司
+		// 通道的「去充值」按钮靠它显隐。
+		PortalURL string `json:"portalURL,omitempty"`
 	}
 	providers := []providerView{}
 	for _, p := range a.Cfg.Providers {
@@ -1325,6 +1330,7 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if pv.Company {
 			pv.Quota = a.Cfg.CompanyQuota // 额度快照只在公司通道上展示
+			pv.PortalURL = a.Cfg.PortalURL
 		}
 		if tpl, ok := PresetByID(p.ID); ok {
 			pv.Preset = true

@@ -62,6 +62,11 @@ type announcePayload struct {
 	UpdateURL string `json:"updateURL"`
 	// PublicServer 服务端公网地址（管理页配置，空=未启用）：存 WizardPublicServer。
 	PublicServer string `json:"publicServer,omitempty"`
+	// PortalURL 门户充值入口（2026-11-12 充值入口）：portal 启用的服务端才下发
+	//（=服务端同源根路径，即个人中心/充值页）。客户端存 Cfg.PortalURL，模型弹层
+	//（额度归零原位替换）/设置页的「去充值」入口靠它显隐。空=不下发（门户未
+	// 启用或老服务端），客户端收到空串清除本地值（管理员关门户后入口随即消失）。
+	PortalURL string `json:"portalURL,omitempty"`
 	// RegistryURL 总服务器地址（服务端「模型」页签配置，空=不下发）：收到即覆盖
 	// 本地设置里的「总服务器地址」——公司换总服务器不用逐台改客户端（2026-10-29）。
 	RegistryURL string `json:"registryURL,omitempty"`
@@ -246,6 +251,16 @@ func applyAnnounce(a *App, ann *announcePayload, server string, fromPublic bool)
 	if ann.PublicServer != "" && ann.PublicServer != a.Cfg.WizardPublicServer {
 		a.Cfg.WizardPublicServer = strings.TrimRight(ann.PublicServer, "/")
 		changed = append(changed, "公网服务端→"+a.Cfg.WizardPublicServer)
+	}
+	// 门户充值入口（2026-11-12）：下发了就跟随（去尾斜杠统一）；空串=门户已关，
+	// 清本地值让「去充值」入口消失。
+	if v := strings.TrimRight(ann.PortalURL, "/"); v != a.Cfg.PortalURL {
+		a.Cfg.PortalURL = v
+		if v != "" {
+			changed = append(changed, "充值入口→"+v)
+		} else {
+			changed = append(changed, "充值入口已关")
+		}
 	}
 	// 额度快照：服务端下发了就覆盖（含剩余/已用/规则/下次重置）；没下发不动旧值
 	if ann.Quota != nil && !quotaEqual(a.Cfg.CompanyQuota, ann.Quota) {

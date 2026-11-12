@@ -457,6 +457,46 @@ async function main() {
     await sleep(320);
     ok('N4 点卡片外部关闭', !(await bigBox(t)).card, '');
     await shot(t, join(SCREEN, 'thinkslider-7-closed.png'));
+
+    // ---------- O 右栏子对话输入区那枚芯片：共用同一张卡，锚在它上面 ----------
+    const subRes = await fetch(BASE + '/api/sessions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent: sessionId, title: '子对话', inheritContext: true }),
+    });
+    const subSess = await subRes.json();
+    if (!subSess.id) throw new Error('建子对话失败：' + JSON.stringify(subSess).slice(0, 200));
+    await read(t, `(rpOpen('subs'), 1)`); // 打开右栏「子对话」视图（与选中文字→子对话同一条路径）
+    await sleep(500);
+    await read(t, `(openSubSession(${JSON.stringify(subSess.id)}), 1)`);
+    await sleep(1400);
+    // 真实点右栏那枚芯片；面板动画/首点被吃时补点一次
+    let subChipBox = await clickEl(t, `document.getElementById('sub-model-chip')`);
+    await sleep(350);
+    let subOpen = await read(t, `!document.getElementById('model-card').classList.contains('hidden')`);
+    let hitEl = await read(t, `(() => { const e = document.elementFromPoint(${Math.round(subChipBox.x)}, ${Math.round(subChipBox.y)}); return e ? (e.id || e.className || e.tagName) : ''; })()`);
+    if (!subOpen) {
+      await clickEl(t, `document.getElementById('sub-model-chip')`);
+      await sleep(350);
+      subOpen = await read(t, `!document.getElementById('model-card').classList.contains('hidden')`);
+    }
+    const subView = await read(t, `(() => {
+      const c = document.getElementById('model-card').getBoundingClientRect();
+      const ch = document.getElementById('sub-model-chip').getBoundingClientRect();
+      return { open: !document.getElementById('model-card').classList.contains('hidden'),
+        l1: !document.getElementById('mc-lv').classList.contains('hidden'),
+        l: c.left, r: c.right, t: c.top, b: c.bottom, vw: window.innerWidth, vh: window.innerHeight,
+        chipTop: ch.top, big: document.getElementById('mc-big').textContent,
+        subChip: document.getElementById('sub-model-chip-label').textContent };
+    })()`);
+    ok('O1 子对话芯片点开同一张卡（默认第一层）', subView.open && subView.l1, JSON.stringify({ open: subView.open, l1: subView.l1, hit: hitEl, chip: subChipBox }));
+    ok('O2 子对话芯片也显示「模型名 · 档位」', /\s·\s/.test(subView.subChip), subView.subChip);
+    ok('O3 卡片贴子对话芯片、仍在视口内',
+      subView.l >= 0 && subView.r <= subView.vw + 1 && subView.t >= 0 && subView.b <= subView.vh + 1,
+      JSON.stringify({ l: subView.l, r: subView.r, t: subView.t, b: subView.b, vw: subView.vw, vh: subView.vh }));
+    await shot(t, join(SCREEN, 'thinkslider-8-subview.png'));
+    await pressKey(t, 'Escape');
+    await sleep(300);
+    ok('O4 Esc 关闭子对话卡片', !(await bigBox(t)).card, '');
   } finally {
     await closeTab(t);
   }

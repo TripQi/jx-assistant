@@ -115,15 +115,15 @@ func dispatchTaskTool() Tool {
 	return Tool{
 		Spec: toolSpec("dispatch_task", "新建一个工作任务会话并把需求交给它后台执行（它拥有读写文件与执行命令的全部工具）。本工具立即返回，任务完成后你会自动收到【派发回报】（含它的最终答复全文、轮数/步数、与实际落盘核对过的改动文件清单）。工作任务与我们的聊天记录完全隔离——你就像用户一样只给它发一段自足的消息：说清目标与已知背景（涉及的文件/目录给绝对路径）即可；怎么干、怎么验证交给它自己判断，不要替它列步骤清单和验收矩阵。可选参数与人工在界面新建工作任务一致：mode 选工作模式、plan_mode 让它以计划模式启动、attachments 给它带上现成文件、model 指定模型（providerId/modelId 完整格式）、permission 调它的权限档（只能同等或降权，绝不允许增权）。",
 			objSchema(map[string]any{
-				"task":        strProp("自足的任务描述：目标与已知背景（涉及的文件/目录给绝对路径）——工作任务看不到本对话的任何记录；不要替它列步骤清单和验收矩阵"),
-				"title":       strProp("给新任务起的标题，可省略"),
-				"workspace":   strProp("可选：工作任务的工作目录（绝对路径），默认沿用当前工作区；与 remote_workspace 互斥"),
+				"task":             strProp("自足的任务描述：目标与已知背景（涉及的文件/目录给绝对路径）——工作任务看不到本对话的任何记录；不要替它列步骤清单和验收矩阵"),
+				"title":            strProp("给新任务起的标题，可省略"),
+				"workspace":        strProp("可选：工作任务的工作目录（绝对路径），默认沿用当前工作区；与 remote_workspace 互斥"),
 				"remote_workspace": strProp("可选：工作任务使用的 SSH 远程工作区（本对话的二号工作区），取值照抄环境快照「可派发远程工作区」行里的完整地址（user@host:dir）。与 workspace 互斥；不填＝沿用当前环境（本会话挂了远程则继承同一远程）"),
-				"model":       strProp("可选：任务会话使用的模型，格式 providerId/modelId（如 deepseek/deepseek-v4-pro）或纯 modelId；不填沿用默认"),
-				"mode":        strProp("可选：工作模式，取值与人工新建会话的模式下拉同一份清单（" + chatModesDoc() + "）；按任务性质选——办公文档/表格/资料选 office，改代码/编译排障选 coding，用户不懂编程的编程需求选 beginner-coding，把做法沉淀成技能教程选 skill-create。不填＝通用工作任务（task，与改动前一致）"),
-				"plan_mode":   boolProp("可选：true＝让新任务以计划模式启动（与人工建会话勾选「计划模式」一致）：它先只读调研、提交计划等用户批准后才动手；适合改动面大、跨多文件、有风险的任务"),
-				"attachments": arrayProp("可选：附件文件路径列表（本机绝对路径，如 D:\\资料\\需求.docx）。文件会复制进新任务的工作区并登记为上传（交付时可在 deliver_result 的文件项填 upload 交回用户原处），与人工建会话上传附件完全一致；路径不存在、是目录，或新任务是远程工作区时，整个派发被拒绝并报错", strProp("本机文件绝对路径，如 D:\\资料\\需求.docx")),
-				"permission":  strProp("可选：新任务的权限档，取值 read-only（全电脑只读）/ workspace-write（修改工作区）/ full（完全访问），与权限面板同一套档位。只能**同等或降权**——不得高于本会话（数字助理）当前权限（见环境快照的「权限模式」行），超出即拒绝并报错（不静默钳制）。不填＝修改工作区（本会话权限更窄时取本会话权限）。要改文件、跑命令的任务别降档；全电脑只读调研/查看可降为 read-only"),
+				"model":            strProp("可选：任务会话使用的模型，格式 providerId/modelId（如 deepseek/deepseek-v4-pro）或纯 modelId；不填沿用默认"),
+				"mode":             strProp("可选：工作模式，取值与人工新建会话的模式下拉同一份清单（" + chatModesDoc() + "）；按任务性质选——办公文档/表格/资料选 office，改代码/编译排障选 coding，用户不懂编程的编程需求选 beginner-coding，把做法沉淀成技能教程选 skill-create。不填＝通用工作任务（task，与改动前一致）"),
+				"plan_mode":        boolProp("可选：true＝让新任务以计划模式启动（与人工建会话勾选「计划模式」一致）：它先只读调研、提交计划等用户批准后才动手；适合改动面大、跨多文件、有风险的任务"),
+				"attachments":      arrayProp("可选：附件文件路径列表（本机绝对路径，如 D:\\资料\\需求.docx）。文件会复制进新任务的工作区并登记为上传（交付时可在 deliver_result 的文件项填 upload 交回用户原处），与人工建会话上传附件完全一致；路径不存在、是目录，或新任务是远程工作区时，整个派发被拒绝并报错", strProp("本机文件绝对路径，如 D:\\资料\\需求.docx")),
+				"permission":       strProp("可选：新任务的权限档，取值 read-only（全电脑只读）/ workspace-write（修改工作区）/ full（完全访问），与权限面板同一套档位。只能**同等或降权**——不得高于本会话（数字助理）当前权限（见环境快照的「权限模式」行），超出即拒绝并报错（不静默钳制）。不填＝修改工作区（本会话权限更窄时取本会话权限）。要改文件、跑命令的任务别降档；全电脑只读调研/查看可降为 read-only"),
 			}, "task")),
 		Run: runDispatchTask,
 	}
@@ -131,7 +131,7 @@ func dispatchTaskTool() Tool {
 
 // deliverSub 把派发需求投递进目标会话——走与用户发消息同一套投递（见 runtime.go
 // 的 deliverToSession）：目标空闲=落库并起 runSubAgent；正在执行=一律插话
-//（注入它当前这一轮，下一次调用模型就能看到——AI 发话不等排队）。
+// （注入它当前这一轮，下一次调用模型就能看到——AI 发话不等排队）。
 // dispatch_task / dispatch_sub 派发的是新会话、必然空闲；send_to_session 对已有
 // 会话中途发话，插话正是它的语义。落库身份是 kind=aiuser（AI 发出的用户消息）：
 // 系统按用户消息同等对待（开新回合、组装时后面跟一条时间提示词），前端是
@@ -148,22 +148,14 @@ func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) string {
 		"被派发的会话完成后系统会自动收到【派发回报】并触发你处理回报。现在可以先回用户一句「已经安排」。", sub.ID, sub.Title, note)
 }
 
-// dispatchModelChoice 解析派发工具的模型参数，返回应落到新会话上的
-// (provider, providerKey, model)。取值链（见 defaultmodels.go 文件头）：
+// dispatchModelChoice 解析 dispatch_task 的模型参数，返回应落到新顶层任务会话上
+// 的 (provider, providerKey, model)。取值链（见 defaultmodels.go 文件头）：
 // 显式 model 参数 > 派发任务默认模型（设置页）> 跟随主会话（派发者手选的
 // 渠道/模型/Key；派发者自己也没手选时跟随全局默认模型）。任一环取到的值不可用
 // 就直接报错，不往下试也不换渠道——废会话在建出来之前就被挡掉。
 func (t *toolContext) dispatchModelChoice(model string) (provider, providerKey, mdl string, err error) {
 	if m := strings.TrimSpace(model); m != "" {
-		ref, rerr := t.app.resolveDispatchModelRef(m, t.sess.Provider)
-		if rerr != nil {
-			return "", "", "", rerr
-		}
-		tgt, rerr := t.app.resolveModelRef(ref, whereDispatchTool)
-		if rerr != nil {
-			return "", "", "", rerr
-		}
-		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
+		return t.explicitDispatchModel(m)
 	}
 	if ref, custom := t.app.dispatchDefaultRef(); custom {
 		tgt, rerr := t.app.resolveModelRef(ref, whereDispatchDefault)
@@ -172,8 +164,37 @@ func (t *toolContext) dispatchModelChoice(model string) (provider, providerKey, 
 		}
 		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
 	}
-	// 派发设置是「跟随主会话」（默认）：派发者手选的渠道/模型/Key 原样继承——
-	// 多 Key 供应商连「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上。
+	return t.inheritSessionModel()
+}
+
+// dispatchSubModelChoice 子对话（dispatch_sub）的模型：不走「派发任务默认模型」
+// ——那个默认只给 dispatch_task 派出的顶层任务会话用；子对话与改动前一致地
+// 继承派发者（显式参数优先）。
+func (t *toolContext) dispatchSubModelChoice(model string) (provider, providerKey, mdl string, err error) {
+	if m := strings.TrimSpace(model); m != "" {
+		return t.explicitDispatchModel(m)
+	}
+	return t.inheritSessionModel()
+}
+
+// explicitDispatchModel 工具显式传了 model：完整格式直用、裸名只认能唯一定位的
+// 渠道（多个渠道都提供就拒绝，不替用户猜）。
+func (t *toolContext) explicitDispatchModel(m string) (provider, providerKey, mdl string, err error) {
+	ref, rerr := t.app.resolveDispatchModelRef(m, t.sess.Provider)
+	if rerr != nil {
+		return "", "", "", rerr
+	}
+	tgt, rerr := t.app.resolveModelRef(ref, whereDispatchTool)
+	if rerr != nil {
+		return "", "", "", rerr
+	}
+	return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
+}
+
+// inheritSessionModel 跟随主会话：派发者手选的渠道/模型/Key 原样继承——多 Key
+// 供应商连「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上。派发者自己没
+// 手选时跟全局默认模型（回空值，让新会话跟随）。
+func (t *toolContext) inheritSessionModel() (provider, providerKey, mdl string, err error) {
 	if pid := strings.TrimSpace(t.sess.Provider); pid != "" {
 		ref := ModelRef{Provider: pid, ProviderKey: t.sess.ProviderKey, Model: t.sess.Model}
 		if strings.TrimSpace(ref.Model) == "" {
@@ -202,6 +223,7 @@ func (t *toolContext) dispatchModelChoice(model string) (provider, providerKey, 
 	}
 	return "", "", "", nil
 }
+
 // providerLabel 渠道的中文名（没配名字时回退 id）。
 func providerLabel(a *App, id string) string {
 	if a == nil || a.Cfg == nil {
@@ -214,7 +236,7 @@ func providerLabel(a *App, id string) string {
 }
 
 // modelChannelsOf 查本地配置里哪些渠道提供这个模型名：返回「providerId/modelId
-//（渠道名）」列表（按配置顺序全列——同一模型常由多个渠道提供，只列一个会误导）。
+// （渠道名）」列表（按配置顺序全列——同一模型常由多个渠道提供，只列一个会误导）。
 // 匹配 id 精确/大小写不敏感，也认渠道里配的中文显示名（模型可能拿显示名来问）。
 func (a *App) modelChannelsOf(model string) []string {
 	model = strings.TrimSpace(model)
@@ -410,13 +432,13 @@ func (a *App) dispatchSubTool() Tool {
 	return Tool{
 		Spec: toolSpec("dispatch_sub", desc,
 			objSchema(map[string]any{
-				"task":       strProp("完整子任务描述。未继承上下文的专家（如「标准子对话」）看不到本对话记录，task 必须自带全部上下文（目标、验收标准、涉及目录）；继承上下文的专家（如「继承上下文子对话」）能看到此前的聊天记录，task 只用写「接下来要做什么」"),
-				"expert":     strProp("子对话专家名称：不传等同「标准子对话」；内置另有「继承上下文子对话」；自定义专家的名字与用途先用 list_experts 查询，必须与返回的清单逐字一致"),
-				"title":      strProp("给子对话起的标题，可省略"),
-				"workspace":  strProp("可选：子对话的工作目录（绝对路径），默认沿用当前工作区；与 remote_workspace 互斥"),
+				"task":             strProp("完整子任务描述。未继承上下文的专家（如「标准子对话」）看不到本对话记录，task 必须自带全部上下文（目标、验收标准、涉及目录）；继承上下文的专家（如「继承上下文子对话」）能看到此前的聊天记录，task 只用写「接下来要做什么」"),
+				"expert":           strProp("子对话专家名称：不传等同「标准子对话」；内置另有「继承上下文子对话」；自定义专家的名字与用途先用 list_experts 查询，必须与返回的清单逐字一致"),
+				"title":            strProp("给子对话起的标题，可省略"),
+				"workspace":        strProp("可选：子对话的工作目录（绝对路径），默认沿用当前工作区；与 remote_workspace 互斥"),
 				"remote_workspace": strProp("可选：子对话使用的 SSH 远程工作区（本对话的二号工作区），取值照抄环境快照「可派发远程工作区」行里的完整地址（user@host:dir）。与 workspace 互斥；不填＝沿用当前环境（本会话挂了远程则继承同一远程）"),
-				"model":      strProp("可选：覆盖专家预设的模型，格式 providerId/modelId（如 deepseek/deepseek-v4-pro）或纯 modelId；不填用预设默认模型或全局默认"),
-				"permission": strProp("可选：子对话的权限档，取值 read-only（全电脑只读）/ workspace-write（修改工作区）/ full（完全访问）。只能**同等或降权**——不得高于本会话（数字助理）当前权限，超出即拒绝并报错（不静默钳制）。不填＝修改工作区（本会话权限更窄时取本会话权限）"),
+				"model":            strProp("可选：覆盖专家预设的模型，格式 providerId/modelId（如 deepseek/deepseek-v4-pro）或纯 modelId；不填用预设默认模型或全局默认"),
+				"permission":       strProp("可选：子对话的权限档，取值 read-only（全电脑只读）/ workspace-write（修改工作区）/ full（完全访问）。只能**同等或降权**——不得高于本会话（数字助理）当前权限，超出即拒绝并报错（不静默钳制）。不填＝修改工作区（本会话权限更窄时取本会话权限）"),
 			}, "task")),
 		Run: runDispatchSub,
 	}
@@ -430,13 +452,13 @@ func (a *App) dispatchSubTool() Tool {
 // 子会话记下专家名（SessionMeta.Expert），提示词构建时按名解析追加。
 func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
-		Task           string `json:"task"`
-		Expert         string `json:"expert"`
-		Title          string `json:"title"`
-		Workspace      string `json:"workspace"`
+		Task            string `json:"task"`
+		Expert          string `json:"expert"`
+		Title           string `json:"title"`
+		Workspace       string `json:"workspace"`
 		RemoteWorkspace string `json:"remote_workspace"`
-		Model          string `json:"model"`
-		Permission     string `json:"permission"`
+		Model           string `json:"model"`
+		Permission      string `json:"permission"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -479,12 +501,13 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 模型默认链：显式参数 > 专家预设 > 继承主会话手选 > 空（全局默认）
+	// 模型链：显式参数 > 专家预设 > 继承派发者手选 > 空（全局默认）。子对话不走
+	// 「派发任务默认模型」（那个默认只管 dispatch_task 派出的顶层任务会话）。
 	model := strings.TrimSpace(p.Model)
 	if model == "" {
 		model = strings.TrimSpace(ex.Model)
 	}
-	provider, providerKey, mdl, err := t.dispatchModelChoice(model)
+	provider, providerKey, mdl, err := t.dispatchSubModelChoice(model)
 	if err != nil {
 		return "", err
 	}
@@ -543,15 +566,15 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 }
 func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
-		Task        string   `json:"task"`
-		Title       string   `json:"title"`
-		Workspace   string   `json:"workspace"`
-		RemoteWorkspace string `json:"remote_workspace"`
-		Model       string   `json:"model"`
-		Mode        string   `json:"mode"`
-		PlanMode    bool     `json:"plan_mode"`
-		Attachments []string `json:"attachments"`
-		Permission  string   `json:"permission"`
+		Task            string   `json:"task"`
+		Title           string   `json:"title"`
+		Workspace       string   `json:"workspace"`
+		RemoteWorkspace string   `json:"remote_workspace"`
+		Model           string   `json:"model"`
+		Mode            string   `json:"mode"`
+		PlanMode        bool     `json:"plan_mode"`
+		Attachments     []string `json:"attachments"`
+		Permission      string   `json:"permission"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -606,8 +629,8 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 		title = truncateRunes(p.Task, 20)
 	}
 	params := createSessionParams{
-		Mode:         mode, // 与人工新建会话同一份模式清单（resolveDispatchMode）
-		Title:        title, Workspace: ws,
+		Mode:  mode, // 与人工新建会话同一份模式清单（resolveDispatchMode）
+		Title: title, Workspace: ws,
 		Permission:   perm,       // 只能同等或降权，绝不允许增权（dispatchPermission）
 		PlanMode:     p.PlanMode, // 与人工建会话勾选「计划模式」一致
 		DispatchedBy: t.sess.ID,  // 派发的是顶层工作任务（左侧列表可见）；回报链走 dispatched_by，不走 parent_id
@@ -737,7 +760,7 @@ func stopSessionTool() Tool {
 }
 
 // runStopSession 停掉一个正在执行的任务会话：调用服务端**既有**的停止逻辑
-//（App.stopRunBy，与人工点会话上「停止」按钮走同一个函数：协作式取消 ctx、
+// （App.stopRunBy，与人工点会话上「停止」按钮走同一个函数：协作式取消 ctx、
 // 终止该会话全部后台作业、把停止原因落库），不另造一套。差别只在触发者——
 // 人工点按钮记 user，本工具记 assistant（数字助理受用户指示代停），因此停止
 // 记录、重启恢复与【派发回报】的首句都分得清是谁停的（两者都算人为叫停：
@@ -893,7 +916,7 @@ func displayableRow(m *StoredMessage) bool {
 }
 
 // buildReportDigest 把会话消息流折成回报摘要数据。interrupted 由调用方给出
-//（它知道本轮是正常收尾还是中断收尾）：中断时过程内容保留断点附近的原文，
+// （它知道本轮是正常收尾还是中断收尾）：中断时过程内容保留断点附近的原文，
 // 正常完成时只留一两句要点。
 func buildReportDigest(a *App, m *SessionMeta, rows []*StoredMessage, interrupted bool) reportDigest {
 	dg := reportDigest{Interrupted: interrupted}
@@ -1050,7 +1073,7 @@ func historyLine(m *StoredMessage, clip int) string {
 
 // renderChangedFiles 渲染「改动文件」清单：路径按实际落盘核对后的口径展示，
 // 相对路径标注所属工作区（数字助理据此拼绝对路径做交付登记），核对结论
-//（一致/不一致/找不到/远程未核对）一并写明。
+// （一致/不一致/找不到/远程未核对）一并写明。
 func renderChangedFiles(files []changedFile) []string {
 	if len(files) == 0 {
 		return []string{"· 改动文件：无（未记录到成功的写文件动作）"}

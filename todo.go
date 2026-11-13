@@ -90,18 +90,18 @@ type Schedule struct {
 
 // TaskItem 是一条待办/定时任务。
 type TaskItem struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"` // 将来原样派出去的那段话（自足，不依赖聊天记录）
-	Enabled     bool     `json:"enabled"`
-	Executor    string   `json:"executor"`         // assistant | command
-	Target      string   `json:"target,omitempty"` // 仅 assistant 类：manager=长期助理（默认）| task=新工作任务
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"` // 将来原样派出去的那段话（自足，不依赖聊天记录）
+	Enabled     bool   `json:"enabled"`
+	Executor    string `json:"executor"`         // assistant | command
+	Target      string `json:"target,omitempty"` // 仅 assistant 类：manager=长期助理（默认）| task=新工作任务
 	// 任务模型（仅 assistant 类）三档：空=跟随派发设置（默认，老数据没这个字段就是它）/ "global"=全局默认
 	// 模型 / "custom"=指定渠道+模型（Model 存完整指向，含 Key 归属）。取值链与
 	// 「不可用就报错」的判定见 defaultmodels.go。
 	ModelMode string    `json:"modelMode,omitempty"`
 	Model     *ModelRef `json:"model,omitempty"`
-	Schedule    Schedule `json:"schedule"`
+	Schedule  Schedule  `json:"schedule"`
 	// 以下仅 command 类：工作目录、要在那里运行的命令、执行档位（沙箱 / 完全访问）。
 	Dir        string `json:"dir,omitempty"`
 	Command    string `json:"command,omitempty"`
@@ -873,8 +873,8 @@ type todoRequest struct {
 	// 换档；custom 必须带 model。
 	ModelMode string    `json:"modelMode,omitempty"`
 	Model     *ModelRef `json:"model,omitempty"`
-	Enabled     *bool     `json:"enabled"`
-	Done        *bool     `json:"done"` // 标记完成 / 重新打开（仅 update：完成是终态归档，调度随之停）
+	Enabled   *bool     `json:"enabled"`
+	Done      *bool     `json:"done"` // 标记完成 / 重新打开（仅 update：完成是终态归档，调度随之停）
 }
 
 // normalize 把请求体收敛成一份规范化配置；只填给出的字段（create 用全量）。
@@ -1287,11 +1287,11 @@ func (s *todoScheduler) handToTaskSession(task *TaskItem, record *RunRecord) (st
 		return "", err
 	}
 	sub, err := s.app.createSession(createSessionParams{
-		Mode:         "task", // 按任务性质默认通用工作任务（与 dispatch_task 不传 mode 同一默认）
-		Title:        title,
-		Workspace:    s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与长期助理主对话同口径）
-		Permission:   permWorkspace,
-		Provider:     provider, ProviderKey: providerKey, Model: model,
+		Mode:       "task", // 按任务性质默认通用工作任务（与 dispatch_task 不传 mode 同一默认）
+		Title:      title,
+		Workspace:  s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与长期助理主对话同口径）
+		Permission: permWorkspace,
+		Provider:   provider, ProviderKey: providerKey, Model: model,
 		DispatchedBy: todoComponentID, // 系统派生标记：回报链查无此会话，不自动回报、不打扰长期助理
 	})
 	if err != nil {

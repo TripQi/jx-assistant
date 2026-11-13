@@ -291,7 +291,7 @@ func normTodoModelMode(s string) string {
 }
 
 // todoModelChain 待办的模型取值链：待办自选 → 派发任务默认模型 → 全局默认模型
-//（派发设置是「跟随主会话」时——待办由系统调度器派出（DispatchedBy=todo-scheduler），
+// （派发设置是「跟随主会话」时——待办由系统调度器派出（DispatchedBy=todo-scheduler），
 // 根本没有主会话可跟，所以落到全局默认模型，不静默空着也不乱猜）。
 //
 // 返回值：要钉到新会话上的指向（空＋err==nil＝新会话跟随全局默认，已校验可用）、
@@ -531,6 +531,7 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		"dispatch": a.dispatchSettingsView(),
 	})
 }
+
 // migrateDefaultModel 把单模型时代那个裸模型名（Config.Model，向导只写过一次）
 // 折算成「渠道 + 模型 + Key 归属」的完整格式，写进 DefaultModel。
 //

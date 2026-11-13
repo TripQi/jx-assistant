@@ -83,7 +83,7 @@ type ProviderCfg struct {
 }
 
 // KeyList 返回该供应商的有效 Key 清单：多 Key 结构直接用；老的供应商级单 Key
-//（预置提供方、公司内部通道）合成一把没有 ID 的隐含 Key——调用链、接口、菜单
+// （预置提供方、公司内部通道）合成一把没有 ID 的隐含 Key——调用链、接口、菜单
 // 因此只有一套解析路径，不必到处分支「是不是多 Key」。
 func (p *ProviderCfg) KeyList() []ProviderKeyCfg {
 	if len(p.Keys) > 0 {
@@ -469,7 +469,7 @@ func thinkingLevels() []string {
 
 // normalizeThinkingLevel 把档位串归一成六档之一（或空串=跟随服务端默认）。
 // 老会话库里存的是上一代的 enabled/disabled：disabled 归一到 none，enabled
-//（只开关不指深浅）归一到空串；六档之外的串不合规，ok=false 交调用方处理。
+// （只开关不指深浅）归一到空串；六档之外的串不合规，ok=false 交调用方处理。
 func normalizeThinkingLevel(s string) (level string, ok bool) {
 	switch lv := strings.ToLower(strings.TrimSpace(s)); lv {
 	case "", "enabled":

@@ -59,11 +59,11 @@ func ensureRemoteIdentity(cfg *Config, path string) {
 // BaseURL/APIKey/Model 是单模型时代的旧字段：为兼容老配置保留，
 // 加载时若 Providers 为空会折算成第一个 provider，保存时反向同步。
 type Config struct {
-	Port       int           `json:"port"`
-	BindHost   string        `json:"bindHost"`
-	BaseURL    string        `json:"baseURL"`
-	APIKey     string        `json:"apiKey"`
-	Model      string        `json:"model"`
+	Port     int    `json:"port"`
+	BindHost string `json:"bindHost"`
+	BaseURL  string `json:"baseURL"`
+	APIKey   string `json:"apiKey"`
+	Model    string `json:"model"`
 	// DefaultModel 全局默认模型（完整格式：渠道 + 模型 + Key 归属）。手动新建任务
 	// 会话（首页输入框默认选中的模型）用它；待办在派发设置为「跟随主会话」时也落到
 	// 它（待办没有主会话可跟）。老配置里那个裸模型名（Model）是单模型时代的遗留，
@@ -71,13 +71,13 @@ type Config struct {
 	DefaultModel ModelRef `json:"defaultModel"`
 	// DispatchModel 派发任务默认模型：空＝跟随主会话（派发者当前的渠道/模型/Key，
 	// 也就是这个设置出现之前的现状）；非空＝dispatch_task 派出的顶层任务会话用它。
-	DispatchModel ModelRef    `json:"dispatchModel,omitempty"`
+	DispatchModel ModelRef      `json:"dispatchModel,omitempty"`
 	Providers     []ProviderCfg `json:"providers"`
-	Workspace  string        `json:"workspace"`
-	MaxSteps   int           `json:"maxSteps"` // 步数上限（一条消息触发的任务里连续步数）：0/负数 = 不限制（默认）
-	AllowShell bool          `json:"allowShell"`
-	DataDir    string        `json:"dataDir"`
-	SkillsDir  string        `json:"skillsDir"` // 技能目录；空 = 可执行文件旁的 技能/（不可写时落数据目录）
+	Workspace     string        `json:"workspace"`
+	MaxSteps      int           `json:"maxSteps"` // 步数上限（一条消息触发的任务里连续步数）：0/负数 = 不限制（默认）
+	AllowShell    bool          `json:"allowShell"`
+	DataDir       string        `json:"dataDir"`
+	SkillsDir     string        `json:"skillsDir"` // 技能目录；空 = 可执行文件旁的 技能/（不可写时落数据目录）
 	// 上下文压缩设置。规则自动压缩为**间隔制**：自上次压缩边界起新增未压缩
 	// 内容达到 CompactInterval（随 CompactUnit 取字数或 token）就触发一次零
 	// 成本规则折叠；模型摘要阈值（CompactLlmPct，默认 80%）仍按窗口百分比，
@@ -197,13 +197,14 @@ type Config struct {
 
 // CompanyQuotaCfg 公司内部通道的额度快照（服务端 quota.go 的 quotaPayload 结构，
 // 随 /announce 与 /provision 下发）。客户端只存不算：
-//   Points       每次重置为多少积分（0 = 不限量，只记账）
-//   RemainPoints 剩余（积分；快照时的值，最多滞后几分钟）
-//   UsedPoints   已用（积分，new-api 按令牌记账）
-//   Period/PeriodText  重置周期与给人看的描述（"每月 1 号"/"每 7 天"/"不自动重置"）
-//   NextAt       下次重置时间（RFC3339，空 = 不自动重置）
-//   AsOf         快照时间（显示"更新于 xx"，避免用户以为是实时值）
-//   Status       1=启用 2=被中转站禁用（额度耗尽会被自动停用）
+//
+//	Points       每次重置为多少积分（0 = 不限量，只记账）
+//	RemainPoints 剩余（积分；快照时的值，最多滞后几分钟）
+//	UsedPoints   已用（积分，new-api 按令牌记账）
+//	Period/PeriodText  重置周期与给人看的描述（"每月 1 号"/"每 7 天"/"不自动重置"）
+//	NextAt       下次重置时间（RFC3339，空 = 不自动重置）
+//	AsOf         快照时间（显示"更新于 xx"，避免用户以为是实时值）
+//	Status       1=启用 2=被中转站禁用（额度耗尽会被自动停用）
 type CompanyQuotaCfg struct {
 	Points       int64  `json:"points,omitempty"`
 	RemainPoints int64  `json:"remainPoints,omitempty"`
@@ -217,7 +218,7 @@ type CompanyQuotaCfg struct {
 }
 
 // AskAlertCfg 询问提醒配置段：Enabled=nil＝默认开启；AfterSec 触发秒数
-//（默认 240=4 分钟，钳 30-600）；Text 朗读文案（空＝默认那句）。
+// （默认 240=4 分钟，钳 30-600）；Text 朗读文案（空＝默认那句）。
 type AskAlertCfg struct {
 	Enabled  *bool  `json:"enabled,omitempty"`
 	AfterSec int    `json:"afterSec,omitempty"`
@@ -700,7 +701,7 @@ func newProviderKeyID(p *ProviderCfg) string {
 }
 
 // legacyPlainHosts 自家服务端的已知地址——存量配置里可能以明文 http:// 记录
-//（历史网关域名、内网 IP、外网域名），明文停用后统一收敛到正式域名。
+// （历史网关域名、内网 IP、外网域名），明文停用后统一收敛到正式域名。
 var legacyPlainHosts = []string{"example.com", "jxaizz.cn", "nas.example.org", "192.0.2.210"}
 
 // migrateLegacyPlainURL 把「http://<自家host>[:任意端口]<路径…>」迁到

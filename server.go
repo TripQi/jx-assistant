@@ -1582,32 +1582,32 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		BaseURL            *string `json:"baseURL"`
-		APIKey             *string `json:"apiKey"` // 空串表示保持不变
-		Model              *string `json:"model"`
-		Workspace          *string `json:"workspace"`
-		BindHost           *string `json:"bindHost"`
-		RemoteEnabled      *bool   `json:"remoteEnabled"`  // 远程接入（公网中继）总开关，即时生效（保存即热启停）
-		RemoteMyID         *string `json:"remoteMyId"`     // 远程接入设备号（手机入口 /a/<设备号>）
-		RemotePairKey      *string `json:"remotePairKey"`  // 远程接入配对密钥（端到端加密密钥的种子）
-		RemoteHost         *string `json:"remoteHost"`     // 中继网关地址（域名或 IP，不带协议与端口）
-		RemotePort         *int    `json:"remotePort"`     // 中继网关端口
-		MarketURL          *string `json:"marketURL"`      // 市场（技能/组件/插件）服务器清单地址
-		SearchURL          *string `json:"searchURL"`      // 搜索服务地址（web_search 的 /api/search 网关；空=跟随市场同源）
+		BaseURL       *string `json:"baseURL"`
+		APIKey        *string `json:"apiKey"` // 空串表示保持不变
+		Model         *string `json:"model"`
+		Workspace     *string `json:"workspace"`
+		BindHost      *string `json:"bindHost"`
+		RemoteEnabled *bool   `json:"remoteEnabled"` // 远程接入（公网中继）总开关，即时生效（保存即热启停）
+		RemoteMyID    *string `json:"remoteMyId"`    // 远程接入设备号（手机入口 /a/<设备号>）
+		RemotePairKey *string `json:"remotePairKey"` // 远程接入配对密钥（端到端加密密钥的种子）
+		RemoteHost    *string `json:"remoteHost"`    // 中继网关地址（域名或 IP，不带协议与端口）
+		RemotePort    *int    `json:"remotePort"`    // 中继网关端口
+		MarketURL     *string `json:"marketURL"`     // 市场（技能/组件/插件）服务器清单地址
+		SearchURL     *string `json:"searchURL"`     // 搜索服务地址（web_search 的 /api/search 网关；空=跟随市场同源）
 		// 搜索供应商（websearch_providers.go）：整体替换；apiKey 空串 = 沿用同 id 已保存的
-		SearchProviders  *[]SearchProviderCfg `json:"searchProviders"`
-		SearchTimeoutSec *int                 `json:"searchTimeoutSec"` // 一次 web_search 的总耗时预算（秒，0=默认 20）
-		PublisherName      *string `json:"publisherName"`  // 发布者姓名（市场条目归属名；发布/删除自己条目时用）
-		WizardDone         *bool   `json:"wizardDone"`     // 首启向导：完成/跳过（不再自动弹）
-		CompanyLinkOff     *bool   `json:"companyLinkOff"` // 公司接入停用（设置·网络访问开关）：不弹向导、向导接口拒绝、同步器停转
-		RegistryURL        *string `json:"registryURL"`    // 总服务器地址（向导发现不到公司时的查询兜底）
-		UpdateURL          *string `json:"updateURL"`      // 更新检查发布源（"off"/空串关闭）
-		UpdateMode         *string `json:"updateMode"`     // 更新方式：auto=分块静默（默认）/manual=仅提醒
-		AllowShell         *bool   `json:"allowShell"`
-		MaxSteps           *int    `json:"maxSteps"`
-		SnapshotEnabled    *bool   `json:"snapshotEnabled"`    // 文件备份总开关（常规页）
-		SnapshotDays       *int    `json:"snapshotDays"`       // 快照自动清理天数（-1=永不过期）
-		BrowserProfileDays *int    `json:"browserProfileDays"` // 会话浏览器 profile 保留天数（0=不清理；nil=不改）
+		SearchProviders    *[]SearchProviderCfg `json:"searchProviders"`
+		SearchTimeoutSec   *int                 `json:"searchTimeoutSec"` // 一次 web_search 的总耗时预算（秒，0=默认 20）
+		PublisherName      *string              `json:"publisherName"`    // 发布者姓名（市场条目归属名；发布/删除自己条目时用）
+		WizardDone         *bool                `json:"wizardDone"`       // 首启向导：完成/跳过（不再自动弹）
+		CompanyLinkOff     *bool                `json:"companyLinkOff"`   // 公司接入停用（设置·网络访问开关）：不弹向导、向导接口拒绝、同步器停转
+		RegistryURL        *string              `json:"registryURL"`      // 总服务器地址（向导发现不到公司时的查询兜底）
+		UpdateURL          *string              `json:"updateURL"`        // 更新检查发布源（"off"/空串关闭）
+		UpdateMode         *string              `json:"updateMode"`       // 更新方式：auto=分块静默（默认）/manual=仅提醒
+		AllowShell         *bool                `json:"allowShell"`
+		MaxSteps           *int                 `json:"maxSteps"`
+		SnapshotEnabled    *bool                `json:"snapshotEnabled"`    // 文件备份总开关（常规页）
+		SnapshotDays       *int                 `json:"snapshotDays"`       // 快照自动清理天数（-1=永不过期）
+		BrowserProfileDays *int                 `json:"browserProfileDays"` // 会话浏览器 profile 保留天数（0=不清理；nil=不改）
 		Compact            *struct {
 			Mode      string  `json:"mode"`
 			KeepChars *int    `json:"keepChars"`

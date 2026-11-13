@@ -10,12 +10,12 @@ package main
 //   - $.process.spawn、$.audio、$.telemetry 等不支持（调用即抛 TypeError）
 
 import (
-	"log"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"

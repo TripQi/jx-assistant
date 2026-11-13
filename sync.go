@@ -13,11 +13,11 @@
 // 迁移候选优先一试（旧地址已死、新地址广播可达的场景）。
 //
 // 公网兜底与公司通道的自动停用/恢复：内网全源失联时改拉服务端公网地址
-//（wizardPublicServer，仅由服务端下发）上的公告——公网可达就不算失联（模型调用
+// （wizardPublicServer，仅由服务端下发）上的公告——公网可达就不算失联（模型调用
 // 走外网通道故障转移，见 llm.go StreamChat）。内网公网都失联连续 2 轮（约 10 分钟）
 // 自动停用公司通道（AutoDisabled，选模型自动落到私人通道）；实际调用连接失败也
 // 立即触发（agent.go 的 noteProviderConnFail）。任一来源恢复可达即自动重新启用
-//（手动停用 Enabled=false 不受影响）。
+// （手动停用 Enabled=false 不受影响）。
 //
 // 公司通道被删后的自动重建：公告拉取成功但本地没有 company-internal 时，按原
 // 姓名自动 POST /provision 重新领一份配置包（公告里没有 key，必须走 provision），
@@ -76,7 +76,7 @@ type announcePayload struct {
 	// 文字统一配置。nil=老服务端未下发（保持本地现值）。LOGO 按 logoHash 比对，
 	// 不变不下载（一张图只在该换时传一次）。
 	Brand *brandAnnounce `json:"brand,omitempty"`
-	API          *struct {
+	API   *struct {
 		BaseURL       string            `json:"baseURL"`
 		PublicBaseURL string            `json:"publicBaseURL,omitempty"` // 外网模型通道（对所有人开放或该用户被授权才下发）
 		Models        []wizardModelInfo `json:"models"`
@@ -102,7 +102,7 @@ func startCompanySyncer(a *App) {
 
 // companySyncOnce 一轮同步：hint 非空时优先试广播带来的地址（服务端搬家、旧地址
 // 已死）；全部失联再按公司名重新局域网发现；仍失联改拉服务端公网地址兜底
-//（出公司场景：公网可达就不算失联）。拿到公告后差异驱动应用。
+// （出公司场景：公网可达就不算失联）。拿到公告后差异驱动应用。
 func companySyncOnce(a *App, hintServer string) {
 	if a.Cfg.CompanyLinkOff { // 接入停用：同步器与广播触发的入口都收在这
 		return
@@ -336,7 +336,7 @@ func (a *App) handleCompanySyncNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "quota": a.Cfg.CompanyQuota})
 }
 
-/* ---------- 公司通道的自动停用/恢复与自动重建 ---------- */// noteCompanySyncOK 一轮同步拿到公告：清零失联计数；公司通道曾被自动停用的恢复。
+/* ---------- 公司通道的自动停用/恢复与自动重建 ---------- */ // noteCompanySyncOK 一轮同步拿到公告：清零失联计数；公司通道曾被自动停用的恢复。
 func noteCompanySyncOK(a *App) {
 	a.syncFailMu.Lock()
 	a.syncFails = 0
@@ -396,7 +396,7 @@ func setCompanyAutoDisabled(a *App, disabled bool, reason string) {
 }
 
 // reprovisionCompany 公司通道被删后的自动重建：按原姓名重新领一份配置包整体应用
-//（含 key 与模型清单）。失败静默返回，下一轮同步再试。
+// （含 key 与模型清单）。失败静默返回，下一轮同步再试。
 func reprovisionCompany(a *App, server, user string) {
 	if user == "" {
 		return

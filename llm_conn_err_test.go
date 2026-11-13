@@ -10,11 +10,11 @@ package main
 //
 //  1. 报错文案仍是单行（界面报错条），但人话在前、括号里带拨号目标 host:port、
 //     底层错误原文、是否经代理、耗时；
-//  2. 只有「拨号瞬断」（连接被拒/连接重置/强制关闭/管道断开/unexpected eof）
-//     在单次连接内按 1/2/3/4/5s 的阶梯退避重试同一地址（最多 5 次重试＝6 次
-//     尝试）；超时、域名解析、429 限流、鉴权失败一律不重试；ctx 取消时退避
-//     立即返回，不睡满。主/备用地址次序不变：主地址跑完自己的阶梯 → 才走
-//     备用地址（alt 也跑同样阶梯）。
+//  2. 拨号失败按失败类型走两本阶梯：拒连/重置/强制关闭/管道断开/unexpected eof
+//     推 1/2/3/4/5s（最多 5 次重试＝6 次尝试）；连接/拨号超时走更短的
+//     1s/2s + 总预算（超时一次就要花 8–15s，不能重试 5 次）。域名解析、429
+//     限流、鉴权失败一律不重试；ctx 取消时退避立即返回，不睡满。主/备用地址
+//     次序不变：主地址跑完自己的阶梯 → 才走备用地址（alt 也跑同样阶梯）。
 //  3. 连接类失败不再进入整步层重试（isRetryableModelErr 返回 false）：两层
 //     叠乘会把最坏等待放大到分钟级；429/5xx 仍是整步 5 次。
 
@@ -57,6 +57,23 @@ func withConnRetryDelays(t *testing.T, ds ...time.Duration) {
 	old := connRetryDelays
 	connRetryDelays = ds
 	t.Cleanup(func() { connRetryDelays = old })
+}
+
+// withConnRetryTimeoutDelays 改写超时类的短阶梯与总预算（默认 1s/2s + 20s 预算），
+// 免得测试真的等上十几秒。
+func withConnRetryTimeoutDelays(t *testing.T, ds ...time.Duration) {
+	t.Helper()
+	old := connRetryTimeoutDelays
+	connRetryTimeoutDelays = ds
+	t.Cleanup(func() { connRetryTimeoutDelays = old })
+}
+
+// withConnRetryTimeoutBudget 改写超时类的总预算（含已耗掉的尝试耗时）。
+func withConnRetryTimeoutBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := connRetryTimeoutBudget
+	connRetryTimeoutBudget = d
+	t.Cleanup(func() { connRetryTimeoutBudget = old })
 }
 
 // withNoProxy 把「是否经代理」的判定钉死为「未经代理」：开发机真配了代理环境
@@ -192,35 +209,24 @@ func TestStreamChatRetryOnceOnRefused(t *testing.T) {
 	}
 }
 
-// TestStreamChatNoRetryForTimeoutOrDNS 超时与域名解析不是拨号瞬断：不重试。
-func TestStreamChatNoRetryForTimeoutOrDNS(t *testing.T) {
-	cases := []struct {
-		name    string
-		dialErr string
-		want    string
-	}{
-		{"超时", "dial tcp 198.18.0.13:443: i/o timeout", "连接超时"},
-		{"域名解析", "dial tcp: lookup api.example.com: no such host", "域名解析失败"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			withNoProxy(t)
-			withConnRetryDelays(t, 10*time.Millisecond)
-			client, dials := refusedTransport(t, c.dialErr)
-			withStreamHTTP(t, client)
+// TestStreamChatDNSNoRetry 域名解析不是拨号瞬断也不是超时：一次都不重试
+// （同一地址立刻重试结果一样，白等用户时间）。
+func TestStreamChatDNSNoRetry(t *testing.T) {
+	withNoProxy(t)
+	withConnRetryDelays(t, 10*time.Millisecond)
+	withConnRetryTimeoutDelays(t, 10*time.Millisecond)
+	client, dials := refusedTransport(t, "dial tcp: lookup api.example.com: no such host")
+	withStreamHTTP(t, client)
 
-			err := StreamChat(context.Background(), connTestTarget("fakep-noretry", "https://api.example.com", ""), connTestReq(), StreamCallbacks{})
-			if err == nil {
-				t.Fatal("期望连接失败，却成功了")
-			}
-			if got := atomic.LoadInt32(dials); got != 1 {
-				t.Errorf("%s 不该触发短退避：拨号 %d 次，期望 1", c.name, got)
-			}
-			if !strings.Contains(err.Error(), c.want) {
-				t.Errorf("%s 文案缺少 %q：%s", c.name, c.want, err.Error())
-			}
-			t.Logf("%s 文案 = %s", c.name, err.Error())
-		})
+	err := StreamChat(context.Background(), connTestTarget("fakep-dns", "https://api.example.com", ""), connTestReq(), StreamCallbacks{})
+	if err == nil {
+		t.Fatal("期望连接失败，却成功了")
+	}
+	if got := atomic.LoadInt32(dials); got != 1 {
+		t.Errorf("域名解析失败不该重试：拨号 %d 次，期望 1", got)
+	}
+	if !strings.Contains(err.Error(), "域名解析失败") {
+		t.Errorf("文案缺少域名解析说明：%s", err.Error())
 	}
 }
 
@@ -411,5 +417,112 @@ func TestIsRetryableModelErrConnNotRetried(t *testing.T) {
 		if got := isRetryableModelErr(c.err); got != c.want {
 			t.Errorf("%s：isRetryableModelErr = %v，期望 %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestConnRetryTimeoutLadder 超时也会重试：按超时类阶梯（默认 1s/2s）跑完才放弃，
+// 不再「超时一次就放弃」（用户 2026-11-13 实测：拨号层只认拒连、整步层又已被
+// 改成不重试连接类失败 → 超时被夹在中间，一次就完）。
+func TestConnRetryTimeoutLadder(t *testing.T) {
+	withNoProxy(t)
+	withConnRetryDelays(t, 5*time.Millisecond) // 拒连类阶梯不该被用到
+	withConnRetryTimeoutDelays(t, 5*time.Millisecond, 5*time.Millisecond, 5*time.Millisecond)
+	withConnRetryTimeoutBudget(t, time.Minute)
+	client, dials := refusedTransport(t, "dial tcp 198.18.0.13:443: i/o timeout")
+	withStreamHTTP(t, client)
+
+	err := StreamChat(context.Background(), connTestTarget("fakep-toladder", "https://api.example.com", ""), connTestReq(), StreamCallbacks{})
+	if err == nil {
+		t.Fatal("期望连接失败，却成功了")
+	}
+	if got := atomic.LoadInt32(dials); got != 4 {
+		t.Errorf("拨号 %d 次，期望 4（首试 + 超时阶梯 3 次重试）", got)
+	}
+	if !isConnFailure(err) || !strings.Contains(err.Error(), "连接超时") {
+		t.Errorf("应当报连接超时（connFailure）：%v", err)
+	}
+}
+
+// TestConnRetryTimeoutBudgetCapsAttempts 超时类有总预算（含已花掉的耗时）：
+// 每次超时都慢时，预算一到就停手（把时间让给备用地址），不强行跑完次数。
+func TestConnRetryTimeoutBudgetCapsAttempts(t *testing.T) {
+	withNoProxy(t)
+	withConnRetryTimeoutDelays(t, 10*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond)
+	withConnRetryTimeoutBudget(t, 500*time.Millisecond)
+
+	var dials int32
+	withStreamHTTP(t, &http.Client{Transport: &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			atomic.AddInt32(&dials, 1)
+			time.Sleep(300 * time.Millisecond) // 模拟一次真超时需要的时间
+			return nil, errors.New("dial tcp 198.18.0.13:443: i/o timeout")
+		},
+	}})
+
+	start := time.Now()
+	err := StreamChat(context.Background(), connTestTarget("fakep-tobudget", "https://api.example.com", ""), connTestReq(), StreamCallbacks{})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("期望连接失败，却成功了")
+	}
+	// 首试 300ms → 退 10ms（310ms ≤ 500ms）→ 再试 300ms（610ms）→ 预算满，停手
+	if got := atomic.LoadInt32(&dials); got != 2 {
+		t.Errorf("拨号 %d 次，期望 2（预算 500ms 已被前两次吃掉，第三次不再试）", got)
+	}
+	if elapsed > 1200*time.Millisecond {
+		t.Errorf("预算没兜住：耗时 %v", elapsed)
+	}
+	t.Logf("预算封顶后 %v 返回，拨号 %d 次，文案 = %s", elapsed.Round(time.Millisecond), atomic.LoadInt32(&dials), err.Error())
+}
+
+// TestConnRetryTimeoutHonorsCancel 超时类的退避期间 ctx 取消（用户点停止/插话）：
+// 立即返回，不睡满，也不再拨一次。
+func TestConnRetryTimeoutHonorsCancel(t *testing.T) {
+	withNoProxy(t)
+	withConnRetryTimeoutDelays(t, 2*time.Second) // 真睡满会明显被抓出来
+	withConnRetryTimeoutBudget(t, time.Minute)
+	client, dials := refusedTransport(t, "dial tcp 198.18.0.13:443: i/o timeout")
+	withStreamHTTP(t, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := StreamChat(ctx, connTestTarget("fakep-tocancel", "https://api.example.com", ""), connTestReq(), StreamCallbacks{})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("期望连接失败，却成功了")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("超时类退避没被 ctx 取消打断：耗时 %v（退避设成了 2s）", elapsed)
+	}
+	if got := atomic.LoadInt32(dials); got != 1 {
+		t.Errorf("取消后不该再拨号：拨号 %d 次，期望 1", got)
+	}
+}
+
+// TestConnRetryTimeoutLadderBounds 钉住超时类的口径上界：阶梯不超过 2 级（3 次尝试）、
+// 退避总和 ≤ 5s、预算 ≤ 20s——最坏单地址沉默 = 预算 + 一次超时（按打底 15s 算）
+// ≈ 35s，不到一分钟；共用拒连的 6 次 ×(15s+) 那种量级不许再回来。
+func TestConnRetryTimeoutLadderBounds(t *testing.T) {
+	if n := len(connRetryTimeoutDelays); n > 2 {
+		t.Errorf("超时阶梯 %d 级，期望 ≤ 2 级（超时一次就花 8–15s，不能再多）", n)
+	}
+	var sum time.Duration
+	for _, d := range connRetryTimeoutDelays {
+		sum += d
+	}
+	if sum > 5*time.Second {
+		t.Errorf("超时阶梯退避总和 %v，期望 ≤ 5s", sum)
+	}
+	if connRetryTimeoutBudget > 20*time.Second {
+		t.Errorf("超时重试总预算 %v，期望 ≤ 20s", connRetryTimeoutBudget)
+	}
+	const worstPerAttempt = 15 * time.Second // 公司 TLS 拨号超时上限（见 tlspolicy）
+	if worst := connRetryTimeoutBudget + worstPerAttempt; worst > time.Minute {
+		t.Errorf("单地址最坏沉默 %v，超过一分钟（用户会以为卡死）", worst)
 	}
 }

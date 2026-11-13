@@ -8,12 +8,15 @@ package main
 //     不插手（HTTP 状态码错误压根不是 connFailure）；
 //   - 拒连（断网形态）：连接类失败**不进整步层**，由拨号层按
 //     connRetryDelays（1/2/3/4/5s）跑 6 次尝试、最坏约 15 秒——两层叠乘会把
-//     等待放大到分钟级，所以这里同时断言「整步层一次都没重试」。
+//     等待放大到分钟级，所以这里同时断言「整步层一次都没重试」；
+//   - 连接超时：同样不进整步层，由拨号层按超时类短阶梯（connRetryTimeoutDelays
+//     1s/2s + 总预算）跑，实测每次拨号 1s 时共 3 次尝试、总跨度≈5s。
 //
 // 计时起点是「上一次失败返回」，不是「第一次失败」。
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -106,21 +109,78 @@ func TestRetryTiming429(t *testing.T) {
 	assertLadder(t, "429 事件侧", notices, want)
 }
 
-// TestRetryTimingConnRefused 拒连（断网形态）：拨号层按 1/2/3/4/5s 阶梯跑满
-// 6 次尝试（约 15 秒），整步层一次都不重试（不再叠乘）。
-func TestRetryTimingConnRefused(t *testing.T) {
+// TestRetryTimingTimeout 连接超时（每次拨号 1s 后超时）：拨号层按超时类阶梯
+// （1s/2s）重试，整步层一次都不叠乘。实测口径：3 次尝试，相邻间隔 = 拨号耗时 +
+// 退避（≈2s、≈3s），总跨度≈5s。
+//
+// 只统计拨到**本用例目标地址**的拨号：整个测试套件跑起来时，其它用例/后台
+// 会话可能还在跑模型（它们也走全局 streamHTTP），不按地址过滤就会把别人的
+// 拨号算进来（实测被混入到 6 次）。
+func TestRetryTimingTimeout(t *testing.T) {
+	// 一个关掉的本地端口：地址唯一（不会和别的用例撞），且本用例靠假拨号拦截，
+	// 永远不会真的连上去。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.Close() // 立即关掉：留下一个必然拒连的本地端口
+	srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	var mu sync.Mutex
 	var dials []time.Time
 	withStreamHTTP(t, &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			mu.Lock()
-			dials = append(dials, time.Now())
-			mu.Unlock()
+		DialContext: func(_ context.Context, _, dialAddr string) (net.Conn, error) {
+			if dialAddr == addr {
+				mu.Lock()
+				dials = append(dials, time.Now())
+				mu.Unlock()
+			}
+			time.Sleep(1 * time.Second) // 模拟一次真超时需要的时间
+			return nil, errors.New("dial tcp 198.18.0.13:443: i/o timeout")
+		},
+	}})
+
+	runErr, notices, _ := runRetryTimingApp(t, srv.URL)
+	if runErr == nil {
+		t.Fatal("超时应当以失败收场")
+	}
+	if !isConnFailure(runErr) || !strings.Contains(runErr.Error(), "连接超时") {
+		t.Errorf("应当报连接超时（connFailure）：%v", runErr)
+	}
+	if len(notices) != 0 {
+		t.Errorf("连接类失败不该进整步层重试：出现 %d 次 auto_retry 提示", len(notices))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dials) != len(connRetryTimeoutDelays)+1 {
+		t.Fatalf("拨号 %d 次，期望 %d 次（首试 + 超时阶梯 %d 次重试）", len(dials), len(connRetryTimeoutDelays)+1, len(connRetryTimeoutDelays))
+	}
+	for i := 1; i < len(dials); i++ {
+		want := 1*time.Second + connRetryTimeoutDelays[i-1] // 拨号耗时 + 退避
+		if got := dials[i].Sub(dials[i-1]); got < want-400*time.Millisecond || got > want+400*time.Millisecond {
+			t.Errorf("第 %d→%d 次拨号间隔 = %v，期望约 %v", i, i+1, got.Round(time.Millisecond), want)
+		}
+		t.Logf("超时 拨号层：第 %d→%d 次拨号间隔 = %v（期望约 %v）", i, i+1, dials[i].Sub(dials[i-1]).Round(time.Millisecond), want)
+	}
+	t.Logf("超时 拨号层：首次到末次拨号总跨度 = %v", dials[len(dials)-1].Sub(dials[0]).Round(time.Millisecond))
+}
+
+// TestRetryTimingConnRefused 拒连（断网形态）：拨号层按 1/2/3/4/5s 阶梯跑满
+// 6 次尝试（约 15 秒），整步层一次都不重试（不再叠乘）。
+// 只统计拨到本用例目标地址的拨号（套件里其它后台会话的拨号不算进来）。
+func TestRetryTimingConnRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // 立即关掉：留下一个必然拒连的本地端口
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var mu sync.Mutex
+	var dials []time.Time
+	withStreamHTTP(t, &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, dialAddr string) (net.Conn, error) {
+			if dialAddr == addr {
+				mu.Lock()
+				dials = append(dials, time.Now())
+				mu.Unlock()
+			}
 			var d net.Dialer
-			return d.DialContext(ctx, network, addr) // 真拨号：对已关闭端口必然拒连
+			return d.DialContext(ctx, network, dialAddr) // 真拨号：对已关闭端口必然拒连
 		},
 	}})
 

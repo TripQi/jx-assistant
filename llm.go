@@ -206,16 +206,32 @@ func (u Usage) CacheMiss() int {
 // 代理栈那条路（实测 api.travel7.org 被解析成 198.18.0.13、内核回 RST），
 // 事后无法追查；这些细节现在原样进报错文案（见 connErrText）。
 type connFailure struct {
-	err       error         // 底层错误原文（Unwrap 用；文案里也要原文）
-	kind      string        // 一句人话（连接被拒绝/连接超时/域名解析/证书）
-	target    string        // 实际拨号目标 host:port（取不到则空）
-	proxy     string        // "未经代理" / "经代理 http://127.0.0.1:7890"
-	elapsed   time.Duration // 从发起到失败的耗时（含 DNS/TCP/TLS）
-	retryable bool          // 拨号瞬断（拒连/连接重置）：单次连接内值得短退避重试一次
+	err     error         // 底层错误原文（Unwrap 用；文案里也要原文）
+	kind    string        // 一句人话（连接被拒绝/连接超时/域名解析/证书）
+	target  string        // 实际拨号目标 host:port（取不到则空）
+	proxy   string        // "未经代理" / "经代理 http://127.0.0.1:7890"
+	elapsed time.Duration // 从发起到失败的耗时（含 DNS/TCP/TLS）
+	// retryable / timeout 决定本地址用哪本重试探梯（见 connFailure.retryDelays）：
+	// retryable=拒连/重置/超时类值得重试；timeout=其中属于超时类的，走更短的
+	// connRetryTimeoutDelays + 总预算（超时一次就要花 8–15s，不能像拒连那样重试 5 次）。
+	retryable bool
+	timeout   bool
 }
 
 func (e *connFailure) Error() string { return "无法连接模型服务：" + connErrText(e) }
 func (e *connFailure) Unwrap() error { return e.err }
+
+// retryDelays 这次连接失败该走哪本重试探梯（nil＝不重试，直接报错/切备用地址）。
+func (e *connFailure) retryDelays() []time.Duration {
+	switch {
+	case !e.retryable:
+		return nil
+	case e.timeout:
+		return connRetryTimeoutDelays
+	default:
+		return connRetryDelays
+	}
+}
 
 func isConnFailure(err error) bool {
 	var cf *connFailure
@@ -245,9 +261,10 @@ var altPreferred sync.Map // providerID → bool（true=优先外网）
 // target.BaseURL 配为 "mock" 时走内置演示模型，便于离线验证整条链路。
 // target.Protocol 选渠道协议（""＝OpenAI 兼容 chat/completions、anthropic、
 // responses，实现见 llmproto.go）；配了外网备用地址（AltBaseURL，公司通道由
-// 公告下发）且主地址把自己的拨号重试探梯（connRetryDelays，1/2/3/4/5s）跑完
-// 仍连接失败时，自动改走备用地址（备用地址同样跑一遍阶梯），成功后粘住备用
-// 地址直到它再失败——故障转移对三种协议一视同仁。
+// 公告下发）且主地址把自己的重试探梯跑完仍连接失败时（拨号瞬断 1/2/3/4/5s、
+// 连接超时 1/2s + 总预算，见 connRetryDelays / connRetryTimeoutDelays），自动
+// 改走备用地址（备用地址同样跑一遍阶梯），成功后粘住备用地址直到它再失败——
+// 故障转移对三种协议一视同仁。
 func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb StreamCallbacks) error {
 	if target.BaseURL == "mock" {
 		return mockStream(req, cb)
@@ -357,6 +374,24 @@ var connRetryDelays = []time.Duration{
 	1 * time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second,
 }
 
+// connRetryTimeoutDelays / connRetryTimeoutBudget 是**超时类**（连接或拨号超时）
+// 的另一本阶梯，比拒连类短得多，且有总预算封顶：
+//   - 拒连/重置是「秒回失败」，一次重试几乎不花时间，所以能跑 6 次；
+//   - 超时不同：一次就要花掉 8s（TCP）到 15s（TLS 拨号，见 tlspolicy）的预算，
+//     而且拨号层重试不推 retry 事件——界面一直只有一个「模型思考中」，连着
+//     重试几次就是几十秒的沉默，用户会以为卡死；还要留时间给备用地址（alt）。
+//
+// 所以超时类走「两级阶梯 + 总预算」双重限制：预算按**本地址已花掉的时间 +
+// 待等退避** 算，超了就停手把时间让给备用地址。实测（15s 超时）的效果是：
+// 首试 15s → 退 1s → 再试 15s，总预算 20s 已满，第三次不再试（单地址最坏
+// 约 31s）；若超时较短（如 8s），则能把 1s/2s 两级跑完（三次尝试）。这样既
+// 能穿过一次代理栈瞬抖，又不会把用户挂在「毫无反馈的 45 秒」上。
+// 想改口径只改这里（及其预算），别在调用点写魔法数。
+var (
+	connRetryTimeoutDelays = []time.Duration{1 * time.Second, 2 * time.Second}
+	connRetryTimeoutBudget = 20 * time.Second
+)
+
 // sleepCtx 等 d，期间 ctx 取消（用户点停止/插话打断）立即返回 false，绝不睡满。
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
@@ -375,15 +410,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // streamProtoOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体，
 // 三种协议共用：端点路径、鉴权头与流解析都来自 proto）。
 //
-// 顺序固定为：**先在这个地址上把 connRetryDelays 的整条阶梯跑完（首试 +
-// 1s/2s/3s/4s/5s 各重试一次，最多 6 次尝试）→ 仍失败才由 StreamChat 改走
-// 备用地址（alt），alt 也按同一阶梯从首试开始跑一遍**。主地址没跑完自己的
+// 顺序固定为：**先在这个地址上把该失败类型对应的整条阶梯跑完（拨号瞬断：
+// connRetryDelays 1/2/3/4/5s，首试 + 5 次重试；超时：connRetryTimeoutDelays
+// 1/2s，且受 connRetryTimeoutBudget 总预算封顶）→ 仍失败才由 StreamChat 改走
+// 备用地址（alt），alt 也从首试开始跑一遍自己的阶梯**。主地址没跑完自己的
 // 阶梯，绝不去碰备用地址（内网地址只是瞬断时不该提前切外网）。
 //
-// 阶梯只认拨号瞬断（连接被拒/重置/强制关闭/管道断开/unexpected eof，见
-// isDialTransient）；429 限流、鉴权失败、余额不足、模型不存在、上下文超限都是
-// 业务错误，压根不是 connFailure，走不到这里；超时/域名解析/证书也不重试。
-// 每一步等待都走 sleepCtx：ctx 取消（用户点停止/插话打断）立即放弃，不睡满。
+// 阶梯只认两类：拨号瞬断（连接被拒/重置/强制关闭/管道断开/unexpected eof，见
+// isDialTransient）与连接/拨号超时（见 isDialTimeout）；429 限流、鉴权失败、
+// 余额不足、模型不存在、上下文超限都是业务错误，压根不是 connFailure，走不到
+// 这里；域名解析/证书也不重试（同一地址立刻重试结果一样）。
+// ctx 取消（用户点停止/插话）导致的失败压根不包成 connFailure（见 streamProtoTry），
+// 且每一步等待都走 sleepCtx：取消立即放弃，不睡满。
 func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
 	url := baseURL + proto.path
 	// 拨号目标：端点地址的 host:port（也就是 target.BaseURL 的 host:port）。
@@ -392,19 +430,30 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 	if cb.OnRequest != nil {
 		cb.OnRequest(url, body) // 只报一次：本次调用（含阶梯重试）是同一个请求
 	}
+	// attemptStart 是本地址首次尝试的时刻：超时类的总预算按「这个地址已经花掉
+	// 多少时间」算（见 connRetryTimeoutBudget），而不只是待等退避时长。
+	attemptStart := time.Now()
 	var err error
 	for i := 0; ; i++ {
 		err = streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
 		var cf *connFailure
-		if !errors.As(err, &cf) || !cf.retryable || ctx.Err() != nil {
+		if !errors.As(err, &cf) || ctx.Err() != nil {
 			return err
 		}
-		if i >= len(connRetryDelays) { // 阶梯跑完：交给 StreamChat 决定要不要切备用地址
+		delays := cf.retryDelays()
+		if len(delays) == 0 || i >= len(delays) { // 不重试 / 阶梯跑完：交给 StreamChat 定要不要切备用地址
 			return err
 		}
-		delay := connRetryDelays[i]
-		log.Printf("[模型] %s 拨号瞬断（%s），%s 后重试同一地址（第 %d/%d 次重试）",
-			target, cf.kind, delay, i+1, len(connRetryDelays))
+		delay := delays[i]
+		if cf.timeout && time.Since(attemptStart)+delay > connRetryTimeoutBudget {
+			// 超时类预算用完：继续重试一个显然超时的地址只是让用户干等，
+			// 把剩下的时间让给备用地址（或直接报错让用户看到现场）。
+			log.Printf("[模型] %s 连接超时重试预算（%s）已用完，不再重试本地址（已耗时 %s）",
+				target, connRetryTimeoutBudget, time.Since(attemptStart).Round(time.Millisecond))
+			return err
+		}
+		log.Printf("[模型] %s 拨号失败（%s），%s 后重试同一地址（第 %d/%d 次重试）",
+			target, cf.kind, delay, i+1, len(delays))
 		if !sleepCtx(ctx, delay) {
 			return err // ctx 取消：立即退出（不睡满），也不再多试
 		}
@@ -534,13 +583,15 @@ func connErrText(e *connFailure) string {
 // newConnFailure 记一次连接失败的全部现场。诊断本机 TUN + fake-ip 代理栈瞬断
 // （端点被解析成 198.18.x.x、内核直接回 RST）时，这几项缺一不可。
 func newConnFailure(req *http.Request, target string, started time.Time, err error) *connFailure {
+	timeout := isDialTimeout(err)
 	return &connFailure{
 		err:       err,
 		kind:      connErrKind(err),
 		target:    target,
 		proxy:     proxyDesc(req),
 		elapsed:   time.Since(started),
-		retryable: isDialTransient(err),
+		retryable: isDialTransient(err) || timeout,
+		timeout:   timeout,
 	}
 }
 
@@ -563,9 +614,11 @@ func connErrKind(err error) string {
 	return "连接建立失败"
 }
 
-// isDialTransient 判断这次连接失败是不是「拨号瞬断」——连接被拒 / 连接被重置
-// 这类马上再试一次大概率就能过的情形（本机代理内核瞬抖正是这种）。超时、域名
-// 解析、证书一律不算：同一地址立刻重试结果一样，白等用户时间。
+// isDialTransient 判断这次连接失败是不是「拨号瞬断」——连接被拒 / 连接被重置 /
+// 被强制关闭 / 管道断开 / 提前 EOF 这类马上再试一次大概率就能过的情形（本机
+// 代理内核瞬抖正是这种）。超时另由 isDialTimeout 判（用更短的阶梯）；域名解析、
+// 证书一律不重试：同一地址立刻重试结果一样，白等用户时间。
+// ctx 取消（用户点停止/插话）不算——那是人不等了，不是网络瞬断。
 func isDialTransient(err error) bool {
 	msg := strings.ToLower(err.Error())
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
@@ -579,6 +632,32 @@ func isDialTransient(err error) bool {
 		}
 	}
 	return false
+}
+
+// isDialTimeout 判断这次失败是不是「连接/拨号超时」（TCP 拨号 8s、TLS 拨号 15s
+// 到点、或收到 i/o timeout）：值得重试，但用更短的阶梯 + 总预算（见
+// connRetryTimeoutDelays / connRetryTimeoutBudget）——超时一次就把时间花掉了。
+//
+// 不计入两种情形：
+//   - ctx 取消（用户点停止/插话）——streamProtoTry 已把它直接返回、不包成
+//     connFailure，这里再判一次是防御；
+//   - 调用方自己的 deadline（如 /api/llm/ask 的 45s 预算）——同样是 ctx 结束。
+func isDialTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// 取消（用户点停止/插话）不算超时，绝不重试
+	if errors.Is(err, context.Canceled) || strings.Contains(msg, "context canceled") {
+		return false
+	}
+	// net 的拨号超时既可能是 i/o timeout（net.Dialer.Timeout），也可能是
+	// context deadline exceeded（拨号器的内部 deadline，如公司 TLS 拨号的 15s）
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "timeout")
 }
 
 // proxyFromEnv 解析代理环境变量（与 streamHTTP 的 Transport 同一口径）。

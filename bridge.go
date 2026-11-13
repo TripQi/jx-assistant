@@ -101,7 +101,10 @@ _TOKEN = "%s"
 
 def call(tool, args=None, timeout=600):
     """调用本会话白名单内的工具（read/glob/grep/list_dir/write/edit/snapshot_file/
-    run_command/web_fetch/web_search/read_skill）。返回 dict：
+    run_command/web_fetch/web_search/read_skill）。read/edit 是批量形态：
+    call("read", {"files": [{"path": "a.go"}]})、
+    call("edit", {"edits": [{"path": "a.go", "old_string": "x", "new_string": "y"}]})；
+    旧的单条写法 call("read", {"path": "a.go"}) 仍然可用。返回 dict：
     {"ok": true, "result": "<工具输出文本>"} 或 {"ok": false, "error": "<原因>"}。
     需要用户审批的操作（如沙箱升级）会被拒绝——把这类动作留给模型前台执行。"""
     body = _json.dumps({"token": _TOKEN, "tool": tool, "args": args or {}}).encode("utf-8")

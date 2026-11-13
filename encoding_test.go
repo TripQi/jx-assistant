@@ -389,10 +389,13 @@ func TestEditGBKRejectsUnencodable(t *testing.T) {
 	if err := os.WriteFile(target, orig, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runEditFile(tc, json.RawMessage(fmt.Sprintf(
-		`{"path":%q,"old_string":"echo 中文","new_string":"echo 😀"}`, target)))
-	if err == nil {
-		t.Fatal("emoji 写入 GBK 文件应报错")
+	out, err := runEditFile(tc, json.RawMessage(fmt.Sprintf(
+		`{"edits":[{"path":%q,"old_string":"echo 中文","new_string":"echo 😀"}]}`, target)))
+	if err != nil {
+		t.Fatalf("批量 edit 不该因单条失败而报错: %v", err)
+	}
+	if !strings.Contains(out, editFailMark) || !strings.Contains(out, "write") {
+		t.Fatalf("emoji 写入 GBK 文件应报该条失败并指路 write: %q", out)
 	}
 	raw, _ := os.ReadFile(target)
 	if string(raw) != string(orig) {

@@ -1218,6 +1218,34 @@ func contentImageInfo(c any) (string, int) {
 	return strings.Join(texts, "\n"), images
 }
 
+// batchToolTarget 给批量 read/edit 的参数生成动作行「目标」：首项路径，多条目时
+// 再带上条数（「a.go 等 3 个文件」），让折叠视图一眼看出这次动了几处。
+func batchToolTarget(name, args string) string {
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(args), &m) != nil {
+		return ""
+	}
+	key, unit := "files", "个文件"
+	if name == "edit" {
+		key, unit = "edits", "处"
+	}
+	raw, ok := m[key]
+	if !ok {
+		return ""
+	}
+	var items []struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(raw, &items) != nil || len(items) == 0 || strings.TrimSpace(items[0].Path) == "" {
+		return ""
+	}
+	s := items[0].Path
+	if len(items) > 1 {
+		s += fmt.Sprintf(" 等 %d %s", len(items), unit)
+	}
+	return s
+}
+
 // actionTarget 按工具生成动作行的「目标」字段（首要参数）。
 func actionTarget(name, args string) string {
 	clip := func(s string) string {
@@ -1229,7 +1257,13 @@ func actionTarget(name, args string) string {
 	}
 	key := ""
 	switch name {
-	case "read", "edit", "write", "snapshot_file", "read_image", "ocr", "pdf", "office_skill":
+	case "read", "edit":
+		// 批量形态（files / edits 数组）：首项路径 + 条数；旧单条入参落到下面的 path
+		if s := batchToolTarget(name, args); s != "" {
+			return clip(s)
+		}
+		key = "path"
+	case "write", "snapshot_file", "read_image", "ocr", "pdf", "office_skill":
 		key = "path"
 	case "grep", "glob":
 		if p := argOf(args, "pattern"); p != "" {
@@ -1308,6 +1342,10 @@ func firstSegment(re *regexp.Regexp, s string) string {
 	return ""
 }
 
+// reEditSummary 认批量 edit 结果里的汇总行「（共 N 条：X 条已生效、Y 条未生效）」，
+// 折叠视图据此给出一句话的成败结论。
+var reEditSummary = regexp.MustCompile(`共 (\d+) 条：(\d+) 条已生效、(\d+) 条未生效`)
+
 // toolResultCompact 按工具分派结果行的折叠视图；返回 compactOmit 表示整行省略。
 func toolResultCompact(info toolResInfo, m *StoredMessage) string {
 	text := strings.TrimSpace(stripImageEnvelopes(info.text, m.Seq))
@@ -1328,6 +1366,13 @@ func toolResultCompact(info toolResInfo, m *StoredMessage) string {
 			return "失败：" + firstLineOf(text, 100)
 		}
 		if info.name == "edit" {
+			// 批量 edit 的逐条状态：有条目未生效时不能笼统说「编辑成功」
+			if bad := strings.Count(text, editFailMark); bad > 0 {
+				if m := reEditSummary.FindStringSubmatch(text); m != nil {
+					return "部分失败（" + m[2] + " 条已生效、" + m[3] + " 条未生效）"
+				}
+				return "部分失败：" + firstLineOf(strings.ReplaceAll(text, editFailMark, ""), 100)
+			}
 			return "编辑成功"
 		}
 		return "已写入"

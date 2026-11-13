@@ -95,8 +95,8 @@ func TestBridgeTokenAndWhitelist(t *testing.T) {
 		t.Fatalf("拒绝文案应说明白名单：%v", out["error"])
 	}
 
-	// 白名单内：read 成功读到文件
-	_, out = bridgePost(t, srv, token, "read", map[string]any{"path": ws + "\\hello.txt"})
+	// 白名单内：read 成功读到文件（批量形态 files 数组）
+	_, out = bridgePost(t, srv, token, "read", map[string]any{"files": []any{map[string]any{"path": ws + "\\hello.txt"}}})
 	if ok, _ := out["ok"].(bool); !ok {
 		t.Fatalf("read 应成功：%v", out)
 	}

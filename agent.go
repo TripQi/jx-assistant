@@ -400,7 +400,7 @@ const managerCoordPrompt = `
 const fileToolsPrompt = `
 ## 文件修改与交付规范
 
-文件操作一律优先用文件工具：查看文本文件用 read（而不是 cat 等命令行）；创建文件或整体替换内容用 write（既有文件先 read 读过才能覆盖——观察策略强制，本会话刚创建/刚改过的除外）；对既有文件的局部修改优先用 edit，而不是重写整个文件或用命令行脚本改。
+文件操作一律优先用文件工具：查看文本文件用 read（而不是 cat 等命令行）；创建文件或整体替换内容用 write（既有文件先 read 读过才能覆盖——观察策略强制，本会话刚创建/刚改过的除外）；对既有文件的局部修改优先用 edit，而不是重写整个文件或用命令行脚本改。**read 与 edit 都是批量形态（files / edits 数组，一次最多 5 条）：要读多个文件或多段区间、要改多处（哪怕都在同一个文件里）一律一次调用，禁止逐条调用**；某条失败不影响其余条，看返回里逐条的 ✅/❌ 状态。
 
 1. write / edit 的修改自动记录历史快照，用户编辑历史消息时可以把文件一并回退，无需你做额外操作。
 2. 通过 run_command、外部程序或文档运行库（Office 的 python-docx/openpyxl/python-pptx 等）修改文件无法自动追踪：改动一个已存在的重要文件（**包括所有的 Office 文档和 PDF 文档**）前，必须先调用 snapshot_file 打快照，否则该文件无法回退；新建文件无需快照。
@@ -421,7 +421,7 @@ const fileToolsPrompt = `
 const codingFilePrompt = `
 ## 文件修改规范
 
-文件操作一律优先用文件工具：查看源码与文本用 read（而不是 cat 等命令行）；创建文件或整体替换内容用 write（既有文件先 read 读过才能覆盖——观察策略强制，本会话刚创建/刚改过的除外）；对既有文件的局部修改优先用 edit，而不是重写整个文件或用命令行脚本改。
+文件操作一律优先用文件工具：查看源码与文本用 read（而不是 cat 等命令行）；创建文件或整体替换内容用 write（既有文件先 read 读过才能覆盖——观察策略强制，本会话刚创建/刚改过的除外）；对既有文件的局部修改优先用 edit，而不是重写整个文件或用命令行脚本改。**read 与 edit 都是批量形态（files / edits 数组，一次最多 5 条）：要读多个文件或多段区间、要改多处（哪怕都在同一个文件里）一律一次调用，禁止逐条调用**；某条失败不影响其余条，看返回里逐条的 ✅/❌ 状态。
 
 1. write / edit 的修改自动记录历史快照，用户编辑历史消息时可以把文件一并回退，无需你做额外操作。
 2. 通过 run_command、脚本、代码生成器等途径修改文件无法自动追踪：改动一个已存在的重要文件（**包括所有的 Office 文档和 PDF 文档**）前，必须先调用 snapshot_file 打快照，否则该文件无法回退；新建文件无需快照。
@@ -894,6 +894,7 @@ func (a *App) modelErrWithChannelHint(target LLMTarget, err error) error {
 	}
 	return fmt.Errorf("%s。%s", s, hint)
 }
+
 // osDescription 探测并缓存本机系统描述（Windows 版本 + PowerShell 版本）。
 func (a *App) osDescription() string {
 	a.osOnce.Do(func() {
@@ -1467,7 +1468,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				if nt := a.resolveTarget(sess); nt.BaseURL != target.BaseURL || nt.Model != target.Model {
 					a.auditWrite(sess, map[string]any{"type": "model_fallback",
 						"from_model": target.Model + " @ " + target.BaseURL, "to_model": nt.Model,
-						"reason":     "公司通道连接失败，自动停用并切换", "error": truncateRunes(err.Error(), 300)})
+						"reason": "公司通道连接失败，自动停用并切换", "error": truncateRunes(err.Error(), 300)})
 					target = nt
 					autoSwitched = true
 					emit(Event{Type: "tool_wait", Name: "model-fallback",

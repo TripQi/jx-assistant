@@ -610,3 +610,114 @@ func TestEditBatchCompactView(t *testing.T) {
 		t.Fatalf("单条批量目标应为首项路径，实得 %q", got)
 	}
 }
+
+// ---------- ③ limit 必须 ≥ 1：显式给 0/负数报错，不静默当整份 ----------
+
+func TestReadBatchLimitMustBePositive(t *testing.T) {
+	a, sess := batchTestApp(t, "data-batch-readlimit-test")
+	ws := sess.Workspace
+	target := filepath.Join(ws, "lim.txt")
+	if err := os.WriteFile(target, []byte("l1\nl2\nl3\nl4\nl5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tc := batchTestCtx(t, a, sess, "read")
+
+	// limit=0 曾经静默当成 2000 行（整份大文件灌进上下文）——必须当场报错
+	for _, lim := range []int{0, -2} {
+		raw, _ := json.Marshal(map[string]any{"files": []any{
+			map[string]any{"path": target, "limit": lim}}})
+		_, err := runReadFile(tc, raw)
+		if err == nil {
+			t.Fatalf("limit=%d 应报错（不能静默按默认值读整份）", lim)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("limit 必须 ≥ 1（收到 %d）", lim)) ||
+			!strings.Contains(err.Error(), "本次未做任何读取") {
+			t.Fatalf("limit=%d 的报错不符: %v", lim, err)
+		}
+	}
+	// 批量里任一条 limit<1：整批报错并点明第几条
+	raw, _ := json.Marshal(map[string]any{"files": []any{
+		map[string]any{"path": target, "limit": 1},
+		map[string]any{"path": target, "limit": 0}}})
+	if _, err := runReadFile(tc, raw); err == nil || !strings.Contains(err.Error(), "第 2 条") {
+		t.Fatalf("批量里 limit<1 应点明第几条: %v", err)
+	}
+
+	// 不传 limit → 默认读满（5 行）；给 limit=1 → 只读 1 行
+	raw, _ = json.Marshal(map[string]any{"files": []any{map[string]any{"path": target}}})
+	out, err := runReadFile(tc, raw)
+	if err != nil || !strings.Contains(out, "lim.txt（第 1-5 行，共 5 行）") {
+		t.Fatalf("不传 limit 应按默认值读满: %q / %v", out, err)
+	}
+	raw, _ = json.Marshal(map[string]any{"files": []any{
+		map[string]any{"path": target, "limit": 1}}})
+	out, err = runReadFile(tc, raw)
+	if err != nil || !strings.Contains(out, "lim.txt（第 1-1 行，共 5 行）") {
+		t.Fatalf("limit=1 应只给 1 行: %q / %v", out, err)
+	}
+
+	// offset < 1 或未给按 1 处理（不报错）
+	for _, off := range []int{0, -5} {
+		raw, _ = json.Marshal(map[string]any{"files": []any{
+			map[string]any{"path": target, "offset": off, "limit": 2}}})
+		out, err = runReadFile(tc, raw)
+		if err != nil || !strings.Contains(out, "lim.txt（第 1-2 行，共 5 行）") {
+			t.Fatalf("offset=%d 应按 1 处理: %q / %v", off, out, err)
+		}
+	}
+
+	// 旧的单条入参（jx.call 桥/老脚本）把 limit 0 当「没给」，沿用默认值
+	out, err = runReadFile(tc, json.RawMessage(fmt.Sprintf(`{"path":%q,"limit":0}`, target)))
+	if err != nil || !strings.Contains(out, "lim.txt（第 1-5 行，共 5 行）") {
+		t.Fatalf("旧单条入参 limit=0 应沿用默认值（向后兼容）: %q / %v", out, err)
+	}
+}
+
+// ---------- ④ 同一文件的不同路径写法归并到同一份内容，只写一次盘 ----------
+
+func TestEditBatchPathVariantsSingleWrite(t *testing.T) {
+	a, sess := batchTestApp(t, "data-batch-pathvariant-test")
+	ws := sess.Workspace
+	target := filepath.Join(ws, "pathcase.txt")
+	if err := os.WriteFile(target, []byte("alpha beta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(ws, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []map[string]any{
+		{"path": rel, "old_string": "alpha", "new_string": "ALPHA"},   // 相对工作区
+		{"path": target, "old_string": "beta", "new_string": "BETA"}, // 绝对路径
+	}
+	want := "ALPHA BETA\n"
+	if isWindowsRuntime {
+		// 大小写不同也是同一文件：这一条只能匹配到第 1 条改完的 ALPHA，
+		// 归并失败就会报「old_string 未找到」并留下 ALPHA BETA
+		items = append(items, map[string]any{"path": strings.ToUpper(target), "old_string": "ALPHA", "new_string": "ALPHA2"})
+		want = "ALPHA2 BETA\n"
+	}
+	tc := batchTestCtx(t, a, sess, "edit")
+	out, err := runEditBatch(t, tc, items...)
+	if err != nil {
+		t.Fatalf("批量 edit 失败: %v", err)
+	}
+	if strings.Contains(out, editFailMark) {
+		t.Fatalf("同一文件的三种路径写法应全部生效: %q", out)
+	}
+	if got := mustReadFileText(t, target); got != want {
+		t.Fatalf("内容应为 %q，实得 %q（输出 %q）", want, got, out)
+	}
+	// 只写一次盘 → 只落一条快照
+	cps, cerr := a.Store.CheckpointsAfter(sess.ID, -1)
+	if cerr != nil {
+		t.Fatalf("读快照失败: %v", cerr)
+	}
+	if len(cps) != 1 {
+		t.Fatalf("同一文件的 %d 条应只写一次盘（快照 1 条），实得 %d 条", len(items), len(cps))
+	}
+	// 文件级注记只出现一次（同一个文件不会重复交代）
+	if n := strings.Count(out, editNoteMark); n > 1 {
+		t.Fatalf("同一文件只该有一条 ↳ 文件级注记，实得 %d 条: %q", n, out)
+	}
+}

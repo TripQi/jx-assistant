@@ -467,6 +467,9 @@ func (t *toolContext) envWalkSkip(root string, skip func(rel, name string, isDir
 // 静默截断会让模型误以为「只有前 N 个文件存在」，比报错难查得多。
 const readMaxFiles = 5
 
+// readDefaultLines 是 read 不传 limit 时的默认行数（显式传 limit 时必须 ≥ 1）。
+const readDefaultLines = 2000
+
 // readOutputMaxBytes 是批量 read 一次调用返回的字节上限（含段头与注记）。
 // 刻意取与 agent 层工具结果统一上限同一个常量：读工具若不自己封顶，agent 层
 // 会再按「头 2/3 + 尾 1/3」裁一次——「第 N 条及之后未返回，请分批再读」这句
@@ -484,10 +487,12 @@ const readCutNoteReserve = 240
 const readTailNoticeReserve = 200
 
 // readItem 是 read 批量参数里的一项：一个文件 + 可选行区间。
+// Limit 用指针是为了区分「没传」和「传了 0」：没传按默认 2000 行，传了 0/负数
+// 必须报错——静默当成默认值会把整份大文件灌进上下文（模型算错一个数就踩）。
 type readItem struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Limit  *int   `json:"limit"`
 }
 
 // readRequest 是 read 的完整入参。files 数组是**唯一公开形态**；path/offset/limit
@@ -504,7 +509,8 @@ func readFileTool() Tool {
 	return Tool{
 		Spec: toolSpec("read",
 			"批量读取文本文件（唯一形态：files 数组，1-5 条；空数组或超过 5 条直接报错）。示例：{\"files\":[{\"path\":\"a.go\",\"offset\":1,\"limit\":200},{\"path\":\"b.go\"}]}\n"+
-				"- 每项 path 必填；offset（起始行，从 1 开始）与 limit（最多行数，默认 2000）可选；同一个文件可给多个不同区间。\n"+
+				"- 每项 path 必填；offset（起始行，从 1 开始）与 limit（最多行数）可选；同一个文件可给多个不同区间。\n"+
+				"- offset < 1 或未给 → 按 1 处理；limit 未给 → 默认 2000 行，显式给出时必须 ≥ 1（给 0 或负数直接报错，不会当成整份读）。\n"+
 				"- 每段以「===== 文件（第 x-y 行，共 n 行）=====」开头；某条失败（文件不存在/是二进制/无权限）只影响该条，其余照常返回。\n"+
 				"- 非 UTF-8 文件（GBK/GB18030/UTF-16，含 .bat/.cmd）自动按探测到的编码解码、段尾注明原编码（edit 会按原编码写回），不会乱码；二进制文件拒读。\n"+
 				"- 单条与整批都有输出上限：按顺序填满即停，末尾写明「第 N 条及之后未返回，请分批再读」。\n"+
@@ -514,7 +520,7 @@ func readFileTool() Tool {
 				"files": arrayProp("要读取的文件列表（1-5 条）", objSchema(map[string]any{
 					"path":   strProp("文件路径（相对或绝对）"),
 					"offset": intProp("起始行号，从 1 开始，可选"),
-					"limit":  intProp("最多读取行数，可选，默认 2000"),
+					"limit":  intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
 				}, "path")),
 			}, "files")),
 		Run: runReadFile,
@@ -528,14 +534,31 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 	}
 	items := p.Files
 	// 旧的单条入参兜底（内部兼容）：{path,offset,limit} 当成 1 元素数组。
+	// 老调用方（jx.call 桥、老脚本）把 limit 0/负数当「没给」，沿用默认值。
 	if len(items) == 0 && strings.TrimSpace(p.Path) != "" {
-		items = []readItem{{Path: p.Path, Offset: p.Offset, Limit: p.Limit}}
+		var lim *int
+		if p.Limit > 0 {
+			lim = &p.Limit
+		}
+		items = []readItem{{Path: p.Path, Offset: p.Offset, Limit: lim}}
 	}
 	if len(items) == 0 {
 		return "", fmt.Errorf("files 不能为空：请给出 1-%d 个要读取的文件，例如 {\"files\":[{\"path\":\"a.go\"}]}（本次未做任何改动）", readMaxFiles)
 	}
 	if len(items) > readMaxFiles {
 		return "", fmt.Errorf("一次最多读 %d 条（收到 %d 条）：请分批，每批最多 %d 条（本次未做任何改动）", readMaxFiles, len(items), readMaxFiles)
+	}
+	// 显式给的 limit 必须 ≥ 1：小于 1 一律当场报错，绝不当成「没给」——否则模型
+	// 算错一个数就会把整份大文件灌满上下文，而返回里看不出任何异常。
+	for i, it := range items {
+		if it.Limit != nil && *it.Limit < 1 {
+			who := fmt.Sprintf("第 %d 条", i+1)
+			if disp := strings.TrimSpace(it.Path); disp != "" {
+				who += "（" + disp + "）"
+			}
+			return "", fmt.Errorf("%s：limit 必须 ≥ 1（收到 %d）——不传 limit 表示默认 %d 行，要整份请给足够大的值（本次未做任何读取）",
+				who, *it.Limit, readDefaultLines)
+		}
 	}
 
 	var b strings.Builder
@@ -636,9 +659,9 @@ func (t *toolContext) readSection(it readItem) readSeg {
 		seg.errText = "起始行超出文件范围"
 		return seg
 	}
-	limit := it.Limit
-	if limit <= 0 {
-		limit = 2000
+	limit := readDefaultLines
+	if it.Limit != nil {
+		limit = *it.Limit // 已在 runReadFile 校验过 ≥ 1
 	}
 	// end 是**含**的行号：limit 就是"最多读几行"（旧实现写成了 start+limit，
 	// 实际每次多返回一行，与工具描述不符；段头显示区间后这个偏差会直接露馅）。

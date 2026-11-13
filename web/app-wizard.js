@@ -106,11 +106,19 @@ async function wzConnect() {
       bits.push('<span style="color:var(--amber)">模型通道未配置：' + esc(res.apiError || '服务端未接 new-api') + '（市场/更新已配好，模型可到 设置·模型 手动填）</span>');
     }
     bits.push('技能/组件市场与软件更新：已指向公司服务端');
-    if (res.portalURL) bits.push('充值与余额：<a href="#" onclick="openURLSystem(' + JSON.stringify(res.portalURL) + ');return false">打开个人中心</a>（模型菜单与设置·模型里也有「去充值」入口）');
     wzSetResult('ok', bits.join('<br>'));
     go.textContent = '完成';
     go.disabled = false;
-    go.onclick = () => closeWizard(); // 完成即关（wizardDone 后端已写）
+    // 完成即关（wizardDone 后端已写）。关闭的同时广播 wizard:done（2026-11-13
+    // 充值组件）：组件据此在「公司通道 + 服务端开了门户」时紧接着弹个人中心
+    // 引导浮窗（portalURL 空=纯本地/个人配置或门户未开，组件收到也不弹）。
+    // Esc / 点遮罩是「暂缓」语义，不走这条广播。
+    go.onclick = () => {
+      closeWizard();
+      if (window.JX && typeof JX.emit === 'function') {
+        JX.emit('wizard:done', { company: res.company || '', portalURL: res.portalURL || '', connected: true });
+      }
+    };
   } catch (e) {
     wzSetResult('bad', esc(e.message));
     go.disabled = false;

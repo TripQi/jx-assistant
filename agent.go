@@ -805,6 +805,7 @@ func (a *App) modelErrWithChannelHint(target LLMTarget, err error) error {
 	}
 	return fmt.Errorf("%s。%s", s, hint)
 }
+
 // osDescription 探测并缓存本机系统描述（Windows 版本 + PowerShell 版本）。
 func (a *App) osDescription() string {
 	a.osOnce.Do(func() {
@@ -1359,7 +1360,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				if nt := a.resolveTarget(sess); nt.BaseURL != target.BaseURL || nt.Model != target.Model {
 					a.auditWrite(sess, map[string]any{"type": "model_fallback",
 						"from_model": target.Model + " @ " + target.BaseURL, "to_model": nt.Model,
-						"reason":     "公司通道连接失败，自动停用并切换", "error": truncateRunes(err.Error(), 300)})
+						"reason": "公司通道连接失败，自动停用并切换", "error": truncateRunes(err.Error(), 300)})
 					target = nt
 					autoSwitched = true
 					emit(Event{Type: "tool_wait", Name: "model-fallback",
@@ -1472,7 +1473,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// prompt 留痕行）；压缩只改写历史视图，下一轮开始会重新组装。
 			roundEndCompacted := false
 			for pass := 0; pass < 2; pass++ {
-				cp, cerr := a.maybeAutoCompact(sess, a.buildContext(sess, ""), target.ContextWindow, true)
+				cp, cerr := a.maybeAutoCompact(sess, a.buildContext(sess, "", 0), target.ContextWindow, true)
 				if cerr != nil {
 					emit(Event{Type: "error", Error: "自动压缩失败: " + cerr.Error()})
 					a.auditWrite(sess, map[string]any{"type": "error", "error": "自动压缩失败: " + cerr.Error()})

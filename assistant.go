@@ -135,17 +135,19 @@ func dispatchTaskTool() Tool {
 // dispatch_task / dispatch_sub 派发的是新会话、必然空闲；send_to_session 对已有
 // 会话中途发话，插话正是它的语义。落库身份是 kind=aiuser（AI 发出的用户消息）：
 // 系统按用户消息同等对待（开新回合、组装时后面跟一条时间提示词），前端是
-// 右对齐偏白的「AI 用户」气泡。
-func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) string {
+// 右对齐偏白的「AI 用户」气泡。第二个返回值是投递开出的那一轮执行体（插话
+// 时为 nil）——dispatch_task / send_to_session 拿它授予经理代批资格（轮次级
+// 授权，mgrnotify.go 的 grantManagerTurn）。
+func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) (string, *sessionRun) {
 	d := t.app.deliverToSession(sub, text, kindAiUser, "task")
 	if !d.Started {
-		return subQueueNote(sub, note)
+		return subQueueNote(sub, note), nil
 	}
 	// 当前主对话的 SSE 若还连着，先给它推一条派发确认
 	t.emit(Event{Type: "sub_start", SessionID: sub.ID, Title: sub.Title})
 	go t.app.runSubAgent(t.sess, sub, d.Run)
 	return fmt.Sprintf("已派发后台执行：会话 %s「%s」。%s本工具立即返回，不要等待；"+
-		"被派发的会话完成后系统会自动收到【派发回报】并触发你处理回报。现在可以先回用户一句「已经安排」。", sub.ID, sub.Title, note)
+		"被派发的会话完成后系统会自动收到【派发回报】并触发你处理回报。现在可以先回用户一句「已经安排」。", sub.ID, sub.Title, note), d.Run
 }
 
 // dispatchModelChoice 解析派发工具的模型参数：先经 resolveDispatchModel 校验
@@ -492,7 +494,8 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 	if len(hints) > 0 {
 		note = "（" + strings.Join(hints, "；") + "）"
 	}
-	return t.deliverSub(sub, "【派发子对话】\n\n"+p.Task, note), nil
+	n, _ := t.deliverSub(sub, "【派发子对话】\n\n"+p.Task, note) // 子对话不是经理派发（任何会话都能 dispatch_sub），无经理代批资格
+	return n, nil
 }
 func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
@@ -605,7 +608,11 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if len(attNotes) > 0 {
 		taskMsg = ATTACH_HEAD + "\n" + strings.Join(attNotes, "\n") + "\n\n" + taskMsg
 	}
-	return t.deliverSub(sub, taskMsg, dispatchTaskNote(mode, perm, p.Permission, p.PlanMode, attached, remoteDisp)), nil
+	note, run := t.deliverSub(sub, taskMsg, dispatchTaskNote(mode, perm, p.Permission, p.PlanMode, attached, remoteDisp))
+	// 经理代批＝轮次级授权（mgrnotify.go）：投递开出的这一轮才可代决，轮收口
+	// 或用户亲发消息即撤销——之后用户在这个会话自己干活的卡不再报给经理。
+	t.app.grantManagerTurn(sub.ID, run)
+	return note, nil
 }
 func sendToSessionTool() Tool {
 	return Tool{
@@ -673,10 +680,11 @@ func runSendToSession(t *toolContext, args json.RawMessage) (string, error) {
 	// 需求正文（【数字助理转达】+ task）由 deliverSub 走统一投递落库：投递一律
 	// 插话——目标执行中就注入它当前这一轮（下一次调用模型前生效），空闲则直接
 	// 落库开跑（两种情况都立即生效，不排队占位）
-	// 经理首次发话即建立「经理关联」标记（mgrnotify.go）：这个会话之后有审批/
-	// 提问卡挂久了没人处理，会自动通知经理代为处理。幂等，重复发话写同值。
-	t.app.markManagerLinked(m)
-	return t.deliverSub(m, "【数字助理转达】\n"+p.Task, note), nil
+	// 经理代批＝轮次级授权（mgrnotify.go）：目标空闲、投递开出新轮才授权；目标
+	// 执行中是插话（run=nil）——那一轮不是经理发起的，不授权也不动既有授权。
+	note, run := t.deliverSub(m, "【数字助理转达】\n"+p.Task, note)
+	t.app.grantManagerTurn(m.ID, run)
+	return note, nil
 }
 
 func stopSessionTool() Tool {

@@ -17,9 +17,14 @@ go build -o jx-assistant.exe .
 go test -run TestXxx .             # 单测（只跑自己改动相关的，别全量——见「多 AI 并行开发」）
 ```
 
-首次使用：左下角「设置」中填入 API Key；`baseURL` 兼容 OpenAI chat-completions
-接口（渠道协议可选 Anthropic 原生 / OpenAI Responses，见「渠道协议」节）。
-`baseURL` 填 `mock` 可进入**离线演示模式**，无需 Key 即可体验完整链路。
+首次使用：**出厂不预置任何模型通道**（2026-11-13 用户口径：新装打开就该是彻底的
+空的，通道只来自公司接入或用户自己添加）——要么走「公司接入向导」（服务端
+`/provision` 下发通道），要么在 左下角「设置 · 模型」里添加提供方，填 API 地址 +
+Key；`baseURL` 兼容 OpenAI chat-completions 接口（渠道协议可选 Anthropic 原生 /
+OpenAI Responses，见「渠道协议」节）。地址填 `mock` 可进入**离线演示模式**，
+无需 Key 即可体验完整链路。旧版出厂会把 DeepSeek 官方地址 + `deepseek-chat`
+折成一个空 Key 通道挂在菜单里，`config.go` 的 `dropDefaultPlaceholderProvider`
+在加载时把这种出厂占位删掉（用户配过 Key / 改过地址 / 自己加过模型的通道不动）。
 
 ## 开发规矩（AI 开发前必读）
 
@@ -346,12 +351,12 @@ android/other/无后缀文件），构建脚本零改动。拆包（建 android/
   卸载时 `/unregister` 还原（缺 exe 拒绝出包）。给打包脚本加新的暂存项时，
   同步更新本清单。
 
-  **发布到 Gitea**（远程 `origin`＝your-org/your-repo，工作分支 `go`）：tag/标题
+  **发布到 Gitea**（远程 `origin`＝admin/jxharness，工作分支 `go`）：tag/标题
   沿用「Vx.y.z（日期）桌面版」（v1.0.x 序号递增），说明按上一版格式写改动
   清单，安装包 exe 挂附件；API 用个人访问令牌，存
-  `C:\Users\54358\.gitea\jx-assistant.token`（网页 设置→应用 生成，权限
+  `C:\Users\54358\.gitea\jxharness.token`（网页 设置→应用 生成，权限
   write:repository），`curl -H "Authorization: token $(cat
-  ~/.gitea/jx-assistant.token)"` 调 `/api/v1/repos/your-org/your-repo/releases`
+  ~/.gitea/jxharness.token)"` 调 `/api/v1/repos/admin/jxharness/releases`
   （建发布 → `releases/{id}/assets?name=…` 传附件，文件名需 URL 编码）。
   `releases/latest` 是程序内更新检查的源，发布后线上客户端自动收到横幅。
   注意 git 推送凭据（凭据管理器的 OAuth）**不能**调 API——两套体系，别再
@@ -733,7 +738,8 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
   与从前一致。交付侧对应实现在 `deliver.go`（与门语义）：要搬运必须 `upload`
   （`findUpload` 认 uid / 原件路径 / 工作区副本路径）与 `filename` 成对显式
   提供，缺一在调用时立即报错；两者都不给＝只登记交付卡片不搬运（无自动反查）。
-  引用解析不到（浏览器、手机、粘贴上传登记不了原件路径，或编号写错）报可读
+  引用解析不到（浏览器、手机、Ctrl+V 原生粘贴登记不了原件路径——桌面壳右键
+  粘贴资源管理器复制的文件是路径型、能登记，或编号写错）报可读
   错误并列出可用编号，绝不猜一个目录去覆盖。
 - **输入框标记胶囊**（`app-chat.js` 的「输入框标记胶囊」节，HTML/CSS 在
   `index.html` 的 `composer-input-wrap` 与 `style.css`）：引用标记（“引用N”）与
@@ -777,11 +783,22 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
   **粘贴的剪贴板读取有平台分叉**：桌面壳里
   `navigator.clipboard.readText` 会永久挂起（WebView2 的剪贴板读权限停在
   prompt 且没有授权 UI，go-webview2 的 SetPermission 对它不生效——真机诊断
-  见 `gui-test/ctxmenu-clipboard-diag.mjs`），所以桌面壳直接读本机端点
-  `GET /api/clipboard`（`clipboard_windows.go` 读系统剪贴板：文本 +
-  截图常带的 PNG 注册格式，文本优先、PNG 入附件与 Ctrl+V 同口径；
-  剪贴板属敏感数据，loopbackOnly 仅回环可达）；网页模式 readText 行为正常
-  走标准 API。配套端点：`POST /api/open-url`（仅 http/https）、
+  见 `gui-test/ctxmenu-clipboard-diag.mjs`），`document.execCommand('paste')`
+  同样被拒（真机带用户激活实测一律返回 false 且不产生 paste 事件，判定见
+  `gui-test/ctxmenu-paste-diag.mjs`），所以右键「粘贴」读本机端点
+  `GET /api/clipboard`，返回 `{text, png, files}` 三样一次带全
+  （`clipboard_windows.go` 读系统剪贴板）：文本（CF_UNICODETEXT）、图片
+  （PNG 注册格式原样；没有时解 CF_DIBV5/CF_DIB 转 PNG，截图常只放 DIB）、
+  资源管理器复制的文件真实路径列表（CF_HDROP，DragQueryFileW）。前端
+  `pasteIntoTarget` 按 **Ctrl+V 的原生 paste 同口径分流：文件 > 图片 > 文本**
+  （真机对照证据同 diag 脚本）——文件是真实路径，走 `stagePaths`（与「文件
+  上传」选择框同一条路径型通路，登记原件路径，交付工具才能送回原处）；图片
+  无路径，转 File 走 `stageFiles`；纯文本 `execCommand('insertText')` 保撤销
+  栈；非对话输入框（设置页等）没有附件区，退回文本。四场景（单文件/多文件/
+  图片/纯文字）双链路一致性由 `gui-test/ctxmenu-paste-verify.mjs` 真机验收
+  （浏览器/手机模式不注册自定义菜单，右键走原生菜单本就全功能，
+  `ctxmenu-paste-webmode.mjs` 验证未被波及）；剪贴板属敏感数据，
+  loopbackOnly 仅回环可达。配套端点：`POST /api/open-url`（仅 http/https）、
   `POST /api/sessions/{id}/open-path|reveal-path` 与 delivery 的 open·reveal、
   `/api/browser/open-view`（预览）——全是**用户手势链路：一律直通**，无工作区
   校验、无确认弹窗（这些路由不在 call_api 目录里，AI 调不到；对用户自己的
@@ -1165,6 +1182,34 @@ report_ready / done / stopped），前端常驻订阅：父对话里的子任务
 服务重启时未完成的执行会补
 【系统中断】记录，发「继续」即可接续（原始历史完整保留）。
 
+## 审批/提问的经理代理（mgrnotify.go）
+
+经理（长期助理主对话）投递开启的那一轮里，审批/提问卡（含计划审批）挂出
+`mgrNotifyAfterSec`（默认 30 秒，设置·常规 mgrNotify）仍无人处理时，自动给
+经理主对话投一条通知（含卡片 id 与 call_api 代批路径），决议随后回告并标注
+来源（用户在界面处理 / 长期助理代选 / 等待超时）。与「久等声光提醒用户」
+（askAlert，默认 4 分钟）并行各管各：一个叫醒用户、一个叫醒经理，互不替代。
+
+**经理代批是轮次级授权（mgrTurnGrant），不是会话级永久授权**：
+
+- 授予只发生在 dispatch_task / send_to_session 把需求注入会话、投递**开出的
+  那一轮**（`deliverSub` 返回的执行体指针即轮次身份，与 finishRunOf 的按身份
+  收口同一哲学）；插话（目标执行中）不授权——注入的是别人发起的那一轮，
+  也不动既有授权。
+- 撤销：该轮收口（正常完成/失败/停止，含看门狗硬终结——统一走 `closeRun`）、
+  用户亲发消息（`handleChat` / `handleInterject` / `handleRetry`＝用户接管）。
+  授权是 App 内存态，进程重启即清空：重启后没有任何一轮属于经理，恢复的
+  待审批计划归用户处理。
+- 窗口外（用户自己发起的轮、经理发过话之后用户接手的会话）的卡：到点**不
+  通知**经理（用户在场的轮用户自己看得见卡片）；经理经 call_api 翻清单主动
+  代决的，决议入口（`handleResolveApproval` / `handleResolveQuestion`）对非
+  窗口卡 403 拒绝——**绝不代决不属经理那一轮的卡片**。
+- 2026-11 踩坑：最初按「会话级永久标记」实现（dispatch_task 派生记
+  DispatchedBy、send_to_session 首次发话补 mgrlink 持久化标记），经理派发过
+  一次，之后用户在该会话自己发起的全部工作，审批卡仍报给经理代决——被用户
+  判为越权，遂改轮次级。mgrlink 持久化数据已无读取者（留库不生效）；
+  DispatchedBy 只走回报链，不再当代批依据。
+
 ## 任务找经理协调（request_manager / requestmgr.go）
 
 任务会话在「问自己看不到的情况」或「要一个同时只能一个人用的资源」时，可以
@@ -1239,6 +1284,35 @@ report_ready / done / stopped），前端常驻订阅：父对话里的子任务
   元数据行会把轮尾撑大一号，区间内只剩元数据行同样按「已压过」报错，不落
   空摘要）；自动摘要按 DSH 式合并为单一检查点，摘要区间与规则压缩同一
   保留窗口口径。
+- **摘要请求吃前缀缓存**（doSummarize + CallSummarizer，2026-11-11 设计）：
+  摘要请求不再另起炉灶（专用系统提示词 + 渲染转述文本——零缓存命中、全量
+  miss 计费、prefill 慢），而是复用主对话的请求形态：消息序列 = buildContext
+  截止到压缩终点（buildContextUpTo，与主循环逐字节同源，摘要行豁免裁剪）+
+  尾部一条压缩指令（summarizeDirective：任务说明用 seq 圈区间、小节要求
+  含踩坑/成功经验、明令不许调用工具）；tools 与思考档位同主循环请求信封。
+  首次压缩命中整段压缩区间，增量只有指令几百字（DSH 社区同思路实测命中
+  11.8%→99.7%，DSH 官方 compaction-basic 已做同款改造）。模型若调用工具：
+  合成拒绝响应（每个调用一条，保配对）+ 重申指令再跳一次（前缀已全命中，
+  第二跳增量极小），连续两次仍调用即报错；审计行 scope=summarize 的
+  usage.hit/miss 直接可见缓存收益。
+- **摘要小节六节制**（2026-11-11 拍板，调研 DSH/Claude Code/Codex 后定制）：
+  已完成的任务与意图 / 关键决定（跨压缩保留——合并旧摘要时仍成立的决定
+  原样带入，防多代压缩后早期决策漂移）/ 文件与改动 / 错误与教训（踩坑 +
+  验证过的成功经验）/ 用户指令与约束摘录（原话逐条，安全条款逐字保留）/
+  进行中与未完成。**不设「下一步」节**——保留窗口的最近原文随请求原样
+  保留，「接下来做什么」活在原文里，摘要里写只会过时。空节写「无」不得
+  删节；助理主对话版在此结构上置顶「用户偏好与习惯 / 长期有效的约定」
+  两节。落库正文头是 checkpoint preamble（「以下是既定背景，直接基于后续
+  原文继续工作，不要复述或确认本摘要」——DSH 同款，防压缩后模型浪费一
+  个回合确认摘要）；摘要异常短（<50 字疑似截断）fail-closed 报错不落库。
+- **摘要增量区间标注**（2026-11-11）：指令明说「只总结第 X 至 Y 条——上一
+  份摘要之后、本条指令之前」，先前的摘要不重新总结、只按「关键决定」带
+  入。落库摘要行带结构化区间对 `covers_from`/`covers_up_to`（seq=数据库
+  行号，历史查询工具按区间检索原文直接可用）：manual 叠加存本次区间
+  起点；auto 合并存累计起点（继承合并链头部，旧数据无起点字段按 1 兜底），
+  文本头同写「本次压缩第 X 至 Y 条」（auto 合并时另注「累计覆盖第 Z 至
+  Y 条」）。规则压缩不涉及——它是行级折叠（每行自己的 Compact 标记与
+  seq），没有区间摘要体。
 - **压缩后环境快照完整重发**（`resendEnvAfterCompact`）：环境快照对模型是
   差分机制（首条整份、后续只发变化行），而折叠/摘要会把差分所依附的完整
   基线埋掉——之后模型手里只剩孤立差分行或缺掉整段环境。所以每次压缩成功

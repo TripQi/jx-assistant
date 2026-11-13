@@ -31,8 +31,8 @@ func TestWizardRegistryLookupServerField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("company") == "新式公司" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"company": "新式公司", "server": "https://example.com:PORT",
-				"addrs": []string{"192.0.2.210"}, "port": 2227,
+				"company": "新式公司", "server": "https://jxaizz.com:2227",
+				"addrs": []string{"192.168.0.210"}, "port": 2227,
 			})
 			return
 		}
@@ -43,7 +43,7 @@ func TestWizardRegistryLookupServerField(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	got, err := wizardRegistryLookup(srv.URL, "新式公司")
-	if err != nil || len(got) != 1 || got[0].Server != "https://example.com:PORT" {
+	if err != nil || len(got) != 1 || got[0].Server != "https://jxaizz.com:2227" {
 		t.Fatalf("server 字段应优先: %v %v", got, err)
 	}
 	got2, err := wizardRegistryLookup(srv.URL, "老式公司")
@@ -65,7 +65,7 @@ func TestLoadConfigRegistryURLDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RegistryURL != "https://example.com:PORT" {
+	if cfg.RegistryURL != "https://jxaizz.com:2227" {
 		t.Fatalf("空键应补默认总服务器，得到 %q", cfg.RegistryURL)
 	}
 	// 显式 off 保留

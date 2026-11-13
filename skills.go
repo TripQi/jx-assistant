@@ -495,6 +495,13 @@ func downloadFirstAvailable(dest string, urls []string) error {
 }
 
 // unzip 解压 zip 到目标目录（防条目路径穿越）。
+//
+// 条目名必须先规范化：ZIP 规范要求分隔符是 "/"，但 PS 5.1 的 Compress-Archive
+// （.NET Framework）写出来的是反斜杠，目录条目还以反斜杠结尾
+// （"voicetype\go-webview2\.github\"）、external attrs 也不带目录位。不规范化的话
+// Go 的 FileInfo().IsDir() 认不出它是目录，会先落一个同名文件，下一层条目再要
+// 它当目录时整包解压失败——2026-11-13 线上 voice-1.3.8.zip 就是这么让每台安装版
+// 的组件静默更新全灭的（mkdir ...\.github: The system cannot find the path specified）。
 func unzip(zipPath, dest string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -503,18 +510,26 @@ func unzip(zipPath, dest string) error {
 	defer r.Close()
 	cleanDest := filepath.Clean(dest)
 	for _, f := range r.File {
-		target := filepath.Join(dest, filepath.FromSlash(f.Name))
+		name := strings.ReplaceAll(f.Name, "\\", "/")
+		name = strings.TrimPrefix(name, "./")
+		// 目录条目：标准包以 "/" 结尾，Compress-Archive 的包以 "\" 结尾（已换成 "/"）
+		isDir := strings.HasSuffix(name, "/") || f.FileInfo().IsDir()
+		name = strings.TrimSuffix(name, "/")
+		if name == "" || name == "." {
+			continue
+		}
+		target := filepath.Join(dest, filepath.FromSlash(name))
 		if target != cleanDest && !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) {
 			return fmt.Errorf("zip 内含非法路径: %s", f.Name)
 		}
-		if f.FileInfo().IsDir() {
+		if isDir {
 			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
+				return fmt.Errorf("创建目录失败（条目 %q）: %w", f.Name, err)
 			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
+			return fmt.Errorf("创建上级目录失败（条目 %q）: %w", f.Name, err)
 		}
 		src, err := f.Open()
 		if err != nil {

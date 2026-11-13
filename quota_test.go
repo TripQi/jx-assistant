@@ -25,12 +25,12 @@ func sampleQuota() *CompanyQuotaCfg {
 func TestSyncAppliesQuota(t *testing.T) {
 	a := newWizardTestApp(t)
 	a.Cfg.WizardCompany = "测试公司"
-	a.Cfg.WizardServer = "http://lan:PORT"
+	a.Cfg.WizardServer = "http://lan:2228"
 	a.Cfg.Providers = []ProviderCfg{{ID: wizardProviderID, Name: "测试公司·内部通道",
 		BaseURL: "http://lan:3000/v1", APIKey: "sk-x", Models: []ModelCfg{{ID: "m1"}}}}
 
-	ann := &announcePayload{Jxai: 1, Company: "测试公司", Server: "http://lan:PORT",
-		MarketURL: "http://lan:PORT/market/manifest.json", UpdateURL: "http://lan:PORT/updates/latest",
+	ann := &announcePayload{Jxai: 1, Company: "测试公司", Server: "http://lan:2228",
+		MarketURL: "http://lan:2228/market/manifest.json", UpdateURL: "http://lan:2228/updates/latest",
 		Quota: sampleQuota(),
 		API: &struct {
 			BaseURL       string            `json:"baseURL"`
@@ -39,7 +39,7 @@ func TestSyncAppliesQuota(t *testing.T) {
 			DefaultModel  string            `json:"defaultModel"`
 		}{BaseURL: "http://lan:3000/v1", Models: []wizardModelInfo{{ID: "m1"}}, DefaultModel: "m1"},
 	}
-	applyAnnounce(a, ann, "http://lan:PORT", false)
+	applyAnnounce(a, ann, "http://lan:2228", false)
 	q := a.Cfg.CompanyQuota
 	if q == nil || q.RemainPoints != 72340 || q.PeriodText != "每月 1 号" || q.Points != 100000 {
 		t.Fatalf("额度快照未应用: %#v", q)
@@ -48,7 +48,7 @@ func TestSyncAppliesQuota(t *testing.T) {
 	// 服务端没下发 quota（老服务端）：保留旧值，不清空
 	ann2 := *ann
 	ann2.Quota = nil
-	applyAnnounce(a, &ann2, "http://lan:PORT", false)
+	applyAnnounce(a, &ann2, "http://lan:2228", false)
 	if a.Cfg.CompanyQuota == nil || a.Cfg.CompanyQuota.RemainPoints != 72340 {
 		t.Fatal("没有新快照时不该清空旧额度")
 	}
@@ -58,8 +58,8 @@ func TestSyncAppliesQuota(t *testing.T) {
 func TestProvisionPayloadAppliesQuota(t *testing.T) {
 	a := newWizardTestApp(t)
 	payload := &provisionPayload{
-		Company: "测试公司", User: "张三", Server: "http://lan:PORT",
-		MarketURL: "http://lan:PORT/market/manifest.json", UpdateURL: "http://lan:PORT/updates/latest",
+		Company: "测试公司", User: "张三", Server: "http://lan:2228",
+		MarketURL: "http://lan:2228/market/manifest.json", UpdateURL: "http://lan:2228/updates/latest",
 		Quota: sampleQuota(),
 	}
 	payload.API = &struct {

@@ -261,6 +261,18 @@ func desktopWorkspaceDefault(cfg *Config) (legacy string, changed bool) {
 	return legacy, true
 }
 
+// desktopDataDir 桌面壳本地状态的落地根目录（WebView2 用户数据、兼容模式
+// 标记文件）：跟随配置里的 dataDir，而不是写死 "data"——开发/测试实例用
+// 隔离的数据目录时，浏览器 profile 与兼容开关也跟着隔离，不会和正式实例
+// 抢同一个 user-data-folder（同目录双开会创建失败，界面偏好也会互相串）。
+// 默认配置的 dataDir 就是 "data"，安装版路径与旧版完全一致。
+func desktopDataDir(app *App) string {
+	if app != nil && app.Cfg != nil && strings.TrimSpace(app.Cfg.DataDir) != "" {
+		return app.Cfg.DataDir
+	}
+	return "data"
+}
+
 func stringsEqualFold(a, b string) bool {
 	if len(a) != len(b) {
 		return false
@@ -310,10 +322,10 @@ func runDesktopLoop(app *App, url string) error {
 		activateExistingWindow()
 		return nil
 	}
-	// 冷启动直达兼容模式：设置页手动开启落过标记文件（data/webview-compat.flag）
+	// 冷启动直达兼容模式：设置页手动开启落过标记文件（<dataDir>/webview-compat.flag）
 	// 就直接软件合成进来。参数合并与麦克风权限说明见 newDesktopFrontend
 	// （每轮前端创建时都会做）。
-	softwareCompatPath = filepath.Join("data", "webview-compat.flag")
+	softwareCompatPath = filepath.Join(desktopDataDir(app), "webview-compat.flag")
 	if _, err := os.Stat(softwareCompatPath); err == nil {
 		webviewSoftwareRender.Store(true)
 		log.Printf("兼容显示模式已启用（软件合成，标记文件 %s 存在）", softwareCompatPath)
@@ -333,7 +345,7 @@ func runDesktopLoop(app *App, url string) error {
 	defer trayTeardown()
 	var prevRect *panelRect
 	for {
-		w := newDesktopFrontend(prevRect)
+		w := newDesktopFrontend(desktopDataDir(app), prevRect)
 		if w == nil {
 			return fmt.Errorf("创建桌面窗口失败")
 		}
@@ -436,11 +448,14 @@ func runDesktopLoop(app *App, url string) error {
 }
 
 // newDesktopFrontend 建主窗口（含附加参数合并与兼容模式分流）。兼容模式走
-// 独立数据目录 data/webview-compat：Chromium 参数在环境创建时定死、换参数必须
-// 换环境，而新旧环境的 user-data-folder 不能相同（旧浏览器进程异步退场，同
-// 目录创建会失败）；代价仅是兼容窗的前端本地存储（界面偏好类）从零开始，
-// 业务数据都在服务端。prev 非空时新窗原位重开（热重启不跳位）。
-func newDesktopFrontend(prev *panelRect) webview2.WebView {
+// 独立数据目录 <dataDir>/webview-compat：Chromium 参数在环境创建时定死、换
+// 参数必须换环境，而新旧环境的 user-data-folder 不能相同（旧浏览器进程异步
+// 退场，同目录创建会失败）；代价仅是兼容窗的前端本地存储（界面偏好类）从零
+// 开始，业务数据都在服务端。prev 非空时新窗原位重开（热重启不跳位）。
+//
+// dataDir 传配置里的 dataDir（见 desktopDataDir）：WebView2 用户数据目录
+// 跟着数据目录走，开发/测试实例把 dataDir 隔离后浏览器 profile 也一并隔离。
+func newDesktopFrontend(dataRoot string, prev *panelRect) webview2.WebView {
 	// 麦克风权限：桌面端应当「天生具备」，不能每次都弹审批。
 	// 绑定库建主控件时只显式放行了剪贴板（jchv/go-webview2 的
 	// SetPermission(ClipboardRead)），其余权限按「默认」交给 WebView2：桌面壳里
@@ -473,23 +488,23 @@ func newDesktopFrontend(prev *panelRect) webview2.WebView {
 			merged = strings.TrimSpace(merged + " " + dfPrefix + noOcclusion)
 		}
 	}
-	dataDir := filepath.Join("data", "webview")
+	profileDir := filepath.Join(dataRoot, "webview")
 	if webviewSoftwareRender.Load() {
 		// 兼容显示模式（软件合成）：设置页手动开启（标记文件）触发，把 GPU 整个
 		// 让给与我们抢资源的其他应用（聊天界面很轻，软件合成无压力）。删掉
-		// data/webview-compat.flag 即恢复默认硬件加速（热重启本会话内也会切回）。
+		// <dataDir>/webview-compat.flag 即恢复默认硬件加速（热重启本会话内也会切回）。
 		if !strings.Contains(merged, "--disable-gpu-compositing") {
 			merged = strings.TrimSpace(merged + " --disable-gpu-compositing")
 		}
-		dataDir = filepath.Join("data", "webview-compat")
-		log.Printf("兼容显示模式：软件合成，数据目录 %s", dataDir)
+		profileDir = filepath.Join(dataRoot, "webview-compat")
+		log.Printf("兼容显示模式：软件合成，数据目录 %s", profileDir)
 	}
 	if merged != prevArgs {
 		_ = os.Setenv(webView2ArgsEnv, merged)
 	}
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		AutoFocus: true,
-		DataPath:  dataDir,
+		DataPath:  profileDir,
 		WindowOptions: webview2.WindowOptions{
 			Title:  desktopAppTitle,
 			Width:  1280,

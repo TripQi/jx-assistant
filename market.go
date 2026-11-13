@@ -167,7 +167,7 @@ func (a *App) removeMarketRec(typ, id string) {
 }
 
 // marketManifestURL 市场地址规范化（2026-11-03 用户口径）：设置里只填服务器地址
-// （域名/IP + 端口，如 https://example.com:2227），路径后缀由程序自动拼——
+// （域名/IP + 端口，如 https://jxaizz.com:2227），路径后缀由程序自动拼——
 // /market/manifest.json；已带后缀或反代子路径（如 /jxai）的旧值原样兼容。
 func marketManifestURL(raw string) string {
 	raw = strings.TrimSpace(raw)

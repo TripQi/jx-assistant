@@ -18,7 +18,9 @@ package main
 //	   Edit/ComboBox 且启用、非只读 → 可输入
 //	   Document/Custom/Group/Pane 且带 ValuePattern 非只读 → 可输入（富文本）
 //	   带 ValuePattern 但**只读** → 明确拒绝（网页正文就是这种：Document+只读）
-//	   Chromium 窗口里键盘可聚焦、又不是明显非输入控件 → 乐观放行
+//	   Chromium 窗口里键盘可聚焦、带 TextPattern、又不是明显非输入控件 → 乐观放行
+//	   （TextPattern 是 contenteditable 与滚动容器的分水岭：网页点空白处焦点常落在
+//	     滚动容器 Group 上，它无 TextPattern，不能放行）
 //	4. 无 UIA 信号的 Qt 自绘应用（微信等）→ 进程名兜底
 //
 // 与门禁口径一致的取舍：**能确认才注入**。判不准就落剪贴板，用户手动粘贴，
@@ -235,7 +237,12 @@ func vtEditabilityGate(t vtTarget) vtGate {
 				}
 				return vtGateUiaRichEditor
 			}
-			if u.Enabled && u.KeyboardFocusable && vtIsChromiumWindow(wc, fc) &&
+			// 乐观放行必须带 TextPattern（2026-11-11 实测，同一页面同机对照）：
+			// contenteditable 富文本（ql-editor）与网页滚动容器（ds-virtual-list）
+			// 都是 Group+无ValuePattern+可聚焦，唯一区分度是 TextPattern——
+			// 前者 true、后者 false。不带这条，DeepSeek 页点空白处焦点落在
+			// 滚动容器上会被判可输入，Ctrl+V 落空还显示"已输入"。
+			if u.Enabled && u.KeyboardFocusable && u.HasTextPattern && vtIsChromiumWindow(wc, fc) &&
 				!vtDefinitelyNotEditable[u.ControlType] {
 				return vtGateChromiumOptimistic
 			}
@@ -292,7 +299,7 @@ func (t vtTarget) describe() string {
 		} else {
 			uiaDesc += " 可写=无ValuePattern"
 		}
-		uiaDesc += fmt.Sprintf(" 可聚焦=%v 启用=%v", u.KeyboardFocusable, u.Enabled)
+		uiaDesc += fmt.Sprintf(" 文本模式=%v 可聚焦=%v 启用=%v", u.HasTextPattern, u.KeyboardFocusable, u.Enabled)
 		if u.Password {
 			uiaDesc += " 密码框"
 		}

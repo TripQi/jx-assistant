@@ -1,11 +1,12 @@
 package main
 
-// 「审批/提问的经理代理」（mgrnotify.go）的验收：
-//   · 通知范围：经理关联（dispatch_task 派生 DispatchedBy / send_to_session 补标
-//     mgrlink）的会话才通知；用户自建且经理从未触达的不通知（防骚扰）；经理
-//     主对话自己与待办系统派生不算；
-//   · 通知时机：卡挂出设置时长（短延时桩）仍无人处理 → 经理会话收到一条
-//     kind=aiuser origin=mgrcard 的通知，含卡片 id、摘要、可选项与代批路径；
+// 「审批/提问的经理代理」（mgrnotify.go）的验收——代批资格是**轮次级授权**：
+//   · 窗口：dispatch_task / send_to_session 投递开出的那一轮才授予
+//     （grantTestTurn 模拟投递开轮）；轮收口（正常完成/用户停止）、用户亲发
+//     消息（接管）即撤销；用户自己发起的轮不通知、经理代决被 403 拒；
+//   · 通知时机：窗口内的卡挂出设置时长（短延时桩）仍无人处理 → 经理会话
+//     收到一条 kind=aiuser origin=mgrcard 的通知，含卡片 id、摘要、可选项与
+//     代批路径；窗口外的卡到点不通知（用户在场的轮用户自己看得见）；
 //   · 决议回告：用户在界面选 / 经理代选（byManager 标注）/ 等待超时三种收尾
 //     都回告，来源标注正确；
 //   · 不越位：定时器到点前已有决议的卡不通知；用户停表（碰过卡片=有人在场）
@@ -45,9 +46,23 @@ func newMgrNotifyTestApp(t *testing.T) (a *App, mgr, task, solo *SessionMeta) {
 		return m
 	}
 	mgr = mk("mgr-main", "长期助理", "assistant", "")
-	task = mk("task-disp", "登录页样式", "coding", "mgr-main") // dispatch_task 派生（存量直接拿 DispatchedBy 当依据）
+	task = mk("task-disp", "登录页样式", "coding", "mgr-main") // dispatch_task 派生（DispatchedBy 只走回报链，不再当经理代批依据）
 	solo = mk("task-solo", "私人调研", "coding", "")            // 用户自建，经理从未触达
 	return a, mgr, task, solo
+}
+
+// grantTestTurn 模拟「经理投递开出的那一轮」：beginRun 登记即视为正在执行
+//（测试没有真实执行体），投递侧授权走产品同款 grantManagerTurn。测试结束统一
+// 收口（幂等，多次 finishRunOf 只收一次）。
+func grantTestTurn(t *testing.T, a *App, sid string) *sessionRun {
+	t.Helper()
+	run, ok := a.beginRun(sid)
+	if !ok {
+		t.Fatalf("会话 %s 开轮失败（已在执行？）", sid)
+	}
+	t.Cleanup(func() { a.finishRunOf(sid, run) })
+	a.grantManagerTurn(sid, run)
+	return run
 }
 
 // mgrNoticeRows 数经理会话里 mgrcard 消息的条数并取全文。
@@ -104,11 +119,220 @@ func withShortMgrNotify(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { mgrNotifyDelay = old })
 }
 
-// 主路径：派生会话的提问卡挂着没人答 → 经理收到通知（身份与要素齐全）；
+// ---------- 轮次级授权的授予/撤销判定（四种时机的地基） ----------
+
+// TestManagerTurnGrantLifecycle 授权生命周期：未授权无效；授权只对那一轮有效；
+// 轮收口/用户亲发消息撤销；旧授权不跨轮生效；竞态窗口里迟到的旧授权作废；
+// 无关轮的收口不误删本轮授权；插话（run=nil）不建立授权。
+func TestManagerTurnGrantLifecycle(t *testing.T) {
+	a, _, task, _ := newMgrNotifyTestApp(t)
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("从未授权的会话不该有经理代批窗口")
+	}
+	run1, ok := a.beginRun(task.ID)
+	if !ok {
+		t.Fatal("开轮失败")
+	}
+	t.Cleanup(func() { a.finishRunOf(task.ID, run1) })
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("轮已在执行但未授权（不是经理投递开出的）：不该有窗口")
+	}
+	a.grantManagerTurn(task.ID, run1)
+	if !a.managerTurnActive(task.ID) {
+		t.Fatal("经理投递开出的那一轮应有代批窗口")
+	}
+
+	// 用户亲发消息（接管）：窗口立即撤销——即使那一轮还在跑
+	a.revokeManagerTurn(task.ID)
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("用户亲发消息后经理代批资格应撤销")
+	}
+
+	// 轮收口后再开的新轮：旧授权（指向死轮）不跨轮生效；经理再投递才再授权
+	a.finishRunOf(task.ID, run1)
+	run2, ok := a.beginRun(task.ID)
+	if !ok {
+		t.Fatal("第二轮开轮失败")
+	}
+	t.Cleanup(func() { a.finishRunOf(task.ID, run2) })
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("上一轮的授权不该跨轮生效（新一轮需要经理重新投递）")
+	}
+	a.grantManagerTurn(task.ID, run2)
+	if !a.managerTurnActive(task.ID) {
+		t.Fatal("经理再次投递开出的新一轮应重新授权")
+	}
+
+	// 竞态兜底：用户撤销（代数递增）之后才落盘的旧代数授权自动作废
+	//（模拟「投递已开出新轮、授权尚未写、用户恰好在此刻插话」的迟到写入）
+	a.runMu.Lock()
+	a.mgrTurns[task.ID] = mgrTurnGrant{run: run2, gen: a.mgrTurnGen[task.ID] - 1}
+	a.runMu.Unlock()
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("撤销后迟到的旧授权应作废")
+	}
+
+	// 收口按轮身份清授权：无关轮的收口不能误删本轮授权，本轮收口才清
+	a.grantManagerTurn(task.ID, run2)
+	a.dropManagerTurnOf(task.ID, &sessionRun{}) // 别的轮收口
+	if !a.managerTurnActive(task.ID) {
+		t.Fatal("无关轮的收口不该清掉本轮授权")
+	}
+	a.dropManagerTurnOf(task.ID, run2) // 本轮收口
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("本轮收口应清掉授权")
+	}
+
+	// 插话（send_to_session 对执行中会话的投递，run=nil）：注入的是别人发起的
+	// 那一轮，不建立授权
+	a.grantManagerTurn(task.ID, nil)
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("插话不该建立经理代批授权")
+	}
+}
+
+// ---------- 四种时机 ----------
+
+// 时机一：派发后有效 → 轮次结束失效。窗口内挂卡经理收到通知；同一会话用户
+// 接手后的下一轮再挂卡，到点不通知。
+func TestMgrNotifyWindowClosesAtRoundEnd(t *testing.T) {
+	a, mgr, task, _ := newMgrNotifyTestApp(t)
+	withShortMgrNotify(t, 30*time.Millisecond)
+	run := grantTestTurn(t, a, task.ID)
+
+	// 窗口内：挂卡到点 → 经理收到通知
+	q := &UserQuestion{Kind: askKindAsk, Question: "第一张卡？", AllowFree: true}
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q) }()
+	waitRegistered(t, a, q)
+	waitMgrRows(t, a, mgr.ID, 1)
+	_ = a.resolveQuestion(q.ID, "办")
+
+	// 轮收口（正常完成走 closeRun）：授权随轮撤销
+	a.finishRunOf(task.ID, run)
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("轮收口后经理代批资格应撤销")
+	}
+
+	// 用户接手开的下一轮（无授权）再挂卡：到点不通知
+	q2 := &UserQuestion{Kind: askKindAsk, Question: "用户自己的卡？", AllowFree: true}
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q2) }()
+	waitRegistered(t, a, q2)
+	_ = a.resolveQuestion(q2.ID, "自己定")
+	time.Sleep(150 * time.Millisecond) // 越过短延时窗口
+	if n, _ := mgrNoticeRows(t, a, mgr.ID); n != 1 {
+		t.Fatalf("非经理轮的卡不该通知经理，mgrcard 共 %d 条", n)
+	}
+}
+
+// 时机二：派发后用户停止 → 失效。stopRunBy（用户点停止/数字助理代停同一入口）
+// 后执行体收口，授权撤销，之后的卡不再通知。
+func TestMgrNotifyStopRevokesGrant(t *testing.T) {
+	a, mgr, task, _ := newMgrNotifyTestApp(t)
+	withShortMgrNotify(t, 30*time.Millisecond)
+	run := grantTestTurn(t, a, task.ID)
+	if !a.managerTurnActive(task.ID) {
+		t.Fatal("前置失败：授权的轮应在窗口内")
+	}
+
+	// 用户停止（协作取消）→ 执行体响应取消收口（closeRun）
+	if !a.stopRunBy(task.ID, stopActorUser, stopTriggerNote(stopActorUser)) {
+		t.Fatal("停止请求没有发出")
+	}
+	a.finishRunOf(task.ID, run)
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("用户停止后经理代批资格应撤销")
+	}
+
+	// 停止后的卡不再有通知
+	q := &UserQuestion{Kind: askKindAsk, Question: "停了之后的卡？", AllowFree: true}
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q) }()
+	waitRegistered(t, a, q)
+	_ = a.resolveQuestion(q.ID, "知道了")
+	time.Sleep(150 * time.Millisecond)
+	if n, _ := mgrNoticeRows(t, a, mgr.ID); n != 0 {
+		t.Fatalf("停止后的卡不该通知经理，mgrcard 共 %d 条", n)
+	}
+}
+
+// 时机三：用户亲发消息（接管）→ 失效。经理轮正在跑、用户插话/排队，窗口立即
+// 撤销（handleChat / handleInterject 同款调用），当轮已挂出的卡到点不通知。
+func TestMgrNotifyUserTakeoverRevokesGrant(t *testing.T) {
+	a, mgr, task, _ := newMgrNotifyTestApp(t)
+	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
+
+	q := &UserQuestion{Kind: askKindAsk, Question: "用户接管前挂的卡？", AllowFree: true}
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q) }()
+	waitRegistered(t, a, q)
+	a.revokeManagerTurn(task.ID) // 用户亲发消息＝接管（与 handleInterject 同款调用）
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("用户亲发消息后经理代批资格应撤销")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if n, _ := mgrNoticeRows(t, a, mgr.ID); n != 0 {
+		t.Fatalf("用户接管后当轮的卡不该通知经理，mgrcard 共 %d 条", n)
+	}
+	_ = a.resolveQuestion(q.ID, "用户来")
+}
+
+// 时机四：非经理轮次的卡片不代决。用户自己的轮（无授权）挂卡，经理经 call_api
+// 直调代答 → 403 拒绝，卡片仍等用户；同一张卡用户界面照常能答。对照：经理轮内
+// 同样直调 → 放行并标注来源。
+func TestMgrResolveRejectedOutsideWindow(t *testing.T) {
+	a, mgr, task, _ := newMgrNotifyTestApp(t)
+
+	// 无授权窗口：经理直调代决被拒
+	q := &UserQuestion{Kind: askKindAsk, Question: "谁的卡？", AllowFree: true}
+	done := make(chan struct{})
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q); close(done) }()
+	waitRegistered(t, a, q)
+	post := func(cardID, answer string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/questions/"+cardID,
+			strings.NewReader(`{"answer":"`+answer+`"}`))
+		r.Header.Set("X-JX-Caller-Session", mgr.ID) // 经理经 call_api 直调的调用者头
+		r.SetPathValue("id", cardID)
+		w := httptest.NewRecorder()
+		a.handleResolveQuestion(w, r)
+		return w
+	}
+	if w := post(q.ID, "我来定"); w.Code != 403 {
+		t.Fatalf("非经理轮的代决应 403 拒绝，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	if a.managerTurnActive(task.ID) {
+		t.Fatal("用户自己的轮不该有经理代批窗口")
+	}
+	// 卡片没被代决掉，用户界面照常能答
+	if err := a.resolveQuestion(q.ID, "用户定"); err != nil {
+		t.Fatalf("用户作答应成功: %v", err)
+	}
+	<-done
+
+	// 对照：经理投递开出的那一轮内，同样直调放行并标注来源
+	grantTestTurn(t, a, task.ID)
+	q2 := &UserQuestion{Kind: askKindAsk, Question: "经理轮的卡？", AllowFree: true}
+	done2 := make(chan struct{})
+	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q2); close(done2) }()
+	waitRegistered(t, a, q2)
+	if w := post(q2.ID, "经理定"); w.Code != 200 {
+		t.Fatalf("经理轮内的代决应放行，实际 %d（%s）", w.Code, w.Body.String())
+	}
+	a.permMu.Lock()
+	byMgr := q2.byManager
+	a.permMu.Unlock()
+	if !byMgr {
+		t.Fatal("窗口内的经理代决应标注 byManager（回告来源）")
+	}
+	<-done2
+}
+
+// ---------- 窗口内的既有行为（30 秒代决链路不回归） ----------
+
+// 主路径：经理轮的提问卡挂着没人答 → 经理收到通知（身份与要素齐全）；
 // 用户随后作答 → 回告（含答案与来源）。
 func TestMgrNotifyDispatchedAskThenUserResolves(t *testing.T) {
 	a, mgr, task, solo := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	q := &UserQuestion{Kind: askKindAsk, Question: "选哪个方案？",
 		Options: []string{"方案甲", "方案乙"}, AllowFree: true}
@@ -149,7 +373,7 @@ func TestMgrNotifyDispatchedAskThenUserResolves(t *testing.T) {
 		}
 	}
 
-	// 无关会话（经理从未触达）同样挂卡：不通知（防骚扰）
+	// 无关会话（经理从未触达、无授权窗口）同样挂卡：不通知（防骚扰）
 	q2 := &UserQuestion{Kind: askKindAsk, Question: "私事怎么处理？", AllowFree: true}
 	go func() { _, _ = a.requestUserAnswer(context.Background(), solo, q2) }()
 	waitRegistered(t, a, q2)
@@ -164,6 +388,7 @@ func TestMgrNotifyDispatchedAskThenUserResolves(t *testing.T) {
 func TestMgrNotifyApprovalFlow(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	res := make(chan approvalResult, 1)
 	go func() {
@@ -205,6 +430,7 @@ func TestMgrNotifyApprovalFlow(t *testing.T) {
 func TestMgrNotifyManagerProxyOnPlan(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	q := &UserQuestion{Kind: askKindPlan, Question: "请审批以下执行计划",
 		Plan: "# 重构方案\n第一步只读调研；第二步小步改并逐段编译。", AllowFree: true}
@@ -249,6 +475,7 @@ func TestMgrNotifyManagerProxyOnPlan(t *testing.T) {
 func TestMgrNotifyTimeoutReport(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	q := &UserQuestion{Kind: askKindAsk, Question: "定了没？", TimeoutSec: 1, AllowFree: true}
 	done := make(chan bool, 1)
@@ -257,7 +484,7 @@ func TestMgrNotifyTimeoutReport(t *testing.T) {
 		done <- !ok // 超时 ok=false
 	}()
 	waitRegistered(t, a, q)
-	waitMgrRows(t, a, mgr.ID, 1) // 通知先于超时（30ms < 1s）
+	texts := waitMgrRows(t, a, mgr.ID, 1) // 通知先于超时（30ms < 1s）
 
 	select {
 	case timedOut := <-done:
@@ -267,7 +494,7 @@ func TestMgrNotifyTimeoutReport(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("提问没有按 1 秒超时")
 	}
-	texts := waitMgrRows(t, a, mgr.ID, 2)
+	texts = waitMgrRows(t, a, mgr.ID, 2)
 	for _, want := range []string{"【提问结果】", "等待超时未获回答"} {
 		if !strings.Contains(texts[1], want) {
 			t.Fatalf("超时回告应含 %q：\n%s", want, texts[1])
@@ -282,6 +509,7 @@ func TestMgrNotifyTimeoutReport(t *testing.T) {
 func TestMgrNotifyResolvedBeforeDueNotSent(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 250*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	q := &UserQuestion{Kind: askKindAsk, Question: "快问快答？", AllowFree: true}
 	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q) }()
@@ -297,6 +525,7 @@ func TestMgrNotifyResolvedBeforeDueNotSent(t *testing.T) {
 func TestMgrNotifyHeldQuestionQuiet(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID)
 
 	q := &UserQuestion{Kind: askKindAsk, Question: "选哪个？", Options: []string{"甲", "乙"}, AllowFree: true}
 	go func() { _, _ = a.requestUserAnswer(context.Background(), task, q) }()
@@ -307,31 +536,6 @@ func TestMgrNotifyHeldQuestionQuiet(t *testing.T) {
 		t.Fatalf("用户已碰卡的提问不该通知经理，mgrcard=%d 条", n)
 	}
 	_ = a.resolveQuestion(q.ID, "甲")
-}
-
-// 标记判定：派生即标（DispatchedBy）、发话补标（mgrlink）、排除经理自己与
-// 待办系统派生、nil 安全。
-func TestManagerLinkedMarking(t *testing.T) {
-	a, mgr, task, solo := newMgrNotifyTestApp(t)
-	if !a.managerLinked(task) {
-		t.Fatal("dispatch_task 派生（DispatchedBy=经理）应算经理关联")
-	}
-	if a.managerLinked(solo) {
-		t.Fatal("用户自建且经理从未触达的会话不该算经理关联")
-	}
-	if a.managerLinked(mgr) {
-		t.Fatal("经理主对话自己不算（不会通知自己）")
-	}
-	if a.managerLinked(&SessionMeta{ID: "x", Mode: "coding", DispatchedBy: todoComponentID}) {
-		t.Fatal("待办调度器的系统派生不算（它明确不打扰长期助理）")
-	}
-	if a.managerLinked(nil) {
-		t.Fatal("nil 会话不该算经理关联")
-	}
-	a.markManagerLinked(solo) // send_to_session 首次发话补标
-	if !a.managerLinked(solo) {
-		t.Fatal("补标之后应算经理关联")
-	}
 }
 
 // 代批来源判定：直调请求带调用者会话头，只有当前经理主对话自己才算代选；
@@ -355,14 +559,15 @@ func TestManagerResolveCaller(t *testing.T) {
 	}
 }
 
-// 端到端（真执行体 + 假模型，不联网不花额度）：派生会话的提问卡挂到点 →
+// 端到端（真执行体 + 假模型，不联网不花额度）：经理轮的提问卡挂到点 →
 // 经理收到【提问代理】并被唤醒 → 经理用 call_api 代答（POST /api/questions，
-// 直调请求带调用者头）→ 任务等待方拿到答案，决议回告插话回到经理并标
-// 「长期助理代选」→ 经理带着回告收尾。验收的是整条产品链路：通知、唤醒、
-// call_api 代批通路、来源标注、回告，一个不缺。
+// 直调请求带调用者头，窗口内放行）→ 任务等待方拿到答案，决议回告插话回到经理
+// 并标「长期助理代选」→ 经理带着回告收尾。验收的是整条产品链路：通知、唤醒、
+// call_api 代批通路（含轮次级授权的放行）、来源标注、回告，一个不缺。
 func TestMgrNotifyEndToEndManagerProxiesViaCallAPI(t *testing.T) {
 	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	withShortMgrNotify(t, 30*time.Millisecond)
+	grantTestTurn(t, a, task.ID) // 经理投递开出的那一轮（call_api 代答要过它的窗口）
 
 	// 假模型：经理第一轮从通知正文里抠出卡片 id，调 call_api 代答；之后收尾
 	var mu sync.Mutex
@@ -430,7 +635,7 @@ func TestMgrNotifyEndToEndManagerProxiesViaCallAPI(t *testing.T) {
 		Models: []ModelCfg{{ID: "fake-1", Name: "假模型"}}}}
 	a.Cfg.BaseURL = ""
 
-	// 任务会话（经理派生）挂一张没人答的提问卡，等通知把经理叫醒
+	// 任务会话（经理投递开出的那一轮在执行）挂一张没人答的提问卡，等通知把经理叫醒
 	q := &UserQuestion{Kind: askKindAsk, Question: "选哪个方案？",
 		Options: []string{"方案甲", "方案乙"}, AllowFree: true}
 	done := make(chan string, 1)

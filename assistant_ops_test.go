@@ -418,16 +418,16 @@ func TestAssistantCompactWithinBudgetIsNoop(t *testing.T) {
 // 摘要指令按会话模式二选一：数字助理主对话用专属指令（记住用户偏好与长期
 // 约定），其他会话沿用通用指令。
 func TestSummarizeInstructionForMode(t *testing.T) {
-	ast := summarizeInstructionFor(&SessionMeta{Mode: "assistant"})
+	ast := summarizeSectionsFor(&SessionMeta{Mode: "assistant"})
 	if !strings.Contains(ast, "用户偏好与习惯") || !strings.Contains(ast, "长期有效的约定") {
 		t.Fatalf("数字助理主对话应用专属指令, got %q", ast)
 	}
 	for _, mode := range []string{"task", "coding", "office", "aux", ""} {
-		if got := summarizeInstructionFor(&SessionMeta{Mode: mode}); got != summarizeInstruction {
+		if got := summarizeSectionsFor(&SessionMeta{Mode: mode}); got != summarizeSections {
 			t.Fatalf("mode=%q 应回退通用指令", mode)
 		}
 	}
-	if summarizeInstructionFor(nil) != summarizeInstruction {
+	if summarizeSectionsFor(nil) != summarizeSections {
 		t.Fatalf("nil 会话应回退通用指令")
 	}
 }

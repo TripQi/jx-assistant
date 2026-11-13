@@ -67,7 +67,7 @@ type Assembly struct {
 func (e *ContextEngine) Assemble(sess *SessionMeta, emit func(Event)) *Assembly {
 	sys, envRaw, tools := e.materials(sess)
 	env := e.app.maybeAppendEnvSnapshot(sess, envRaw, emit)
-	msgs := e.app.buildContext(sess, sys)
+	msgs := e.app.buildContext(sess, sys, 0)
 	msgs = inlineImagesForRequest(e.app, msgs, e.app.resolveTarget(sess))
 	return &Assembly{Sys: sys, Env: env, Tools: toolDefsOf(tools), Msgs: msgs,
 		EstTokens: estimateTokens(msgs), SysHash: promptHash(sys), EnvHash: promptHash(env)}
@@ -179,46 +179,94 @@ func (e *ContextEngine) toolChangeNote(sess *SessionMeta, defs []ToolDef) string
 // 观察窗（相邻两两 diff），混入侧路调用会污染 diff 链；摘要本身另有 kind=summary
 // 行可见。不计入会话用量统计（与主循环调用分列口径一致）。
 
-// summarizerPrompt 是摘要调用的系统提示词（请求材料的常量部分，归引擎）。
-const summarizerPrompt = "你是严谨的对话历史压缩助手。"
+// summarizerPrompt 已退役：摘要请求不再另起炉灶（专用系统提示词 + 转述文本），
+// 而是与主循环同源的前缀 + 尾部压缩指令（见 CallSummarizer）——前缀缓存命中
+// 的前提是请求开头逐字节一致，专用提示词恰恰是旧方案零命中的根源。
 
-// CallSummarizer 由引擎拼装并发起摘要模型调用，流式收齐全文返回。mock 目标
-// （离线演示）直接给占位摘要，不发请求也不落调用痕。
-func (e *ContextEngine) CallSummarizer(sess *SessionMeta, input string) (string, error) {
+// CallSummarizer 发起摘要模型调用：请求 = doSummarize 组装好的「与主循环
+// 同源的消息序列 + 尾部压缩指令」，tools/思考档位也与主循环同一请求信封
+// （DSH 社区同思路实测：压缩调用继承会话请求信封，前缀缓存命中从 11.8% 提到
+// 99.7%）——前缀命中意味着为摘要付出的增量 token 只有压缩指令那几百字，
+// prefill 也几乎瞬时。流式收齐全文返回；模型若把压缩任务当成对话延续而调用
+// 工具，合成拒绝响应并重申指令再跳一次（此时前缀已全部命中，第二跳增量只有
+// 纠偏那几条），连续两次仍调用即报错。mock 目标（离线演示）直接给占位摘要，
+// 不发请求也不落调用痕。审计行的 usage（hit/miss）直接反映缓存收益。
+func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools []ToolDef) (string, error) {
 	target := e.app.resolveTarget(sess)
 	if target.BaseURL == "mock" {
 		return "（离线演示摘要：本段历史已完成创建演示文件并验证，细节见原始记录。）", nil
 	}
-	msgs := []Message{TextMessage("system", summarizerPrompt), TextMessage("user", input)}
-	var sb strings.Builder
-	var usage *Usage
-	start := time.Now()
-	err := StreamChat(context.Background(), target, ChatRequest{Model: target.Model, Messages: msgs}, StreamCallbacks{
-		OnText: func(s string) { sb.WriteString(s) },
-		OnUsage: func(u Usage) {
-			uu := u
-			usage = &uu
-		},
-	})
-	p := map[string]any{"type": "call", "scope": "summarize", "model": target.AuditModel(),
-		"msgs": len(msgs), "est": estimateTokens(msgs),
-		"ms": time.Since(start).Milliseconds(), "text": len([]rune(sb.String()))}
-	if usage != nil {
-		p["usage"] = auditUsage{Prompt: usage.PromptTokens, Hit: usage.CacheHit(),
-			Miss: usage.CacheMiss(), Completion: usage.CompletionTokens}
+	req := ChatRequest{Model: target.Model, Messages: msgs, Tools: tools}
+	req.ApplyThinking(sess.Thinking) // 会话级思考档位，与主循环同款信封
+	for hop := 0; ; hop++ {
+		var sb strings.Builder
+		var usage *Usage
+		var calls []ToolCall
+		start := time.Now()
+		err := StreamChat(context.Background(), target, req, StreamCallbacks{
+			OnText:     func(s string) { sb.WriteString(s) },
+			OnToolCall: func(tc ToolCall) { calls = append(calls, tc) },
+			OnUsage: func(u Usage) {
+				uu := u
+				usage = &uu
+			},
+		})
+		p := map[string]any{"type": "call", "scope": "summarize", "model": target.AuditModel(),
+			"msgs": len(req.Messages), "est": estimateTokens(req.Messages),
+			"ms": time.Since(start).Milliseconds(), "text": len([]rune(sb.String()))}
+		if hop > 0 {
+			p["hop"] = hop // 第几跳：>0 说明第一跳调了工具、纠偏后重试
+		}
+		if len(calls) > 0 {
+			p["tools"] = callNames(calls)
+		}
+		if usage != nil {
+			p["usage"] = auditUsage{Prompt: usage.PromptTokens, Hit: usage.CacheHit(),
+				Miss: usage.CacheMiss(), Completion: usage.CompletionTokens}
+		}
+		if err != nil {
+			p["error"] = err.Error()
+		}
+		e.Journal(sess, p)
+		if err != nil {
+			return "", fmt.Errorf("摘要调用失败: %w", err)
+		}
+		if len(calls) == 0 {
+			out := strings.TrimSpace(sb.String())
+			if out == "" {
+				return "", fmt.Errorf("摘要调用没有产出内容")
+			}
+			// fail-closed（DSH 同款）：异常短的输出大概率是被截断或模型答非
+			// 所问——半截摘要比没有更危险（关键决定被截掉一半），宁可报错
+			// 不落库，调用方保留原文可重试
+			if len([]rune(out)) < 50 {
+				return "", fmt.Errorf("摘要过短（%d 字，疑似截断），已放弃落库", len([]rune(out)))
+			}
+			return out, nil
+		}
+		if hop >= 1 {
+			return "", fmt.Errorf("摘要模型连续两次调用工具（%s），压缩中止", callNames(calls))
+		}
+		// 纠偏跳：把模型刚才的工具调用如实回传并配「拒绝执行」的合成响应
+		//（每个调用一条，保住工具配对协议；fillReasoningStub 会在 StreamChat
+		// 里给这条合成的 assistant 补空思考字段防 400），再重申一次性任务令
+		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: calls})
+		for _, tc := range calls {
+			req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: tc.ID,
+				Content: "（错误：这是一次性压缩任务，不允许调用工具，本次调用不会执行。）"})
+		}
+		req.Messages = append(req.Messages, TextMessage("user",
+			"以上工具调用已被拒绝且不会执行。这是一次性压缩任务：请思考后直接输出压缩摘要正文，不要再调用任何工具。"))
 	}
-	if err != nil {
-		p["error"] = err.Error()
+}
+
+// callNames 把工具调用列表折成简短名单（审计行用）。
+func callNames(calls []ToolCall) string {
+	names := make([]string, 0, len(calls))
+	for _, c := range calls {
+		names = append(names, c.Function.Name)
 	}
-	e.Journal(sess, p)
-	if err != nil {
-		return "", fmt.Errorf("摘要调用失败: %w", err)
-	}
-	out := strings.TrimSpace(sb.String())
-	if out == "" {
-		return "", fmt.Errorf("摘要调用没有产出内容")
-	}
-	return out, nil
+	return strings.Join(names, ",")
 }
 
 // 上下文事件类型（Notify 的 kind）：每类都必然改变下一次组装的结果。

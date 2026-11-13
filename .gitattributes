@@ -7,10 +7,6 @@
 # 且每次 pip 重装都会出现整库虚假 diff。二进制（Cua 驱动）同理按原样存。
 内置组件/wmcppkg/** -text
 内置组件/cua-driver/** -text
-# 共享便携 Python 运行时与语音模型同理按原样存（本机 core.autocrlf=true，
-# 不加这条每次检出都会把 5000+ 个包文件改写成 CRLF，制造整库虚假 diff）
-技能/_runtime/** -text
-组件/voice/models/** -text
 # 批处理必须 CRLF：cmd 按 CRLF 语义解析行，裸 LF 会把命令拆行错乱
 # （powershell 拆出 'rshell'、'[失败]' 当命令执行）。检出时强制 CRLF。
 *.bat text eol=crlf

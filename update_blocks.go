@@ -508,20 +508,50 @@ func (a *App) applyComponentBlock(id string, b updateBlock, rel releaseInfo, sou
 		a.Bridge.KillComponent(id)
 	}
 	dst := filepath.Join(a.Components.BuiltinDir(), id)
+	clearReadonlyTree(dst)
+	aside := ""
 	if err := os.RemoveAll(dst); err != nil {
-		return err
+		// 删不掉（voice 的 voicetype.exe 这类常驻 exe 还占着目录、文件带只读位、
+		// 杀软锁着）：改名让路，先让新版本落位，别让整块更新永远卡死。Windows 的
+		// 目录改名只动目录项，里面有打开的句柄也能成（runtime 块用的是同一招）。
+		aside = fmt.Sprintf("%s.old-%d", dst, time.Now().Unix())
+		if rerr := os.Rename(dst, aside); rerr != nil {
+			return fmt.Errorf("旧组件目录既删不掉也挪不开（多半有进程占用）: %v", err)
+		}
+		log.Printf("[更新] 组件 %s 旧目录删不掉（%v），已改名让路到 %s，稍后清理", id, err, aside)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
 	if err := copyDir(root, dst); err != nil {
+		if aside != "" {
+			_ = os.RemoveAll(dst)
+			_ = os.Rename(aside, dst) // 回滚：老版本重新就位，别让组件凭空消失
+		}
 		return fmt.Errorf("复制组件文件失败: %w", err)
+	}
+	if aside != "" {
+		_ = os.RemoveAll(aside) // 仍被占用就留着，下次更新或启动时再清
 	}
 	a.Components.Rescan()
 	if _, ok := a.Components.Manifest(id); !ok {
 		return fmt.Errorf("组件更新后未被识别（manifest.json 异常）")
 	}
 	return nil
+}
+
+// clearReadonlyTree 递归去掉只读位：Windows 上带只读属性的文件删不掉，
+// os.RemoveAll 会整块失败（同步工具、解压器、杀软都可能给组件文件打上只读）。
+func clearReadonlyTree(dir string) {
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.Mode().Perm()&0200 == 0 {
+			_ = os.Chmod(p, 0644)
+		}
+		return nil
+	})
 }
 
 /* ---------- HTTP：手动入口 ---------- */

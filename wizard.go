@@ -34,12 +34,12 @@ const (
 // wizardUDPProbes 发现探测的约定 UDP 端口：向广播地址的这些端口各发一份探测。
 // UDP 包必须指定端口（没有"全端口广播"）——2026-10-25 起服务端 UDP 发现跟随其
 // TCP 主口（生产=2227），历史约定是 2228；两个都发，新老服务端与本机测试实例
-// （:PORT）都能被发现，应答内容自带服务端实际地址（去重见 udpDiscoverServers）。
+// （:2228）都能被发现，应答内容自带服务端实际地址（去重见 udpDiscoverServers）。
 var wizardUDPProbes = []int{2227, 2228}
 
 // wizardServer 一个候选服务端。
 type wizardServer struct {
-	Server  string `json:"server"`         // 如 https://example.com:PORT（发现应答/登记查询给的完整地址）
+	Server  string `json:"server"`         // 如 https://jxaizz.com:2227（发现应答/登记查询给的完整地址）
 	Name    string `json:"name,omitempty"` // 服务端市场名
 	Company string `json:"company"`        // 应答身份（与探测口令一致）
 	Src     string `json:"src"`            // lan=局域网发现 / registry=总服务器查询
@@ -80,9 +80,8 @@ type provisionPayload struct {
 	// PublicServer 服务端自己的公网地址（管理页手动配置，空=未启用外网下发）：
 	// 存进 WizardPublicServer，出公司后作为公告拉取的兜底来源。
 	PublicServer string `json:"publicServer,omitempty"`
-	// PortalURL 门户充值入口（2026-11-12）：服务端 portal 启用才下发（=服务端
-	// 根地址）。存 Cfg.PortalURL——向导一完成「去充值」入口即可用，不等下一轮
-	// 公告（10 分钟）。
+	// PortalURL 门户充值入口（2026-11-13 充值组件）：服务端 portal 启用才下发。
+	// 存 Cfg.PortalURL——向导一完成充值组件的入口即可用，不等下一轮公告（10 分钟）。
 	PortalURL string `json:"portalURL,omitempty"`
 	API          *struct {
 		BaseURL      string `json:"baseURL"`
@@ -103,15 +102,31 @@ type provisionPayload struct {
 	RelayPort int    `json:"relayPort,omitempty"`
 	// Quota 额度快照（服务端下发；老服务端没有该字段 = 不显示额度）
 	Quota *CompanyQuotaCfg `json:"quota,omitempty"`
+	// DeviceSecret 设备凭据（2026-11-13，服务端 provisionRequireKey 开启时签发）：
+	// 存进 Cfg.WizardDeviceSecret，后续 provision/announce 自动携带——免接入码
+	// 续领配置包、拉取个人额度。老服务端（开关关闭）不下发该字段，保持空串。
+	DeviceSecret string `json:"deviceSecret,omitempty"`
 }
 
 var wizardHTTP = newCompanyHTTPClient(15 * time.Second)
 
 // fetchProvision POST /provision 按人领配置包（向导接入与 sync.go 的公司通道
-// 自动重建共用）。任何失败都返回 error，由调用方决定提示方式。
-func fetchProvision(server, user string) (provisionPayload, error) {
+// 自动重建共用）。deviceID=本机稳定设备号（Cfg.RemoteAccess.MyID）：服务端按
+// 「人名\t设备号」落设备级记录，「充值到设备令牌」的匹配链（门户注册的设备号 ↔
+// provision 设备记录，两边同一把号）靠它打通。空则不带——与老客户端逐字节一致；
+// 老服务端不认识 deviceId 也只是忽略，零影响。deviceSecret（2026-11-13）：上次
+// 领取时服务端签发的设备凭据，带上以便服务端识别同设备（announce 的额度快照/
+// 按人外网通道凭据校验用）；空则不带（老服务端/首次接入）。
+func fetchProvision(server, user, deviceID, deviceSecret string) (provisionPayload, error) {
 	var payload provisionPayload
-	pd, err := json.Marshal(map[string]string{"user": user})
+	body := map[string]string{"user": user}
+	if deviceID = strings.TrimSpace(deviceID); deviceID != "" {
+		body["deviceId"] = deviceID
+	}
+	if deviceSecret = strings.TrimSpace(deviceSecret); deviceSecret != "" {
+		body["deviceSecret"] = deviceSecret
+	}
+	pd, err := json.Marshal(body)
 	if err != nil {
 		return payload, err
 	}
@@ -183,6 +198,11 @@ func (a *App) applyProvisionPayload(payload *provisionPayload) []ModelCfg {
 	// 额度快照：服务端下发就存下来（空 = 服务端没配额度/没下发，保持原值不动）
 	if payload.Quota != nil {
 		a.Cfg.CompanyQuota = payload.Quota
+	}
+	// 设备凭据（2026-11-13）：服务端签发就存下来（provisionRequireKey 开启时才有），
+	// 后续 provision/announce 自动携带。空 = 老服务端，保留旧值不动。
+	if payload.DeviceSecret != "" {
+		a.Cfg.WizardDeviceSecret = payload.DeviceSecret
 	}
 	return models
 }
@@ -404,8 +424,10 @@ func (a *App) handleWizardConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ② 取配置包
-	payload, err := fetchProvision(server, user)
+	// ② 取配置包（带本机设备号：服务端落「人名\t设备号」设备级记录，充值到
+	// 设备令牌的匹配链依赖它；空号=老形态，行为不变。社区模式 key 照发、
+	// 额度为零，充值后可用——设备凭据随上次领取自动携带）
+	payload, err := fetchProvision(server, user, a.Cfg.RemoteAccess.MyID, a.Cfg.WizardDeviceSecret)
 	if err != nil {
 		writeErr(w, 502, "取配置失败："+err.Error())
 		return
@@ -418,8 +440,9 @@ func (a *App) handleWizardConnect(w http.ResponseWriter, r *http.Request) {
 		"apiDetail": payload.API, // 明细（含 monthlyQuotaUSD）供向导成功页展示
 		"apiError":  payload.APIError,
 		"marketURL": payload.MarketURL, "updateURL": payload.UpdateURL,
-		// 门户充值入口（2026-11-12）：portal 启用的服务端才非空；成功页据此附
-		//「充值/查余额」链接。
+		// 门户充值入口（2026-11-13 充值组件）：portal 启用的服务端才非空；向导完成
+		// 事件（web/app-wizard.js 的 wizard:done）带它，充值组件据此在完成后弹
+		// 个人中心引导（仅公司通道 + 服务端开了门户才出现）。
 		"portalURL": strings.TrimRight(payload.PortalURL, "/"),
 	}
 	if models := a.applyProvisionPayload(&payload); models != nil {
@@ -431,7 +454,7 @@ func (a *App) handleWizardConnect(w http.ResponseWriter, r *http.Request) {
 	a.Cfg.WizardCompany = payload.Company
 	a.Cfg.WizardServer = server
 	a.Cfg.WizardPublicServer = payload.PublicServer // 空=服务端没配公网地址，出公司即自动停用公司通道
-	a.Cfg.PortalURL = strings.TrimRight(payload.PortalURL, "/") // 门户充值入口（2026-11-12）：portal 启用才非空
+	a.Cfg.PortalURL = strings.TrimRight(payload.PortalURL, "/") // 门户充值入口（2026-11-13）：portal 启用才非空
 	// 向导里填的姓名即默认「发布者姓名」（市场条目的归属名 owner）：发布技能时
 	// 随包上报，市场卡片据此判断哪些条目能「更新发布 / 删除」。重跑向导按新填的
 	// 姓名覆盖（向导填的就是"我是谁"）；只想改名去 设置 · 网络访问。

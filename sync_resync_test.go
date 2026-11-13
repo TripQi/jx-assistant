@@ -231,13 +231,13 @@ func TestStartCompanyResyncOnceGates(t *testing.T) {
 	// ③ 老配置没有 wizardServer：从更新/市场地址反推 origin
 	c := resyncTestApp(t)
 	c.Cfg.WizardServer = ""
-	c.Cfg.UpdateURL = "http://192.0.2.210:2227/updates/latest"
-	if got := resyncServerBase(c); got != "http://192.0.2.210:2227" {
+	c.Cfg.UpdateURL = "http://192.168.0.210:2227/updates/latest"
+	if got := resyncServerBase(c); got != "http://192.168.0.210:2227" {
 		t.Fatalf("应从更新地址反推服务端 origin，实际 %q", got)
 	}
 	c.Cfg.UpdateURL = ""
-	c.Cfg.MarketURL = "https://example.com:2227/api/market"
-	if got := resyncServerBase(c); got != "https://example.com:2227" {
+	c.Cfg.MarketURL = "https://jxaizz.com:3000/api/market"
+	if got := resyncServerBase(c); got != "https://jxaizz.com:3000" {
 		t.Fatalf("应从市场地址反推 origin，实际 %q", got)
 	}
 	if got := originOfURL("not-a-url"); got != "" {

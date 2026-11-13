@@ -597,7 +597,7 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 			a.fireAskAlert("", ap.ID, sess.ID, sess.Title, summary, a.Cfg.askAlertText())
 		})
 	}
-	// 经理代理通知（mgrnotify.go）：经理触达过的会话，卡挂了设置时长（默认
+	// 经理代理通知（mgrnotify.go）：经理投递开启的那一轮，卡挂了设置时长（默认
 	// 30 秒）仍无人处理就通知长期助理——与上面的用户声光提醒并行，各管各。
 	var mgrNotifyTimer *time.Timer
 	if a.Cfg.mgrNotifyOn() {

@@ -62,16 +62,18 @@ type announcePayload struct {
 	UpdateURL string `json:"updateURL"`
 	// PublicServer 服务端公网地址（管理页配置，空=未启用）：存 WizardPublicServer。
 	PublicServer string `json:"publicServer,omitempty"`
-	// PortalURL 门户充值入口（2026-11-12 充值入口）：portal 启用的服务端才下发
-	//（=服务端同源根路径，即个人中心/充值页）。客户端存 Cfg.PortalURL，模型弹层
-	//（额度归零原位替换）/设置页的「去充值」入口靠它显隐。空=不下发（门户未
-	// 启用或老服务端），客户端收到空串清除本地值（管理员关门户后入口随即消失）。
+	// PortalURL 门户充值入口（2026-11-13 充值组件）：portal 启用的服务端才下发
+	//（=个人中心/充值页地址，服务端 0.8.0 起有）。客户端存 Cfg.PortalURL，充值
+	// 组件的三处入口（模型页卡片 / 向导完成后 / 余额类报错旁）靠它显隐；空=不下发
+	//（门户未启用或老服务端），客户端收到空串清除本地值（管理员关门户后入口随即
+	// 消失）。不做「从服务端地址推导」的兜底——老服务端没有门户，推导只会造出
+	// 点开报错的死入口（用户口径：没开就藏，别报错）。
 	PortalURL string `json:"portalURL,omitempty"`
 	// RegistryURL 总服务器地址（服务端「模型」页签配置，空=不下发）：收到即覆盖
 	// 本地设置里的「总服务器地址」——公司换总服务器不用逐台改客户端（2026-10-29）。
 	RegistryURL string `json:"registryURL,omitempty"`
 	// RelayHost / RelayPort 远程接入（公网中继）的网关：服务端下发。客户端只在"当前值
-	// 还是出厂默认 example.com"时才跟随，手改过的不动（2026-10-29）。
+	// 还是出厂默认 jxaizz.com"时才跟随，手改过的不动（2026-10-29）。
 	RelayHost string `json:"relayHost,omitempty"`
 	RelayPort int    `json:"relayPort,omitempty"`
 	// Quota 该员工的额度快照（按人下发：剩余/已用/重置规则/下次重置，见服务端
@@ -117,6 +119,8 @@ func companySyncOnce(a *App, hintServer string) {
 		return
 	}
 	user := strings.TrimSpace(a.Cfg.PublisherName) // 按人身份：服务端用它给该人返回模型子集/外网授权
+	// 设备凭据（2026-11-13）：带上的公告才能拿到个人额度快照与按人外网授权
+	devID, devSec := a.Cfg.RemoteAccess.MyID, a.Cfg.WizardDeviceSecret
 	candidates := []string{}
 	if h := strings.TrimRight(strings.TrimSpace(hintServer), "/"); h != "" && h != server {
 		candidates = append(candidates, h)
@@ -125,7 +129,7 @@ func companySyncOnce(a *App, hintServer string) {
 
 	var ann *announcePayload
 	for _, c := range candidates {
-		if p := fetchAnnounce(c, user); p != nil {
+		if p := fetchAnnounce(c, user, devID, devSec); p != nil {
 			ann = p
 			if c != server { // 广播地址即是新家：市场/更新/服务端地址整体迁移
 				migrateServerBase(a, server, c)
@@ -138,7 +142,7 @@ func companySyncOnce(a *App, hintServer string) {
 	if ann == nil && a.Cfg.WizardCompany != "" { // 失联：按公司名重新发现（换端口/换机器）
 		for _, ws := range udpDiscoverFn(a.Cfg.WizardCompany) {
 			if c := strings.TrimRight(ws.Server, "/"); c != "" && c != server {
-				if p := fetchAnnounce(c, user); p != nil {
+				if p := fetchAnnounce(c, user, devID, devSec); p != nil {
 					ann = p
 					migrateServerBase(a, server, c)
 					log.Printf("[公司同步] 失联后重新发现，服务端迁移：%s → %s", server, c)
@@ -154,7 +158,7 @@ func companySyncOnce(a *App, hintServer string) {
 	public := strings.TrimRight(a.Cfg.WizardPublicServer, "/")
 	fromPublic := false
 	if ann == nil && public != "" && public != server {
-		if p := fetchAnnounce(public, user); p != nil {
+		if p := fetchAnnounce(public, user, devID, devSec); p != nil {
 			ann = p
 			fromPublic = true
 		}
@@ -184,14 +188,26 @@ func companySyncOnce(a *App, hintServer string) {
 }
 
 // fetchAnnounce 拉一份公告；user 非空时带 ?user=（服务端按人返回模型子集与外网
-// 通道授权）。任何失败都返回 nil（同步器把 nil 当失联处理）。
-func fetchAnnounce(server, user string) *announcePayload {
+// 通道授权）。device+secret（2026-11-13）非空时随请求携带设备凭据——服务端只对
+// 带有效凭据的请求下发个人额度快照与按人授权的外网通道（H7 收窄）；老服务端不
+// 认识这些参数/头，忽略即零影响。任何失败都返回 nil（同步器把 nil 当失联处理）。
+func fetchAnnounce(server, user, device, secret string) *announcePayload {
 	u := strings.TrimRight(server, "/") + "/announce"
 	if user != "" {
 		u += "?user=" + url.QueryEscape(user)
+		if device != "" && secret != "" {
+			u += "&device=" + url.QueryEscape(device)
+		}
+	}
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil
+	}
+	if user != "" && device != "" && secret != "" {
+		req.Header.Set("X-Jxai-Secret", secret)
 	}
 	client := http.Client{Timeout: 10 * time.Second, Transport: companyTransport}
-	resp, err := client.Get(u)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -233,7 +249,7 @@ func applyAnnounce(a *App, ann *announcePayload, server string, fromPublic bool)
 		changed = append(changed, "公司名→"+ann.Company)
 	}
 	// 小程序平台地址不再随公告下发（2026-11-03 用户口径）：一律从市场地址推导，
-	// 远程接入网关：出厂默认（example.com）才跟随服务端下发，手改过的保留
+	// 远程接入网关：出厂默认（jxaizz.com）才跟随服务端下发，手改过的保留
 	if ann.RelayHost != "" && a.Cfg.RemoteAccess.Host == defaultRemoteHost {
 		if a.Cfg.RemoteAccess.Host != ann.RelayHost {
 			a.Cfg.RemoteAccess.Host = ann.RelayHost
@@ -252,8 +268,8 @@ func applyAnnounce(a *App, ann *announcePayload, server string, fromPublic bool)
 		a.Cfg.WizardPublicServer = strings.TrimRight(ann.PublicServer, "/")
 		changed = append(changed, "公网服务端→"+a.Cfg.WizardPublicServer)
 	}
-	// 门户充值入口（2026-11-12）：下发了就跟随（去尾斜杠统一）；空串=门户已关，
-	// 清本地值让「去充值」入口消失。
+	// 门户充值入口（2026-11-13 充值组件）：下发了就跟随（去尾斜杠统一）；空串=门户
+	// 已关，清本地值让充值入口消失。
 	if v := strings.TrimRight(ann.PortalURL, "/"); v != a.Cfg.PortalURL {
 		a.Cfg.PortalURL = v
 		if v != "" {
@@ -409,7 +425,9 @@ func reprovisionCompany(a *App, server, user string) {
 	if user == "" {
 		return
 	}
-	payload, err := fetchProvision(server, user)
+	// 设备凭据（2026-11-13）随请求携带：服务端据此识别同设备（announce 额度
+	// 快照的凭据校验同源）；都空 = 老服务端形态。社区模式 key 照发、额度为零。
+	payload, err := fetchProvision(server, user, a.Cfg.RemoteAccess.MyID, a.Cfg.WizardDeviceSecret)
 	if err != nil {
 		log.Printf("[公司同步] 公司通道缺失，自动重建失败：%v", err)
 		return
@@ -522,7 +540,7 @@ func (a *App) companyResyncOnce(server string) {
 
 	// ① 按人重领配置包
 	if user != "" {
-		if payload, err := fetchProvision(server, user); err != nil {
+		if payload, err := fetchProvision(server, user, a.Cfg.RemoteAccess.MyID, a.Cfg.WizardDeviceSecret); err != nil {
 			log.Printf("[重新接入] 按人领配置失败（改试公告）：%v", err)
 		} else {
 			models := a.applyProvisionPayload(&payload)
@@ -541,7 +559,7 @@ func (a *App) companyResyncOnce(server string) {
 
 	// ② 只拉公告（公司通道还在才谈得上应用；不在了必须有姓名才能重建，走 ① 已失败）
 	if p := wizardProvider(a); p != nil {
-		if ann := fetchAnnounce(server, user); ann != nil {
+		if ann := fetchAnnounce(server, user, a.Cfg.RemoteAccess.MyID, a.Cfg.WizardDeviceSecret); ann != nil {
 			applyAnnounce(a, ann, server, false)
 			if n := len(wizardProvider(a).Models); n > 0 {
 				finish("announce", n)

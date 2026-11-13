@@ -1,0 +1,76 @@
+/* 组件：充值与个人中心（portal）—— 样式。
+ * 规范：字号挂 --chat-fs（设置·字体大小的全局落点），层级一律 em；
+ * 空的卡片插槽容器不占位（主程序 buildProvCard 恒放挂载点，没按钮时隐 form 流）。 */
+
+/* 模型页公司通道卡片插槽：组件按钮的容器（额度区按钮排同一行后面） */
+.pf-card-slot { display: inline-flex; align-items: center; gap: 0.5em; margin-left: 0.6em; }
+.pf-card-slot:empty { display: none; }
+
+/* 「充值」按钮（卡片插槽内）：与「刷新额度」同视觉档（pf-cancel），强调色描边 */
+.pp-btn {
+  border: 1px solid var(--accent, #4d6bfe);
+  color: var(--accent, #4d6bfe);
+  background: none;
+  border-radius: 0.45em;
+  padding: 0.35em 1em;
+  font-size: 0.93em;               /* 相对卡片基准（pv-form 挂 --chat-fs） */
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pp-btn:hover { background: color-mix(in srgb, var(--accent, #4d6bfe) 8%, transparent); }
+
+/* 报错条「去充值」：主体复用主程序 re-btn/re-retry，这里只给强调色 */
+.re-btn.pp-btn { color: var(--accent, #4d6bfe); border-color: var(--accent, #4d6bfe); font-size: inherit; padding: inherit; border-radius: inherit; }
+
+/* 充值浮窗（.modal 遮罩是全局类）：中央卡片 = 标题栏 + iframe */
+#portal-modal { align-items: center; justify-content: center; }
+.portal-win {
+  display: flex; flex-direction: column;
+  width: min(92vw, 60em); height: min(88vh, 44em);
+  background: var(--bg, #fff); border-radius: 0.8em;
+  box-shadow: 0 1.2em 3em rgba(0, 0, 0, .25);
+  overflow: hidden;                       /* 圆角裁住 iframe */
+}
+.portal-head {
+  display: flex; align-items: baseline; gap: 0.7em;
+  padding: 0.7em 1em 0.6em;
+  border-bottom: 1px solid var(--border, #e6e8eb);
+  font-size: calc(var(--chat-fs, 14px) * 1.0);
+  flex: none;
+}
+.portal-head b { font-size: 1.07em; }
+.portal-sub { color: var(--text-3, #8b949e); font-size: 0.86em; }
+.portal-close {
+  margin-left: auto; border: none; background: none; cursor: pointer;
+  color: var(--text-2, #57606a); font-size: 1em; padding: 0.2em 0.5em; border-radius: 0.4em;
+}
+.portal-close:hover { background: var(--hover, #f5f6f8); color: var(--text, #1f2328); }
+
+.portal-frame { flex: 1; width: 100%; border: none; background: #fff; }
+
+/* 注册引导条（浮窗内、iframe 之上）：门户未登录时出现。注册端点（/portal/api/
+   register）是服务端专为本组件开的——门户页本身只有登录，首次使用在这里建档。 */
+.portal-reg {
+  display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;
+  padding: 0.5em 1em;
+  background: color-mix(in srgb, var(--accent, #4d6bfe) 6%, var(--bg, #fff));
+  border-bottom: 1px solid var(--border, #e6e8eb);
+  font-size: calc(var(--chat-fs, 14px) * 0.93);
+  flex: none;
+}
+.prg-label { color: var(--text-2, #57606a); }
+.portal-reg input {
+  border: 1px solid var(--border, #e6e8eb); border-radius: 0.4em;
+  padding: 0.32em 0.6em; font-size: 0.95em; outline: none;
+  background: var(--bg, #fff); min-width: 9em;
+}
+.portal-reg input:focus { border-color: var(--accent, #4d6bfe); }
+.prg-go {
+  border: none; border-radius: 0.4em; background: var(--accent, #4d6bfe);
+  color: #fff; padding: 0.38em 1em; font-size: 0.95em; cursor: pointer;
+}
+.prg-go:hover { opacity: .9; }
+.prg-go:disabled { opacity: .55; cursor: default; }
+.prg-msg { font-size: 0.9em; color: var(--text-3, #8b949e); }
+.prg-msg.err { color: var(--danger, #c0392b); }
+.prg-msg.ok { color: var(--green, #1f9d55); }

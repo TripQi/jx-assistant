@@ -165,8 +165,9 @@ class EngineService : Service() {
             Log.e(TAG, "engine lib 不可执行，放弃")
             return
         }
-        // config.json 不预置：首次启动引擎会用默认配置（mock 模式 + 空工作区），
-        // 用户在设置页录入 API Key 后自动落盘（引擎 Config.Save 已 0600）
+        // config.json 不预置：首次启动引擎用出厂默认配置（空工作区、**没有任何
+        // 模型通道**，2026-11-13 起与桌面版同口径），用户接入公司通道或在设置页
+        // 录入提供方后自动落盘（引擎 Config.Save 已 0600）
         val args = listOf(
             lib.absolutePath,
             "-noopen",

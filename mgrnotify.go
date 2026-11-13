@@ -1,20 +1,24 @@
 package main
 
-// 「审批/提问的经理代理」：经理触达过的会话里，审批卡/提问卡（含计划审批）
-// 挂出 mgrNotifyAfterSec 秒（默认 30，设置 mgrNotify）仍无人处理时，自动给
-// 长期助理主对话投一条通知——会话标题/id、卡片 id、问题或申请摘要、可选项
-// 与 call_api 代批路径齐全；之后无论谁给出决议（用户在界面选 / 等待超时 /
-// 经理经 call_api 代选）都回告经理一条，并标注来源（经理自己选的标「你已
-// 代选」）。与「久等声光提醒用户」（askAlert，默认 4 分钟唤窗口+叮声+盖屏）
-// 并行各管各：一个叫醒用户、一个叫醒经理，互不替代、互不干扰。
+// 「审批/提问的经理代理」：经理（长期助理主对话）投递开启的那一轮执行里，
+// 审批卡/提问卡（含计划审批）挂出 mgrNotifyAfterSec 秒（默认 30，设置
+// mgrNotify）仍无人处理时，自动给经理投一条通知——会话标题/id、卡片 id、
+// 问题或申请摘要、可选项与 call_api 代批路径齐全；之后无论谁给出决议（用户
+// 在界面选 / 等待超时 / 经理经 call_api 代选）都回告经理一条，并标注来源
+//（经理自己选的标「你已代选」）。与「久等声光提醒用户」（askAlert，默认
+// 4 分钟唤窗口+叮声+盖屏）并行各管各：一个叫醒用户、一个叫醒经理，互不替代、
+// 互不干扰。
 //
-// 通知范围只限「经理触达过的会话」（防骚扰，用户自建且经理从未碰过的对话
-// 不通知）：
-//   - dispatch_task 派生：会话天生带 DispatchedBy（与回报链同源，直接当依据）；
-//     待办调度器的系统派生（todoComponentID）除外——它明确不打扰长期助理；
-//   - send_to_session 发过话：首次发话时补一条会话附属数据标记（mgrLinkKey）。
-//     转达消息本身（origin=task）与普通会话的 dispatch_sub 投递无法区分，
-//     只能在经理发话那一刻标。
+// 代批资格是**轮次级授权**（mgrTurnGrant），不是会话级永久标记：只有
+// dispatch_task / send_to_session 把需求注入会话、投递**开出的那一轮**才授予；
+// 该轮收口（正常完成/失败/停止，含看门狗硬终结）或用户亲发消息（接管）即撤销。
+// 用户自己发起的轮、经理发过话之后用户接手的会话，卡片一律不通知经理，经理
+// 代决请求在决议入口被拒——绝不代决不属经理那一轮的卡片。（2026-11 踩坑：曾按
+// 「会话级永久标记」实现——dispatch_task 派生记 DispatchedBy、send_to_session
+// 首次发话补 mgrlink 持久化标记——经理派发过一次，之后用户在该会话自己发起的
+// 全部工作，审批卡仍报给经理代决，被用户判为越权，遂改轮次级。旧的 mgrlink
+// 持久化数据已无读取者，留库不动也不生效。）窗口外的卡按降噪口径不通知（用户
+// 在场的轮用户自己看得见卡片），经理经 call_api 翻清单主动代决的由决议入口拒绝。
 //
 // 通知/回告的投递与【任务求助】（requestmgr.go）同路：deliverToSession 统一
 // 收口，忙则插话、空闲落库。差别在唤醒：通知要经理行动，空闲时唤醒它跑一轮；
@@ -28,29 +32,92 @@ import (
 	"time"
 )
 
-// mgrLinkKey 会话附属数据键（sessdata:mgrlink:<会话id>）：send_to_session
-// 首次发话补标「经理关联」。值固定 "1"——只表达存在性，不记哪一版经理
-//（版本会切换，触达关系不该跟着丢）。
-const mgrLinkKey = "mgrlink"
-
 // mgrNotifyOrigin 经理代理通知与决议回告的消息来源标记（kind=aiuser）。
 const mgrNotifyOrigin = "mgrcard"
 
-// managerLinked 判定一个会话是否「经理触达过」。经理主对话自己不算（不会
-// 通知自己）；待办调度器的系统派生不算（它的派生标记本就注明不打扰长期助理）。
-func (a *App) managerLinked(m *SessionMeta) bool {
-	if m == nil || m.Mode == "assistant" {
-		return false
-	}
-	if m.DispatchedBy != "" && m.DispatchedBy != todoComponentID {
-		return true
-	}
-	return a.Store.GetSessionData(m.ID, mgrLinkKey) != ""
+// ---------- 轮次级授权（mgrTurnGrant） ----------
+
+// mgrTurnGrant 经理代批的轮次级授权（App.mgrTurns，runMu 保护）：run 是授权
+// 针对的那一轮执行体——指针即轮次身份（与 finishRunOf 按身份收口同一哲学），
+// 该轮收口、换了新一轮，授权自然失效；gen 是授予时刻的撤销代数——用户亲发
+// 消息会递增代数并清授权，「投递已开出新轮、授权还没写、用户恰好在此刻插话」
+// 竞态窗口里晚到的旧授权因 gen 落后自动作废。
+type mgrTurnGrant struct {
+	run *sessionRun
+	gen int64
 }
 
-// markManagerLinked 给会话补「经理关联」标记（幂等：重复发话写同值）。
-func (a *App) markManagerLinked(m *SessionMeta) {
-	_ = a.Store.SetSessionData(m.ID, mgrLinkKey, "1")
+// grantManagerTurn 授予经理代批资格（dispatch_task / send_to_session 把需求注入
+// 会话时调用）：只对投递开出的那一轮有效（run=nil 是插话——注入的是别人正在
+// 跑的那一轮，不是经理发起的，不授权）。插话补充需求不撤销也不建立授权：
+// 这一轮是谁发起的就按谁的资格走到底。
+func (a *App) grantManagerTurn(sid string, r *sessionRun) {
+	if r == nil {
+		return
+	}
+	a.runMu.Lock()
+	a.mgrTurns[sid] = mgrTurnGrant{run: r, gen: a.mgrTurnGen[sid]}
+	a.runMu.Unlock()
+}
+
+// revokeManagerTurn 撤销经理代批资格（用户亲发消息=用户接管：handleChat /
+// handleInterject / handleRetry）。代数递增让竞态窗口里晚到的旧授权作废。
+func (a *App) revokeManagerTurn(sid string) {
+	a.runMu.Lock()
+	a.mgrTurnGen[sid]++
+	delete(a.mgrTurns, sid)
+	a.runMu.Unlock()
+}
+
+// dropManagerTurnOf 轮收口时按身份清授权（closeRun 调用，正常完成/失败/停止/
+// 硬终结都走那里）：只清属于这一轮的条目——收口与下一次投递授权并发时，
+// 不能误删已指向新一轮的授权。
+func (a *App) dropManagerTurnOf(sid string, r *sessionRun) {
+	a.runMu.Lock()
+	if g, ok := a.mgrTurns[sid]; ok && g.run == r {
+		delete(a.mgrTurns, sid)
+	}
+	a.runMu.Unlock()
+}
+
+// managerTurnActive 会话当前正在执行的那一轮是否由经理投递开启（经理代批
+// 窗口）。授权指向的执行体还活着才算：轮已收口、换了新一轮、被用户接管或
+// 从没授权过都不算。审批/提问卡的生命周期都在轮内（挂卡的等待就阻塞在那一轮
+// 的工具执行里），所以「授权的那一轮正在跑」就等价于「卡片产生于经理那一轮」。
+func (a *App) managerTurnActive(sid string) bool {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	g, ok := a.mgrTurns[sid]
+	if !ok || g.gen != a.mgrTurnGen[sid] {
+		return false
+	}
+	cur, running := a.runners[sid]
+	return running && cur == g.run
+}
+
+// cardSession 取一张等待中的卡所属的会话 id（审批/提问共用；卡片不在等待
+// 清单返回空串——已收卡，代决无从谈起）。
+func (a *App) cardSession(isApproval bool, id string) string {
+	a.permMu.Lock()
+	defer a.permMu.Unlock()
+	if isApproval {
+		if ap, ok := a.approvals[id]; ok {
+			return ap.SessionID
+		}
+		return ""
+	}
+	if q, ok := a.questions[id]; ok {
+		return q.SessionID
+	}
+	return ""
+}
+
+// managerResolveAllowed 经理此刻是否有权代决这张卡：卡片所属会话的经理轮授权
+// 仍有效（同一轮还在执行）。窗口外的代决请求在决议入口拒绝——通知已按降噪
+// 口径不投，经理经 call_api 翻到清单主动代决也不能放行。
+func (a *App) managerResolveAllowed(isApproval bool, id string) bool {
+	sid := a.cardSession(isApproval, id)
+	return sid != "" && a.managerTurnActive(sid)
 }
 
 // mgrNotifyDelay 通知触发延时（设置的 mgrNotifyAfterSec，默认 30 秒）。包级
@@ -96,14 +163,12 @@ func (a *App) notifyManagerOfQuestion(id string) {
 	a.deliverManagerNotice(q.SessionID, mgrQuestionNotice(q, askAlertDurText(a.Cfg.mgrNotifyAfterSec())))
 }
 
-// deliverManagerNotice 投一条要经理行动的通知：只投经理触达过的会话；经理
-// 主对话不存在时建出来（要它处理，值得建）；忙则插话，空闲落库并唤醒。
+// deliverManagerNotice 投一条要经理行动的通知：只投「经理投递开启的那一轮
+// 还在执行」的会话（轮次级授权，见文件头——窗口外的卡不通知，用户在场的轮
+// 用户自己看得见）；经理主对话不存在时建出来（要它处理，值得建）；忙则插话，
+// 空闲落库并唤醒。
 func (a *App) deliverManagerNotice(sessionID, text string) {
-	m, err := a.Store.Get(sessionID)
-	if err != nil {
-		return // 会话已删：无从判定关联，不打扰
-	}
-	if !a.managerLinked(m) {
+	if !a.managerTurnActive(sessionID) {
 		return
 	}
 	mgr, err := a.assistantSession()

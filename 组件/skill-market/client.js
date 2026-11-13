@@ -255,7 +255,7 @@
         '<div class="mk-suggest"><code>' + esc(sug) + '</code></div>' +
         '<div class="mk-suggest-acts"><button id="mk-use-suggested" class="mk-act">填入此地址</button>' +
         '<button id="mk-go-settings" class="mk-act ghost">手动设置</button></div>'
-        : '<br>到 设置 · 网络访问 · 企业技能包 / 工作流 的服务器地址里填（如 https://example.com:2227）。' +
+        : '<br>到 设置 · 网络访问 · 企业技能包 / 工作流 的服务器地址里填（如 https://jxaizz.com:2227）。' +
         '<div class="mk-suggest-acts"><button id="mk-go-settings" class="mk-act">去设置</button></div>') +
       '</div>';
     const use = $('mk-use-suggested');
@@ -714,7 +714,7 @@
       '<h4>企业技能包 / 工作流</h4>' +
       '<div class="set-field">' +
       '<div class="sf-label">企业技能包 / 工作流 / 小程序平台地址</div>' +
-      '<input id="set-market-url" class="pf-input" placeholder="https://example.com:2227" autocomplete="off" spellcheck="false">' +
+      '<input id="set-market-url" class="pf-input" placeholder="https://jxaizz.com:2227" autocomplete="off" spellcheck="false">' +
       '<p class="sf-desc">企业技能市场与小程序平台同一台服务端：填服务器地址即可（https://域名或IP:端口），清单与 /sites 等路径后缀由程序自动拼；改动即时生效，留空则市场页显示未配置。</p>' +
       '</div>' +
       '<div class="set-field">' +

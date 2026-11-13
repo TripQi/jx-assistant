@@ -4,7 +4,7 @@
 # 用法：
 #   sh install.sh                       # 从更新源下载最新版安装（需服务端已发布 Linux 附件）
 #   sh install.sh --file <tar.gz>       # 离线安装本地包
-#   sh install.sh --base https://example.com:2227   # 指定更新源
+#   sh install.sh --base https://jxaizz.com:2227   # 指定更新源
 #   sh install.sh --dest /opt/jx-assistant         # 指定安装目录
 #   sh install.sh --no-service          # 只放文件，不注册 systemd
 #   sh install.sh --insecure            # 下载源为自签证书时（curl -k）
@@ -13,7 +13,7 @@
 # config.json、data/、技能/、工作区 永不触碰——重复执行即为原地升级。
 set -eu
 
-BASE="https://example.com:2227"
+BASE="https://jxaizz.com:2227"
 DEST="/opt/jx-assistant"
 PKG_FILE=""
 NO_SERVICE=0

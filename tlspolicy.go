@@ -2,13 +2,13 @@
 //
 // 背景：自建 jxai-server 部署在企业内网时，绝大多数场景**拿不到公网证书**——要么
 // https 自签，要么证书只签了某个域名、用 IP 访问必然报
-// `x509: cannot validate certificate for 192.0.2.210 because it doesn't contain
+// `x509: cannot validate certificate for 192.168.0.210 because it doesn't contain
 // any IP SANs`。以前这类连接会被 TLS 校验拦死，向导里只显示"连不上"，让人误以为
 // 是端口/防火墙（2026-10-26 实测有人怀疑 2227 的 UDP 没放行，其实端口全通）。
 //
 // 规则（按目标主机判定，不看配置，不存在"改完设置才生效"的坑）：
 //
-//	**域名**（example.com、企业自建域名、api.deepseek.com…）→ 跳过证书校验
+//	**域名**（jxaizz.com、企业自建域名、api.deepseek.com…）→ 跳过证书校验
 //	    理由：域名只可能来自可信渠道——打包时写死的总服务器地址、向导里客户
 //	    自己填的地址、公告下发的地址。发布路径本身是安全的，证书不是它们的
 //	    安全边界（内网自建服务根本申请不到证书）。

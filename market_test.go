@@ -168,7 +168,7 @@ func writeTestPluginSrc(t *testing.T) string {
 
 func TestMarketViewUnconfigured(t *testing.T) {
 	a := newMarketTestApp(t, "")
-	a.Cfg.RemoteAccess = RemoteAccessCfg{Host: "example.com", Port: 2228}
+	a.Cfg.RemoteAccess = RemoteAccessCfg{Host: "jxaizz.com", Port: 2228}
 	code, out := callHandler(t, a.handleMarketView, "GET", "/api/market", "")
 	if code != 200 {
 		t.Fatalf("期待 200，收到 %d", code)
@@ -177,7 +177,7 @@ func TestMarketViewUnconfigured(t *testing.T) {
 		t.Fatalf("应未配置: %v", out)
 	}
 	// 建议值只给服务器地址（2026-11-03 口径）：清单后缀由程序自动拼
-	if out["suggested"].(string) != "https://example.com:2228" {
+	if out["suggested"].(string) != "https://jxaizz.com:2228" {
 		t.Fatalf("建议值不对: %v", out["suggested"])
 	}
 }

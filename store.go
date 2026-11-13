@@ -30,9 +30,10 @@ type StoredMessage struct {
 	SessionID  string `json:"sessionId"`
 	Seq        int64  `json:"seq"`
 	Kind       string `json:"kind"`
-	Origin     string `json:"origin,omitempty"` // summary 来源：auto | manual
+	Origin     string `json:"origin,omitempty"`  // summary 来源：auto | manual
 	Compact    string `json:"compact,omitempty"` // 规则压缩标记：非空=已折叠（"omit"=整行丢弃）；前端据此显示「已折叠」行，原文照常完整展示
 	CoversUpTo int64  `json:"coversUpTo,omitempty"`
+	CoversFrom int64  `json:"coversFrom,omitempty"` // 摘要覆盖起点 seq（与 coversUpTo 成对；auto 合并存累计起点，manual 存本次区间起点）
 	Superseded bool   `json:"superseded,omitempty"`
 	CreatedAt  string `json:"createdAt,omitempty"`
 	Thinking   string `json:"thinking,omitempty"` // assistant 该步的思考过程原文
@@ -330,6 +331,16 @@ var storeMigrations = []migration{
 		tolerant: true,
 		sql: []string{
 			`ALTER TABLE sessions ADD COLUMN voice_used INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// 摘要行的覆盖起点（与 covers_up_to 成对）：本次/累计压缩区间的下界
+		// seq。auto 合并存累计起点（合并链头部），manual 叠加存本次区间起点
+		//——增量式压缩的可检索标注（2026-11-11 用户要求），摘要文本头同写。
+		id:       "0016_message_covers_from",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE messages ADD COLUMN covers_from INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
 }
@@ -756,7 +767,7 @@ func permOf(m *SessionMeta) string {
 }
 
 // TouchRunMeta 只回写运行期会变化的列（用量计数与 updated_at）。列所有权约定
-//（同 SaveMeta 之于 status 的先例）：配置列（权限/能力/模型/思考档位等）只归
+// （同 SaveMeta 之于 status 的先例）：配置列（权限/能力/模型/思考档位等）只归
 // 配置写入口（PATCH / 权限升级函数）全量写；运行体热路径（appendMessage 系列、
 // 流尾用量回调）只碰运行列——否则拿着陈旧内存对象的全列回写会把用户刚在面板上
 // 改好的权限静默覆盖回旧值（运行中改权限丢失的根因）。
@@ -1070,10 +1081,10 @@ func (s *Store) appendRowLocked(id string, sm *StoredMessage) error {
 		compact = sm.Compact
 	}
 	_, err := s.db.Exec(`INSERT INTO messages
-		(session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, superseded, created_at, thinking)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, covers_from, superseded, created_at, thinking)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, sm.Seq, sm.Role, content, toolCalls, sm.ToolCallID, sm.Kind, sm.Origin,
-		compact, sm.CoversUpTo, boolInt(sm.Superseded), sm.CreatedAt, sm.Thinking)
+		compact, sm.CoversUpTo, sm.CoversFrom, boolInt(sm.Superseded), sm.CreatedAt, sm.Thinking)
 	if err != nil {
 		return err
 	}
@@ -1091,14 +1102,14 @@ func boolInt(b bool) int {
 	return 0
 }
 
-const messageCols = `id, session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, superseded, created_at, thinking`
+const messageCols = `id, session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, covers_from, superseded, created_at, thinking`
 
 func scanMessage(sc interface{ Scan(dest ...any) error }) (*StoredMessage, error) {
 	sm := &StoredMessage{}
 	var content, toolCalls, compact, thinking sql.NullString
 	var sup int
 	err := sc.Scan(&sm.ID, &sm.SessionID, &sm.Seq, &sm.Role, &content, &toolCalls,
-		&sm.ToolCallID, &sm.Kind, &sm.Origin, &compact, &sm.CoversUpTo, &sup, &sm.CreatedAt, &thinking)
+		&sm.ToolCallID, &sm.Kind, &sm.Origin, &compact, &sm.CoversUpTo, &sm.CoversFrom, &sup, &sm.CreatedAt, &thinking)
 	if err != nil {
 		return nil, err
 	}
@@ -1162,9 +1173,9 @@ func (s *Store) MessagesWithSeq(id string) ([]*StoredMessage, error) {
 // SummariesOf 取会话全部压缩摘要行（kind=summary，按 seq 升序）。会话详情接口
 // 用它把摘要行并入 UI 下发副本——前端要在压缩真实发生的位置显示常显的压缩
 // 卡片（覆盖到哪一条 + 展开看完整摘要）。MessagesWithSeq 的过滤口径不动
-//（历史读取工具等仍拿不到摘要行），只给界面这一份补齐。
+// （历史读取工具等仍拿不到摘要行），只给界面这一份补齐。
 func (s *Store) SummariesOf(id string) ([]*StoredMessage, error) {
-	rows, err := s.db.Query(`SELECT ` + messageCols + ` FROM messages WHERE session_id=? AND kind='summary' ORDER BY seq`, id)
+	rows, err := s.db.Query(`SELECT `+messageCols+` FROM messages WHERE session_id=? AND kind='summary' ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1177,6 +1188,7 @@ func (s *Store) SummariesOf(id string) ([]*StoredMessage, error) {
 	}
 	return out, rows.Err()
 }
+
 // RawMessages 分页读取原生历史（含摘要行，未做任何折叠），供历史查询工具与压缩使用。
 func (s *Store) RawMessages(id string, offset, limit int) ([]*StoredMessage, int, error) {
 	var total int

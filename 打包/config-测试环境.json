@@ -1,0 +1,18 @@
+{
+  "port": 8788,
+  "baseURL": "mock",
+  "remoteAccess": {
+    "enabled": true,
+    "host": "jxaizz.com",
+    "port": 2229,
+    "myId": "",
+    "pairKey": "",
+    "regKey": ""
+  },
+  "marketURL": "https://jxaizz.com:2229/market/manifest.json",
+  "registryURL": "https://jxaizz.com:2229",
+  "updateURL": "off",
+  "updateMode": "manual",
+  "publisherName": "测试员",
+  "wizardDone": true
+}

@@ -267,7 +267,12 @@ func main() {
 	}
 
 	log.Printf("坚祥数字助理（GO版）已启动: %s", url)
-	log.Printf("模型: %s @ %s（baseURL 填 mock 时为离线演示模式）", cfg.Model, cfg.BaseURL)
+	if len(cfg.Providers) == 0 {
+		log.Printf("模型: 还没有模型通道（在「设置 · 模型」添加提供方，或运行「公司接入向导」）")
+	} else {
+		t := app.DefaultTarget()
+		log.Printf("模型: %s @ %s（baseURL 填 mock 时为离线演示模式）", t.Model, t.BaseURL)
+	}
 	if *webDir != "" {
 		log.Printf("开发模式：前端从 %s 读取，修改后刷新浏览器即生效", *webDir)
 	}

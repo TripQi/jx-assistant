@@ -89,8 +89,10 @@ async function sendFeedback() {
     $('fb-text').value = '';
     fbImages = [];
     renderFbImages();
-    btn.textContent = '已发送 ✓';
-    setTimeout(() => { btn.textContent = '发送反馈'; }, 1500);
+    btn.textContent = '已提交 ✓';
+    const hint = $('fb-img-hint');
+    if (hint) hint.textContent = '已记录；连接了公司服务端时会同步一份供排查（若网络异常会稍后自动重试）';
+    setTimeout(() => { btn.textContent = '发送反馈'; }, 2500);
   } catch (e) {
     alert('发送失败：' + e.message);
     btn.textContent = '发送反馈';
@@ -124,7 +126,7 @@ function loadProvDraft(c) {
     publicBaseURL: p.publicBaseURL || '', // 外网备用地址（服务端下发，只读展示）
     via: p.via || '',               // 公司通道当前线路：lan=内网 / wan=外网
     quota: p.quota || null,         // 公司通道额度快照（服务端随公告下发）
-    portalURL: p.portalURL || '',   // 门户充值入口（2026-11-12）：额度区「去充值」按钮显隐
+    portalURL: p.portalURL || '',   // 门户充值入口（2026-11-13 充值组件）：卡片挂载点 dataset 带给组件判显隐
     models: (p.models || []).map((m) => ({
       id: m.id || '', name: m.name || '',
       contextWindow: m.contextWindow || 0, maxOutput: m.maxOutput || 0,
@@ -617,9 +619,19 @@ function renderProvCards() {
   const box = $('prov-list');
   if (!box) return;
   box.innerHTML = '';
+  // 新装（未接公司通道、也没自己添加）时列表是空的：给一句话说清下一步，
+  // 免得以为界面上漏了东西
+  if (!provDraft.length && !provNew) {
+    box.innerHTML = '<div class="skill-empty">还没有模型通道。点下方「添加提供方」自己接一个，或用「公司接入向导」一键接入公司通道。</div>';
+  }
   provDraft.forEach((p) => box.appendChild(buildProvCard(p, p.id)));
   // 草稿卡片常驻列表（收起只是折叠）：收起/切换卡片都不丢已输入的内容
   if (provNew) box.appendChild(buildProvCard(provNew, 'new'));
+  // 渲染完成通知（2026-11-13 充值组件）：卡片是全量重建的，组件往挂载点
+  // （.pf-card-slot）里放的按钮每次渲染都会随之消失——发一个事件让组件重新挂。
+  // 与 run:error / wizard:done 同为「主程序不认识组件、组件不碰主程序函数」的
+  // 通用对接点（JX.on 同步通知，见 app-core.js）。
+  if (window.JX && typeof JX.emit === 'function') JX.emit('prov:render');
 }
 
 function buildProvCard(p, key) {
@@ -872,16 +884,19 @@ function buildProvCard(p, key) {
       }
     };
     form.appendChild(refresh);
-    // 去充值（2026-11-12 充值入口）：服务端门户启用（p.portalURL 非空）就显示；
-    // 打开个人中心充值页，可给公司通道设备令牌或门户钱包充值
-    if (p.portalURL) {
-      const pay = document.createElement('button');
-      pay.className = 'pf-cancel';
-      pay.style.color = 'var(--accent)';
-      pay.textContent = '去充值';
-      pay.onclick = (e) => { e.stopPropagation(); openURLSystem(p.portalURL); };
-      form.appendChild(pay);
-    }
+  }
+
+  // 组件插槽（2026-11-13 充值组件）：公司通道卡片的按钮挂载点。充值组件监听
+  // prov:render 事件后往 .pf-card-slot 里放「充值」按钮（挂载点 dataset 带本卡
+  // portalURL，空则组件不放，空容器不占位）。这是通用机制：任何组件都能在此
+  // 贡献按钮，主程序只提供挂载点与渲染完成事件，不认识具体组件。
+  if (p.company) {
+    const slot = document.createElement('span');
+    slot.className = 'pf-card-slot';
+    slot.dataset.cxSlot = 'prov-actions';
+    slot.dataset.provId = p.id || '';
+    slot.dataset.portalURL = p.portalURL || '';
+    form.appendChild(slot);
   }
 
   // API 密钥：绝不回显，只标「已配置」，输入可替换

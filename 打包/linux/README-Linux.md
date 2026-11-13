@@ -14,7 +14,7 @@
 ## 一键安装（服务端已发布 Linux 附件时）
 
 ```sh
-curl -fsSL https://example.com:2227/linux/install.sh | sh
+curl -fsSL https://jxaizz.com:2227/linux/install.sh | sh
 ```
 
 或下载本目录的 install.sh 后：
@@ -29,7 +29,7 @@ sh install.sh            # 安装/升级到 /opt/jx-assistant 并注册 systemd 
 sh install.sh --file jx-assistant-linux-amd64.tar.gz
 ```
 
-常用参数：`--base <URL>` 更新源（默认 https://example.com:2227）、
+常用参数：`--base <URL>` 更新源（默认 https://jxaizz.com:2227）、
 `--dest <目录>` 安装位置（默认 /opt/jx-assistant）、`--no-service` 只放文件
 不注册 systemd、`--insecure` 允许自签证书下载源。
 

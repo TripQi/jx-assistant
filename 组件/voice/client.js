@@ -22,7 +22,8 @@
  *       模型文件齐备，未就绪时设置页切回云端。
  *
  * 3) 快捷键：默认鼠标侧键，可自定义键盘单键/组合键、甚至鼠标左右键同按
- *    （不允许单独的左键或右键）；点按切换与长按输入两种模式（设置页可切）。
+ *    （不允许单独的左键或右键）；触发方式默认**点按切换**（按一下开始、再按一下
+ *    结束），设置页可切成长按输入。
  *    主/副键帽框与录制器用主程序 HK 的共用控件（app-hotkeys.js），并经
  *    JX.registerHotkey 登记——设置·快捷键 总表里是同一份数据，两边改互相同步。
  *    仅在窗口聚焦时激活（失焦自动松手）。主输入框的占位灰字会像发送快捷键
@@ -97,7 +98,7 @@
      · 独按修饰键（如默认副键 Alt）：按住期间又按了别的键（用户在按 Alt+X
        组合）→ 解除不触发；点按模式在**独按松开**时触发，避免任何 Alt 组合误触。
      · 校验：不允许只剩单独的 mouse-left 或单独的 mouse-right（废掉正常点击/菜单）。
-     · 模式：tap=点按切换；hold=长按输入（按住说话、松开/失焦结束）。
+     · 模式：tap=点按切换（**默认**）；hold=长按输入（按住说话、松开/失焦结束）。
      仅窗口聚焦时激活；失焦自动清空按键状态并结束长按会话。纯字母/数字单键在
      输入框聚焦时不触发（字符要留给打字），组合键不受此限。 */
 
@@ -143,6 +144,16 @@
   }
   function voiceShortcutMode() {
     return pref.get('shortcutMode', 'tap') === 'hold' ? 'hold' : 'tap';
+  }
+  // 触发方式的产品默认＝**点按切换**（按一下开始、再按一下结束）；长按输入是可选项。
+  // 独立语音输入法的触发方式也跟这里走（主程序把它写进 voicetype.json 联动文件），
+  // 所以默认只在主程序这一处定。
+  // 存量归一（一次性）：早期版本没记"用户显式选过"，机器上可能留着一份从没主动选过
+  // 的 hold（旧版默认或验证脚本遗留），表现为"默认竟然是长按"。没有显式选择标记的
+  // hold 一律回到默认点按；用户之后在设置页主动选长按会打标记，不再被迁移。
+  function migrateShortcutModeDefault() {
+    if (pref.get('shortcutModeSet', false)) return;
+    if (pref.get('shortcutMode', null) === 'hold') pref.set('shortcutMode', 'tap');
   }
   function shortcutLabel() {
     const alts = shortcutAlternatives();
@@ -1585,13 +1596,14 @@
     const modeSel = document.createElement('select');
     modeSel.className = 'sp-select';
     const m1 = document.createElement('option');
-    m1.value = 'tap'; m1.textContent = '点按切换（按一下开始，再按一下结束）';
+    m1.value = 'tap'; m1.textContent = '点按切换（默认：按一下开始，再按一下结束）';
     const m2 = document.createElement('option');
     m2.value = 'hold'; m2.textContent = '长按输入（按住说话，松开结束）';
     modeSel.append(m1, m2);
     modeSel.value = voiceShortcutMode();
     modeSel.onchange = () => {
       pref.set('shortcutMode', modeSel.value === 'hold' ? 'hold' : 'tap');
+      pref.set('shortcutModeSet', true); // 记下"用户显式选过"：默认归一不再动它
       firedLatch = false;
       refreshShortcutPlaceholders();
     };
@@ -1751,6 +1763,11 @@
 
     init() {
       active = true;
+
+      // 先把触发方式归一到默认（点按切换）：必须在下面注册快捷键之前跑——主程序
+      // 在注册/HK 变更时把触发方式推进联动文件 voicetype.json，顺序反了就会先把
+      // 老的 hold 推给语音输入法。
+      migrateShortcutModeDefault();
 
       // 语音输入按钮（主对话与右栏子对话各一套）：按钮 DOM 在主程序 index.html 里
       //（位置与样式不变），默认带 .hidden——按钮属于本组件，由组件揭开并接管行为；

@@ -183,7 +183,7 @@ func TestBuildContextAfterFold(t *testing.T) {
 	}
 	_ = call
 	_ = tool
-	msgs := a.buildContext(sess, "SYS")
+	msgs := a.buildContext(sess, "SYS", 0)
 	joined := ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -688,7 +688,7 @@ func TestCompactIntervalUnits(t *testing.T) {
 
 // 间隔制迁移：老配置（百分比阈值+冷却的字段已删除）读入时补默认 间隔40万/
 // chars/模型线80；旧 off 保持自动压缩全关（间隔 0）并把模式归一为当前默认
-//（手动按钮的默认行为总要有一个）；新键齐全的配置原样保留（含显式 0 与非法
+// （手动按钮的默认行为总要有一个）；新键齐全的配置原样保留（含显式 0 与非法
 // 单位回落）。旧字段 compactMode/compactThreshold 原样保留，供旧版 exe 回滚。
 func TestConfigCompactIntervalMigration(t *testing.T) {
 	run := func(content string) *Config {
@@ -776,7 +776,7 @@ func TestConfigAPICompactKeysRoundTrip(t *testing.T) {
 
 // 字数预算保留算法：从最新一条往前累计模型可见字数，预算耗尽处（命中点）所在
 // 的轮整轮保留——保留区起点永远对齐到轮首，压缩边界只在轮与轮之间，绝不切轮
-//（命中轮自身超预算也一样：整轮保留）。
+// （命中轮自身超预算也一样：整轮保留）。
 func TestKeepStartSeq(t *testing.T) {
 	a := newCompactTestApp(t)
 	sess := &SessionMeta{ID: "s1", Mode: "task"}
@@ -921,7 +921,7 @@ func TestCompactHistoryIndependentOfMode(t *testing.T) {
 	join := func(mode string) string {
 		a.Cfg.CompactMode = mode
 		var b strings.Builder
-		for _, m := range a.buildContext(sess, "SYS") {
+		for _, m := range a.buildContext(sess, "SYS", 0) {
 			if s, ok := m.Content.(string); ok {
 				b.WriteString(s + "\n")
 			}
@@ -972,7 +972,7 @@ func TestCompactHistoryIndependentOfMode(t *testing.T) {
 	seedRound(t, a, "s2", "新一轮", false) // seq 8-9，边界后原文
 	a.Cfg.CompactMode = "rule"
 	var b strings.Builder
-	for _, m := range a.buildContext(s2, "SYS") {
+	for _, m := range a.buildContext(s2, "SYS", 0) {
 		if s, ok := m.Content.(string); ok {
 			b.WriteString(s + "\n")
 		}
@@ -1014,7 +1014,7 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 		t.Fatalf("一级后调用行应为动作行: %q", got)
 	}
 	// 组装：折叠边界注入提示，位于折叠内容之后、三轮原文之前
-	msgs := a.buildContext(sess, "SYS")
+	msgs := a.buildContext(sess, "SYS", 0)
 	joined := ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -1057,7 +1057,7 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 		t.Fatalf("已二级后重复点应报已折叠, got err=%v", err)
 	}
 	// 全折（三轮也折了）：提示缀在尾部，仍恰好 1 条
-	msgs = a.buildContext(sess, "SYS")
+	msgs = a.buildContext(sess, "SYS", 0)
 	joined = ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -1074,7 +1074,7 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 
 // 压缩后完整重发环境快照（resendEnvAfterCompact）：环境快照对模型是差分
 // 机制（首条整份、后续只发变化行），折叠/摘要会把差分所依附的完整基线埋掉
-//——之后模型手里只剩孤立差分行，或缺掉整段环境信息。压缩路径无条件落一条
+// ——之后模型手里只剩孤立差分行，或缺掉整段环境信息。压缩路径无条件落一条
 // 当前完整快照：基线被埋时它成为保留区首条可见快照，组装整份渲染；环境没变
 // 时重发行与保留区可见快照同文，差分为空不重复占上下文。
 func TestCompactResendsFullEnvSnapshot(t *testing.T) {
@@ -1096,7 +1096,7 @@ func TestCompactResendsFullEnvSnapshot(t *testing.T) {
 	seedRound(t, a, "s1", "三轮", false)
 	joinCtx := func() string {
 		joined := ""
-		for _, m := range a.buildContext(sess, "SYS") {
+		for _, m := range a.buildContext(sess, "SYS", 0) {
 			if s, ok := m.Content.(string); ok {
 				joined += s + "\n"
 			}

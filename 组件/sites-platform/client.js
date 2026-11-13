@@ -122,7 +122,7 @@
     let cfg = null;
     try { cfg = await api('/api/market'); } catch (e) {}
     if (!(cfg && cfg.configured)) {
-      alert('还没配置企业技能包 / 工作流 / 小程序平台地址：请到 设置 · 网络访问 填服务器地址（如 https://example.com:2227），技能市场与小程序平台同一台服务端。');
+      alert('还没配置企业技能包 / 工作流 / 小程序平台地址：请到 设置 · 网络访问 填服务器地址（如 https://jxaizz.com:2227），技能市场与小程序平台同一台服务端。');
       if (typeof openSettings === 'function') openSettings('network');
       return;
     }
@@ -145,7 +145,7 @@
       urlHtml =
         '<div class="set-field">' +
         '<div class="sf-label">企业技能包 / 工作流 / 小程序平台地址</div>' +
-        '<input id="set-market-url" class="pf-input" placeholder="https://example.com:2227" autocomplete="off" spellcheck="false">' +
+        '<input id="set-market-url" class="pf-input" placeholder="https://jxaizz.com:2227" autocomplete="off" spellcheck="false">' +
         '<p class="sf-desc">小程序平台（与技能市场同一台服务端）：填服务器地址即可（https://域名或IP:端口），/sites 等路径后缀由程序自动拼；改动即时生效。</p>' +
         '</div>';
     }

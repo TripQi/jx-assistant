@@ -140,6 +140,42 @@ func TestWizardConnectWrongServer(t *testing.T) {
 	}
 }
 
+// 向导连接时 provision 请求体带本机设备号（服务端据此落「人名\t设备号」设备级
+// 记录，充值到设备令牌的匹配链依赖它）；设备号为空则不带（老形态，逐字节一致）。
+func TestWizardConnectSendsDeviceID(t *testing.T) {
+	var gotBody map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"service":"jxai-server"}`))
+	})
+	mux.HandleFunc("POST /provision", func(w http.ResponseWriter, r *http.Request) {
+		gotBody = map[string]string{}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"company":"测试公司","api":null,"marketURL":"http://x/m.json","updateURL":"http://x/u"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// 有设备号：body 带 deviceId
+	a := newWizardTestApp(t)
+	a.Cfg.RemoteAccess.MyID = "jx-test01"
+	if code, resp := wizardCall(t, a.handleWizardConnect, `{"server":"`+srv.URL+`","user":"张三"}`); code != 200 {
+		t.Fatalf("connect 应 200: %d %v", code, resp)
+	}
+	if gotBody["deviceId"] != "jx-test01" {
+		t.Fatalf("provision body 应带 deviceId: %#v", gotBody)
+	}
+
+	// 设备号为空：body 不带 deviceId（与老客户端一致）
+	a2 := newWizardTestApp(t)
+	if code, resp := wizardCall(t, a2.handleWizardConnect, `{"server":"`+srv.URL+`","user":"李四"}`); code != 200 {
+		t.Fatalf("connect 应 200: %d %v", code, resp)
+	}
+	if _, ok := gotBody["deviceId"]; ok {
+		t.Fatalf("设备号为空时不应带 deviceId: %#v", gotBody)
+	}
+}
+
 // 广播目标推导：至少含全网广播，且没有回环/单播地址。
 func TestBroadcastTargets(t *testing.T) {
 	ts := broadcastTargets()

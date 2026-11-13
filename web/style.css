@@ -1520,14 +1520,6 @@ body.rp-open .w-handle { display: none; }
   flex: none; padding: 1px 8px; border-radius: 999px;
   background: var(--chip); color: var(--accent); font-size: 11.5px; white-space: nowrap;
 }
-/* 充值入口（2026-11-12）：模型弹层额度徽标旁 / 设置页公司通道卡片——额度紧张
-   或报余额类错误时出现的「充值 / 去充值」小按钮（服务端门户启用才有） */
-.pop-quota-pay, .pv-quota-pay {
-  flex: none; margin-left: 6px; padding: 1px 9px; border: none; border-radius: 999px;
-  background: var(--accent); color: #fff; font-size: 11.5px; white-space: nowrap;
-  cursor: pointer;
-}
-.pop-quota-pay:hover, .pv-quota-pay:hover { opacity: .88; }
 
 /* 权限面板：两列（左权限单选，右能力多选），单选/复选框统一靠右 */
 .perm-pop { padding: 10px; min-width: 520px; }

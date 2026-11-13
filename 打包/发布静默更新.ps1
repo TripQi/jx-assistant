@@ -44,6 +44,57 @@ if (-not $Version) { $Version = (Get-Date -Format "yyyyMMdd") + "V1" }
 
 $ErrorActionPreference = "Stop"
 $packDir = $PSScriptRoot
+
+# ---- 打 zip：条目名自己写，一律用 "/" --------------------------------------
+# 为什么不用 Compress-Archive：PS 5.1 那版是 .NET Framework 实现，条目名用反
+# 斜杠、目录条目以反斜杠结尾、external attrs 连目录位都没有（.NET Framework 不做
+# ZIP 规范要求的 "\"→"/" 转换）。客户端 Go 的 unzip 因此认不出这种目录条目，先把
+# 它解成一个同名文件，下一层条目再要它当目录时整包失败——2026-11-13 线上
+# voice-1.3.8.zip 让每台安装版的组件静默更新全灭，就是这条链路：
+#   mkdir ...\voicetype\go-webview2\.github: The system cannot find the path specified.
+# 客户端侧已补规范化（skills.go unzip），包里也不该再产出这种条目名。
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function New-CleanZip {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceDir,
+    [Parameter(Mandatory = $true)][string]$ZipPath,
+    [string[]]$ExcludeDirs = @(".git", ".github", ".vscode", ".idea", "__pycache__", "node_modules"),
+    [string[]]$ExcludeFiles = @("*.log", "*.exe~", "*.bmp", "*.tmp")
+  )
+  if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+  $src = (Resolve-Path $SourceDir).Path.TrimEnd('\')
+  $fs = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+  try {
+    $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+      Get-ChildItem -LiteralPath $src -Recurse -Force -File | ForEach-Object {
+        $rel = $_.FullName.Substring($src.Length + 1).Replace('\', '/')
+        $skip = $false
+        foreach ($seg in $rel.Split('/')) { if ($ExcludeDirs -contains $seg) { $skip = $true } }
+        foreach ($pat in $ExcludeFiles) { if ($_.Name -like $pat) { $skip = $true } }
+        if ($skip) { return }
+        $entry = $zip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
+        $es = $entry.Open()
+        $ins = [System.IO.File]::OpenRead($_.FullName)
+        try { $ins.CopyTo($es) } finally { $ins.Dispose(); $es.Dispose() }
+      }
+    } finally { $zip.Dispose() }
+  } finally { $fs.Dispose() }
+}
+
+# 产物自检：条目名带反斜杠的包，客户端解压会出各种怪问题（目录条目必挂）
+function Assert-CleanZip {
+  param([Parameter(Mandatory = $true)][string]$ZipPath)
+  $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    $bad = @($zip.Entries | Where-Object { $_.FullName.Contains('\') })
+    if ($bad.Count -gt 0) {
+      throw ("zip 条目名含反斜杠，客户端解压会整包失败：{0}（首条 {1}）" -f $ZipPath, $bad[0].FullName)
+    }
+  } finally { $zip.Dispose() }
+}
 $root = Split-Path -Parent $packDir
 $outDir = Join-Path $packDir "静默更新\$Version"
 if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
@@ -64,7 +115,7 @@ if ($ExeSource -ne "") {
   if ($LASTEXITCODE -ne 0) { throw "go build 失败" }
 }
 $engineZip = Join-Path $outDir "engine-$Version.zip"
-Compress-Archive -Path $exe -DestinationPath $engineZip -CompressionLevel Optimal
+New-CleanZip -SourceDir $work -ZipPath $engineZip
 Remove-Item $work -Recurse -Force
 
 # ---- 组件块：整目录打包，版本读 manifest.json ----
@@ -112,7 +163,7 @@ if ($组件 -ne "") {
     if ($dropped.Count -gt 0) {
       Write-Host ("== 已剔除组件运行时残留：{0}" -f ($dropped -join '、'))
     }
-    Compress-Archive -Path (Join-Path $clean "*") -DestinationPath (Join-Path $outDir $zipName) -CompressionLevel Optimal
+    New-CleanZip -SourceDir $clean -ZipPath (Join-Path $outDir $zipName)
     Remove-Item $clean -Recurse -Force
     $compArgs += "-component", "$id=$zipName"
   }
@@ -137,10 +188,8 @@ if ($Runtime) {
   # 版本标记写进包内：客户端据此判断"已经是最新，不必重下几百兆"
   Set-Content -Path (Join-Path $rtDir ".version") -Value $RuntimeVersion -Encoding ASCII
   $runtimeZip = Join-Path $outDir "runtime-$RuntimeVersion.zip"
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  # 用 .NET 压缩（Compress-Archive 会漏掉 .version 这种点开头的文件）
-  [IO.Compression.ZipFile]::CreateFromDirectory($rtDir, $runtimeZip,
-    [IO.Compression.CompressionLevel]::Optimal, $false)
+  # 与其它块同一套打包器：条目名一律 "/"，点开头的 .version 也要进包
+  New-CleanZip -SourceDir $rtDir -ZipPath $runtimeZip
   $runtimeArgs += "-runtime", (Split-Path -Leaf $runtimeZip), "-runtime-version", $RuntimeVersion
 }
 
@@ -164,9 +213,7 @@ if ($Skills) {
   }
   $skillsZip = Join-Path $outDir "skills-builtin.zip"
   Write-Host ("== 打包内置技能块（{0}）" -f ($packed -join "、"))
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [IO.Compression.ZipFile]::CreateFromDirectory($stageSkills, $skillsZip,
-    [IO.Compression.CompressionLevel]::Optimal, $false)
+  New-CleanZip -SourceDir $stageSkills -ZipPath $skillsZip
   Remove-Item $stageSkills -Recurse -Force
   # 文件名带上内容哈希前缀：内容变了就是新文件，客户端中途下载不会撞上"同名但内容已换"
   $skHash = (Get-FileHash $skillsZip -Algorithm SHA256).Hash.ToLower().Substring(0, 16)
@@ -181,6 +228,12 @@ if ($安装包 -ne "") {
   if (-not (Test-Path $安装包)) { throw "安装包不存在：$安装包" }
   Copy-Item $安装包 $outDir -Force
   $installerArg += "-installer", (Split-Path -Leaf $安装包)
+}
+
+# ---- 出包自检：所有 zip 的条目名必须是规范正斜杠（带反斜杠的目录条目客户端解压必挂）----
+Get-ChildItem $outDir -File -Filter *.zip | ForEach-Object {
+  Assert-CleanZip -ZipPath $_.FullName
+  Write-Host ("   zip 自检通过 {0}" -f $_.Name)
 }
 
 # ---- 发布命令 + 校验表 ----

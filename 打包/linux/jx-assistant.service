@@ -1,6 +1,6 @@
 [Unit]
 Description=jx-assistant (坚祥数字助理 本地服务)
-Documentation=https://example.com:2227
+Documentation=https://jxaizz.com:2227
 After=network-online.target
 Wants=network-online.target
 

@@ -237,6 +237,16 @@ var streamHTTP = &http.Client{
 // 外网，免得次次先等内网拨号超时）；内网恢复后外网先失败即自动切回。
 var altPreferred sync.Map // providerID → bool（true=优先外网）
 
+// ErrNoModelChannelText 没有任何可用模型通道时的报错文案。出厂不预置通道
+// （见 config.go DefaultConfig），新装未接公司通道时发送必然命中它。前端按
+// 这段文字识别并挂「接入公司通道」按钮（web/app-chat.js 的 NO_CHANNEL_HINT），
+// 改文案要两边一起改。
+const ErrNoModelChannelText = "还没有可用的模型通道：点「接入公司通道」接入公司通道，或到「设置 · 模型」自己添加一个提供方"
+
+// errNoModelChannel 上面文案的哨兵错误：isRetryableModelErr 据此判定「配置类
+// 错误、重试无用」（不再白跑 5 次自动重试）。
+var errNoModelChannel = errors.New(ErrNoModelChannelText)
+
 // StreamChat 向解析后的 LLM 目标发起一轮流式对话。
 // target.BaseURL 配为 "mock" 时走内置演示模型，便于离线验证整条链路。
 // target.Protocol 选渠道协议（""＝OpenAI 兼容 chat/completions、anthropic、
@@ -246,6 +256,13 @@ var altPreferred sync.Map // providerID → bool（true=优先外网）
 func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb StreamCallbacks) error {
 	if target.BaseURL == "mock" {
 		return mockStream(req, cb)
+	}
+	// 还没有任何模型通道（新装未接公司通道、也没自己添加）：给出可执行的指引，
+	// 而不是去请求一个空地址报底层 URL 错误。前端按 ErrNoModelChannelText 的
+	// 文案特征在报错条里挂「接入公司通道」按钮（web/app-chat.js showRunError），
+	// 两处文案要保持一致。
+	if strings.TrimSpace(target.BaseURL) == "" {
+		return errNoModelChannel
 	}
 	proto := protocolOf(target.Protocol)
 	body, err := proto.marshal(target, req)
@@ -473,6 +490,11 @@ func isModelUnavailableErr(err error) bool {
 // （用户点了停止，绝不重试）。
 func isRetryableModelErr(err error) bool {
 	if err == nil || isOverflowError(err) {
+		return false
+	}
+	// 配置类错误（没有任何模型通道）重试一万次也一样：直接报错，让前端把
+	// 「接入公司通道」按钮给出来，别让用户干等 5 次自动重试
+	if errors.Is(err, errNoModelChannel) {
 		return false
 	}
 	s := err.Error()

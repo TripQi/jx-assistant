@@ -22,14 +22,14 @@ func TestRelaxedTLSFor(t *testing.T) {
 		why  string
 	}{
 		// 域名：一律免校验
-		{"example.com", true, "公司公网域名"},
-		{"nas.example.org", true, "老域名"},
+		{"jxaizz.com", true, "公司公网域名"},
+		{"jxkj.mycloudnas.com", true, "老域名"},
 		{"api.deepseek.com", true, "第三方 API（按用户口径也放宽）"},
 		{"open.bigmodel.cn", true, "第三方 API"},
 		{"nas", true, "单标签内网名"},
 		{"jxai-server.local", true, "mDNS 名"},
 		// 内网 / 回环 / 链路本地 IP：免校验
-		{"192.168.0.10", true, "内网（本次报错的地址）"},
+		{"192.168.0.210", true, "内网（本次报错的地址）"},
 		{"10.1.2.3", true, "10/8"},
 		{"172.20.1.1", true, "172.16/12"},
 		{"127.0.0.1", true, "回环"},
@@ -81,7 +81,7 @@ func TestCompanyTransportAcceptsSelfSigned(t *testing.T) {
 // companyTLSConfig 是 WSS 拨号用的：判定口径必须与 http 侧完全一致，
 // 否则会出现"向导能进、中继连不上"这类割裂。
 func TestCompanyTLSConfigMatchesPolicy(t *testing.T) {
-	for _, host := range []string{"192.0.2.210", "example.com", "8.8.8.8"} {
+	for _, host := range []string{"192.168.0.210", "jxaizz.com", "8.8.8.8"} {
 		cfg := companyTLSConfig(host)
 		if cfg.InsecureSkipVerify != relaxedTLSFor(host) {
 			t.Fatalf("%s：TLSConfig.InsecureSkipVerify=%v 与 relaxedTLSFor=%v 不一致",

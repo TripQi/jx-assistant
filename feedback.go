@@ -1,6 +1,8 @@
 // 问题反馈：客户端（本机 / 局域网 / 远程中继）一键上报问题或建议，
-// 结构对齐工单：标题 + 正文 + 截图（0~4 张）。只做「接收 + 入库/存图」，
-// 不广播、不提供查看接口（以后要看得查库）。
+// 结构对齐工单：标题 + 正文 + 截图（0~4 张）。本机「接收 + 入库/存图」为
+// 主路径（永远成功、用户永远看到「已提交」）；已连接公司服务端时另异步
+// 上报一份给服务端收集（见文末「上报公司服务端」——2026-11-13 起反馈
+// 不再「只进不出」，服务端管理页「反馈」页签可查看）。
 //
 // 防注入与安全口径：
 //   - SQL 一律参数化占位符（项目惯例，modernc.org/sqlite），无任何字符串拼接；
@@ -10,13 +12,17 @@
 //   - 图片按文件头（magic bytes）识别类型，只收 png/jpeg/gif/webp，
 //     不信任扩展名与 Content-Type；每张限 10MB、每条反馈限 4 张；
 //   - 图片存文件系统 data/feedback-files/<反馈id>-<序号>.<ext>，与库记录按 id 关联。
+
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -167,5 +173,96 @@ func (a *App) handleFeedbackCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "反馈保存失败: "+err.Error())
 		return
 	}
+	// 已连接公司服务端（向导接入且未停用公司通道）→ 异步上报一份给服务端收集
+	//（失败不影响用户「已提交」的体验：静默记日志 + 进程内稍后重试）
+	if base := a.feedbackServerBase(); base != "" {
+		paths := make([]string, len(saved))
+		for i, s := range saved {
+			paths[i] = s.path
+		}
+		go a.reportFeedbackToServer(base, id, kind, title, content, sessionID, diagnostics, paths)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "id": id, "images": len(saved)})
+}
+
+/* ---------- 上报公司服务端（2026-11-13：反馈从「只存本机」升级为「本机+服务端收集」） ---------- */
+
+// 服务端接收接口（jxaiserver feedback.go）：同一份代码的企业端与总服务端共用。
+const feedbackReportPath = "/api/feedback/report"
+
+// feedbackReportClient 上报专用 client（自签证书策略与公告/市场同源：tlspolicy.go）。
+var feedbackReportClient = newCompanyHTTPClient(30 * time.Second)
+
+// feedbackServerBase 当前已连接的公司服务端基地址；空 = 未连接（只存本机）。
+func (a *App) feedbackServerBase() string {
+	if a.Cfg.CompanyLinkOff {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(a.Cfg.WizardServer), "/")
+}
+
+// reportFeedbackToServer 把一条已本机入库的反馈上报到公司服务端。上报内容与本机
+// 存的一致（类型/标题/正文/截图/诊断信息），另带设备号与客户端版本；**不带任何
+// API key/token**（设备号是远程接入的公开标识，非凭据）。失败退避重试两轮
+//（60s、5min，进程内），仍失败只记日志——服务端按 clientId 去重，将来重发无副作用。
+func (a *App) reportFeedbackToServer(base, id, kind, title, content, sessionID, diagnostics string, imgPaths []string) {
+	device := strings.TrimSpace(a.Cfg.RemoteAccess.MyID)
+	var lastErr error
+	for attempt, wait := range []time.Duration{0, time.Minute, 5 * time.Minute} {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		if err := a.postFeedbackOnce(base, id, kind, title, content, sessionID, diagnostics, device, imgPaths); err == nil {
+			if attempt > 0 {
+				log.Printf("[反馈] 重试上报成功（%s，第 %d 次）", id, attempt+1)
+			}
+			return
+		} else {
+			lastErr = err
+			log.Printf("[反馈] 上报公司服务端失败（%s，第 %d 次）: %v", id, attempt+1, err)
+		}
+	}
+	log.Printf("[反馈] %s 上报最终未成功（本机记录完好；服务端恢复后可由用户重发或忽略）: %v", id, lastErr)
+}
+
+// postFeedbackOnce 单次上报：multipart 与服务端接收接口同构。
+func (a *App) postFeedbackOnce(base, id, kind, title, content, sessionID, diagnostics, device string, imgPaths []string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("clientId", id) // 本机反馈 id：服务端按它去重
+	_ = mw.WriteField("kind", kind)
+	_ = mw.WriteField("title", title)
+	_ = mw.WriteField("content", content)
+	_ = mw.WriteField("sessionId", sessionID)
+	_ = mw.WriteField("diagnostics", diagnostics)
+	_ = mw.WriteField("deviceId", device)
+	_ = mw.WriteField("version", appVersion)
+	for _, p := range imgPaths {
+		data, err := os.ReadFile(p) // 本机已落盘的截图，重读重发
+		if err != nil {
+			continue
+		}
+		hw, err := mw.CreateFormFile("images", filepath.Base(p))
+		if err != nil {
+			continue
+		}
+		_, _ = hw.Write(data)
+	}
+	_ = mw.Close()
+
+	req, err := http.NewRequest(http.MethodPost, base+feedbackReportPath, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := feedbackReportClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return fmt.Errorf("服务端应答 HTTP %d", resp.StatusCode)
 }

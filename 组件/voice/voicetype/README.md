@@ -108,7 +108,7 @@
 | 0 | 前台窗口属于本进程（悬浮窗自己） | 否 |
 | 1 | explorer 的桌面/图标列表（Progman / WorkerW / SHELLDLL_DefView / SysListView32） | 否 |
 | 2 | `GetGUIThreadInfo` 有 caret（含 rcCaret 尺寸非 0） / 原生可编辑控件类名（Edit / RichEdit* / Scintilla / _WwG） | 是 |
-| 3 | UIA 焦点元素：Edit、ComboBox 且启用非只读 → 是；Document/Custom/Group/Pane 带**可写** ValuePattern → 是；带 ValuePattern 但**只读**（网页正文就是这种）→ 否；Chromium 窗口里键盘可聚焦且不是按钮/菜单/滚动条一类 → 是 | 视情况 |
+| 3 | UIA 焦点元素：Edit、ComboBox 且启用非只读 → 是；Document/Custom/Group/Pane 带**可写** ValuePattern → 是；带 ValuePattern 但**只读**（网页正文就是这种）→ 否；Chromium 窗口里键盘可聚焦、**带 TextPattern** 且不是按钮/菜单/滚动条一类 → 是（contenteditable 富文本如 ql-editor 就是这种；滚动容器无 TextPattern，不放行） | 视情况 |
 | 4 | 进程名兜底（只给 UIA 给不出信号的 Qt 自绘应用，如微信 4.x） | 是 |
 
 为什么必须留着第 0 层和第 3 层（Go 版相对 Electron 版的两处差异，都是实测坑）：
@@ -121,7 +121,7 @@
   那两条判据在浏览器里等于恒真，于是"没输入框也粘"。UIA 能区分：网页正文是
   `Document` + ValuePattern 只读，网页 textarea / WebView2 输入框是 `Edit` + 可写。
 
-实测对照（2026-11-03，本机）：
+实测对照（2026-11-03，本机；最后一行 2026-11-11 补）：
 
 | 场景 | 判定 | 结果 |
 |---|---|---|
@@ -131,6 +131,12 @@
 | Edge 网页里的 textarea | `uia_editable` | 注入 |
 | 数字助理输入框（WebView2） | `uia_editable` | 注入 |
 | 微信 4.x（Qt，UIA 无信号） | `process_allowlist` | 注入 |
+| 网页滚动容器（DeepSeek 点空白处，焦点落 ds-virtual-list：Group、无 ValuePattern、**无 TextPattern**） | `no_signal` | 只复制 |
+| contenteditable 富文本（ql-editor：Group、无 ValuePattern、**有 TextPattern**） | `chromium_optimistic` | 注入 |
+
+> Group/Pane 无 ValuePattern 时，TextPattern 是 contenteditable（可输入）与滚动容器
+> （不可输入）的唯一区分度——两者同为「分组 + 可聚焦」，2026-11-11 同机同页实测
+> 确认。滚动容器放进剪贴板就是它落到 `no_signal`（浏览器刻意不在进程兜底名单）。
 
 判定实现只有一份：`vt_target_windows.go` 的 `vtEditabilityGate`（别处不要再写
 bool 版，两份判据迟早漂移）。`vt.log` 每次都会记一行 `目标判定: gate=... | 现场`，

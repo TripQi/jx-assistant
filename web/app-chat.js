@@ -5373,6 +5373,11 @@ function pendingHint(view, text) {
    带「重试」按钮（重试不再重复落库用户消息，后台直接带着当前上下文再跑一轮）。
    正常完成与用户手动停止都不产生任何内容。 ---------- */
 
+// NO_CHANNEL_HINT 后端「还没有可用的模型通道」报错的文案特征（Go 侧常量
+// ErrNoModelChannelText，见 llm.go）：命中的报错条挂「接入公司通道」按钮，
+// 省得用户去翻设置。改文案要两边一起改。
+const NO_CHANNEL_HINT = '还没有可用的模型通道';
+
 function showRunError(view, text) {
   view = view || mainView;
   const box = viewEl(view, 'run-error');
@@ -5393,8 +5398,19 @@ function showRunError(view, text) {
   retry.type = 'button';
   retry.textContent = '重试';
   retry.onclick = () => retryRun(view);
-  // 注：这里不放「去充值」——余额类报错分不清是员工额度用完还是中转站上游
-  // 缺额度（2026-11-12 用户口径：误导性的引导宁可不做）。
+  // 没有模型通道（出厂不预置通道，新装没接公司通道就是这种态）：直接给入口，
+  // 点一下打开接入公司浮窗，不用先去设置里找向导。
+  let wizard = null;
+  if (text.indexOf(NO_CHANNEL_HINT) >= 0) {
+    wizard = document.createElement('button');
+    wizard.className = 're-btn re-retry';
+    wizard.type = 'button';
+    wizard.textContent = '接入公司通道';
+    wizard.onclick = () => {
+      hideRunError(view, true);
+      if (typeof openWizard === 'function') openWizard();
+    };
+  }
   // 反馈：把这条报错一键带进 设置→关于 的反馈表单（远程用户的主报修通道）
   const fb = document.createElement('button');
   fb.className = 're-btn re-retry';
@@ -5412,7 +5428,13 @@ function showRunError(view, text) {
   close.onclick = () => hideRunError(view, true);
   box.appendChild(icon);
   box.appendChild(msg);
+  if (wizard) box.appendChild(wizard);
   box.appendChild(retry);
+  // 报错条按钮的组件插槽（2026-11-13 充值组件）：主程序不判定「余额不足」也
+  // 不认识充值组件，只广播本条报错的文本与容器——组件自己按词表（与 llm.go
+  // quotaWords 同源）决定要不要在「重试」旁加「去充值」。组件关闭时无人监听，
+  // 按钮自然不存在。
+  if (window.JX && typeof JX.emit === 'function') JX.emit('run:error', { text, box, view });
   box.appendChild(close);
 }
 
@@ -7202,7 +7224,6 @@ async function loadModels() {
     state.defaultProvider = d.defaultProvider || '';
     state.defaultModel = d.defaultModel || '';
     state.companyQuota = d.companyQuota || null; // 公司通道额度（服务端随公告下发）
-    state.portalURL = d.portalURL || '';         // 门户充值入口（2026-11-12：portal 启用才有；「去充值」按钮显隐）
     syncComposer();
   } catch (e) { state.models = []; }
 }
@@ -7312,9 +7333,7 @@ function renderModelPop(view) {
       // （通道仍可用，只是走的公网地址——不再让用户误以为不可用）
       const viaBadge = !m.providerOff && m.providerVia === 'wan'
         ? '（<span style="color:var(--green,#1f9d55)">外网通道中</span>）' : '';
-      // 公司通道这一组：分组头右侧直接带额度（服务端随公告下发，只读）。
-      // 额度已用完（status=2 或剩余≤0）时**原位换成「充值」按钮**（2026-11-12
-      // 用户口径：只有积分归零才出现充值按钮，不做低额度渐进提示）。
+      // 公司通道这一组：分组头右侧直接带额度（服务端随公告下发，只读）
       let quotaBadge = '';
       if (m.providerId === 'company-internal' && companyQuota) {
         const q = companyQuota;
@@ -7325,12 +7344,7 @@ function renderModelPop(view) {
         tip += ' · 规则：' + (q.periodText || '') + (q.points ? '，每次 ' + fmtPoints(q.points) + ' 积分' : '');
         tip += q.nextAt ? ' · 下次重置 ' + q.nextAt.replace('T', ' ').slice(0, 16) : ' · 不自动重置';
         tip += '（由公司服务端与中转站结算；设置·模型的公司通道卡片里可刷新）';
-        const exhausted = !q.unlimited && (q.status === 2 || (q.remainPoints || 0) <= 0);
-        if (exhausted && state.portalURL) {
-          quotaBadge = `<button class="pop-quota-pay" title="额度已用完——打开个人中心充值页" onclick="event.stopPropagation();openURLSystem(${JSON.stringify(state.portalURL)})">额度已用完 · 充值</button>`;
-        } else {
-          quotaBadge = `<span class="pop-quota" title="${esc(tip)}">${esc(txt)}</span>`;
-        }
+        quotaBadge = `<span class="pop-quota" title="${esc(tip)}">${esc(txt)}</span>`;
       }
       html += `<div class="pop-group">${esc(m.providerName)}${m.providerOff ? '（已停用）' : viaBadge}${quotaBadge}</div>`;
       lastProv = m.providerId;
@@ -7342,6 +7356,18 @@ function renderModelPop(view) {
     html += `<button class="pop-item model-item ${k === cur ? 'sel' : ''}${modelPopExpand === k && hasLv ? ' exp' : ''}${m.providerOff ? ' off' : ''}" data-key="${esc(k)}"><span>${esc(m.modelName || m.modelId)}</span>${hasLv ? arrow : ''}</button>`;
   }
   pop.innerHTML = html;
+  if (!(state.models || []).length) {
+    // 新装未接公司通道、也没自己添加通道：菜单只剩「默认（未配置）」会让用户
+    // 不知道下一步做什么，直接把「接入公司通道」做成可点的行。
+    pop.insertAdjacentHTML('beforeend',
+      '<button class="pop-item model-wizard" type="button">接入公司通道…</button>' +
+      '<div class="pop-group">还没有模型通道：也可以到「设置 · 模型」自己添加一个提供方</div>');
+    const wiz = pop.querySelector('.model-wizard');
+    if (wiz) wiz.onclick = () => {
+      closePopovers();
+      if (typeof openWizard === 'function') openWizard();
+    };
+  }
   pop.querySelectorAll('.model-item').forEach((b) => {
     const key = b.dataset.key;
     // 悬停整行：有档位就在右侧浮出它的思考档位，悬到无档位的行则收起（仅真 hover 指针）
@@ -8229,8 +8255,9 @@ function renderAttachments(view) {
 }
 
 /* 粘贴与拖拽投放：都只入附件区，不碰工作区。
-   粘贴只吃剪贴板里的文件对象（截图、网页复制的图片），纯文本粘贴原样放行；
-   从资源管理器复制文件再粘贴时 Chromium 只给路径文本、拿不到文件对象，本轮不做。 */
+   粘贴吃剪贴板里的文件对象（截图、网页复制的图片、资源管理器复制的文件——
+   WebView2/Chromium 157 实测 CF_HDROP 也会读成 File 对象送到 paste 事件，证据
+   见 gui-test/ctxmenu-paste-diag.mjs），纯文本粘贴原样放行。 */
 function setupAttachDrop(view) {
   // 投放目标是输入卡本身，不是 composer-wrap：首页时输入卡被搬进页面中央的问候区
   // （wrap 里根本没有它），绑在 wrap 上会漏掉首页那次投放

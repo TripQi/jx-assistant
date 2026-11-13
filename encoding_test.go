@@ -5,6 +5,7 @@ package main
 // 纯函数用例零环境敏感；工具级用例只碰临时文件（不起子进程、不碰真实沙箱）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -79,6 +80,50 @@ func TestEncodeGBKRejectsEmoji(t *testing.T) {
 	}
 }
 
+// CP936 的单字节 0x80 是欧元符号 €：必须认成 GBK 并原样写回，否则含 € 的老
+// GBK 文件会被判「编码未知」，edit 时静默变成 UTF-8（Windows 存盘的 GBK
+// 报价单/批处理里就有这种字节，实测可复现）。
+func TestGBKDecodeEncodeCP936Euro(t *testing.T) {
+	raw := append(append(gbkBytes(t, "价格："), 0x80), gbkBytes(t, "100 元\n")...)
+	if got := detectTextEncoding(raw); got != EncGBK {
+		t.Fatalf("含 0x80(€) 的 GBK 文件应判为 GBK，实得 %v", got)
+	}
+	text, enc := decodeText(raw)
+	if !strings.Contains(text, "价格：€100 元") {
+		t.Fatalf("0x80 应解成 €，实得 %q", text)
+	}
+	back, err := encodeText(text, enc)
+	if err != nil {
+		t.Fatalf("含 € 的文本应按 GBK 编回: %v", err)
+	}
+	if !bytes.Equal(back, raw) {
+		t.Fatalf("GBK 写回字节应与原文一致\n原: %x\n回: %x", raw, back)
+	}
+}
+
+// 64KB 探测窗口可能正好切开一个汉字：必须退尾字节重试认出 GBK，否则
+// run_command 的读面会按 UTF-8 走——只读命令靠重跑兜底，写类命令不重跑，
+// GBK 内容会被按 UTF-8 误解后写出去。
+func TestProbeTextFileSplitsMultibyteAtProbeWindow(t *testing.T) {
+	dir := t.TempDir()
+	line := gbkBytes(t, "这是一行用于测试大文件的中文内容，长度固定。\r\n")
+	// 前置一个 ASCII 字节，让第 64KB 边界落在某个汉字的两个字节之间
+	body := append([]byte("x"), bytes.Repeat(line, 66000/len(line)+1)...)
+	if got := detectTextEncoding(body[:64*1024]); got == EncGBK {
+		t.Fatal("样本构造有误：64KB 截断处应正好切开一个汉字")
+	}
+	p := filepath.Join(dir, "big_gbk.txt")
+	if err := os.WriteFile(p, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := probeTextFile(p); got != EncGBK {
+		t.Fatalf("大 GBK 文件应探测为 GBK，实得 %v", got)
+	}
+	if m, _ := detectEncodingMode(dir, `Get-Content big_gbk.txt`, ""); m != encodingModeGBK {
+		t.Fatalf("大 GBK 文件应走 gbk 读面，实得 %q", m)
+	}
+}
+
 func TestLooksMojibake(t *testing.T) {
 	cases := []struct {
 		s    string
@@ -86,10 +131,10 @@ func TestLooksMojibake(t *testing.T) {
 	}{
 		{"正常中文：销售订单与采购订单的执行情况", false},
 		{"混排 English 与数字 123，标点：；！", false},
-		{"閿€鍞崟鍒楄〃", true},                  // 典型 UTF-8→GBK 误码
-		{"hello \uFFFD world", true},        // 有损解码的替换符
-		{"这里有一个字：銆", false},              // 单个特征字不误伤
-		{"銆锛", true},                        // 两个特征字才判乱码
+		{"閿€鍞崟鍒楄〃", true},            // 典型 UTF-8→GBK 误码
+		{"hello \uFFFD world", true}, // 有损解码的替换符
+		{"这里有一个字：銆", false},          // 单个特征字不误伤
+		{"銆锛", true},                 // 两个特征字才判乱码
 		{"中文 English 混排，偶尔出现鏄字", false},
 	}
 	for _, c := range cases {
@@ -380,5 +425,47 @@ func TestWriteWarnsWhenOverwritingGBK(t *testing.T) {
 	raw, _ := os.ReadFile(target)
 	if got := detectTextEncoding(raw); got != EncUTF8 {
 		t.Fatalf("write 后应为 UTF-8，实得 %v", got)
+	}
+}
+
+// 含 €（CP936 单字节 0x80）的 GBK 文件：read 不该报「编码无法确定」，
+// edit 必须仍写 GBK——修复前这里会被静默改写成 UTF-8（真实 Windows
+// 存盘的 GBK 报价单就是这种字节）。
+func TestEditKeepsGBKWithCP936Euro(t *testing.T) {
+	a := newCapTestApp(t, "data-enc-edit-euro-test")
+	ws, _ := filepath.Abs(roTestWS(t))
+	sess := &SessionMeta{ID: "s1", Mode: "task", Permission: permFull, Workspace: ws}
+	mustCreateSession(t, a, sess)
+
+	target := filepath.Join(ws, "gbk欧元验证.txt")
+	orig := append(append(gbkBytes(t, "价格："), 0x80), gbkBytes(t, "100 元\n")...)
+	if err := os.WriteFile(target, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readOut, err := runReadFile(&toolContext{ctx: context.Background(), app: a, sess: sess, toolName: "read"},
+		json.RawMessage(fmt.Sprintf(`{"path":%q}`, target)))
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if strings.Contains(readOut, "编码无法确定") || !strings.Contains(readOut, "GBK 编码") {
+		t.Fatalf("含 € 的 GBK 文件应判为 GBK，实得: %q", readOut)
+	}
+	editOut, err := runEditFile(&toolContext{ctx: context.Background(), app: a, sess: sess, toolName: "edit"},
+		json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"价格：€100 元","new_string":"价格：€200 元"}`, target)))
+	if err != nil {
+		t.Fatalf("编辑失败: %v", err)
+	}
+	if !strings.Contains(editOut, "保持原 GBK 编码写回") {
+		t.Fatalf("成功文案应注明保持原编码，实得: %q", editOut)
+	}
+	raw, _ := os.ReadFile(target)
+	if got := detectTextEncoding(raw); got != EncGBK {
+		t.Fatalf("写回后应仍是 GBK，实得 %v", got)
+	}
+	if !bytes.Contains(raw, []byte{0x80}) {
+		t.Fatalf("€ 应仍以单字节 0x80 存放，实得字节: %x", raw)
+	}
+	if text, _ := decodeText(raw); !strings.Contains(text, "价格：€200 元") {
+		t.Fatalf("写回内容不正确: %q", text)
 	}
 }

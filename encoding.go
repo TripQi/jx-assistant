@@ -103,8 +103,8 @@ func detectTextEncoding(b []byte) TextEncoding {
 	return EncUnknown
 }
 
-// gbkStructure 校验字节能否完整切分成 GBK 双字节 / GB18030 四字节序列。
-// ASCII 区（0x00-0x7F）两族共用；0x80/0xFF 在 GBK 中未定义，直接判否。
+// gbkStructure 校验字节能否完整切分成 GBK 单字节 / 双字节 / GB18030 四字节序列。
+// ASCII 区（0x00-0x7F）两族共用；0xFF 在 GBK 中未定义，直接判否。
 func gbkStructure(b []byte) (ok bool, hasFour bool) {
 	for i := 0; i < len(b); {
 		c := b[i]
@@ -112,7 +112,15 @@ func gbkStructure(b []byte) (ok bool, hasFour bool) {
 			i++
 			continue
 		}
-		if c == 0x80 || c == 0xFF {
+		// 0x80 是 CP936（Windows 936）里的单字节欧元符号 €。x/text 的 GBK 解码器
+		// 把它解成 €、编码器又把 € 编回 0x80，故必须当合法单字节放行：GBK 规范
+		// 虽未给 0x80 分配字符，但 Windows 存盘的老 GBK 文件里 € 就是这一个字节，
+		// 判否会把它归到「编码未知」，edit 随后就会把文件静默改写成 UTF-8。
+		if c == 0x80 {
+			i++
+			continue
+		}
+		if c == 0xFF {
 			return false, false
 		}
 		if i+3 < len(b) && b[i+1] >= 0x30 && b[i+1] <= 0x39 {
@@ -249,6 +257,10 @@ func encodeText(s string, enc TextEncoding) ([]byte, error) {
 }
 
 // probeTextFile 读文件头部（64KB）探测编码；文件不存在返回 EncUnknown。
+// 尾部可能正好切开一个多字节字符（GBK 双字节 / GB18030 四字节），结构校验会
+// 因此整块判否——退掉 1~3 个尾字节重试，让大 GBK 文件不被误判成「编码未知」
+// （误判的后果是 run_command 的读面按 UTF-8 走：只读命令靠乱码检测重跑兜底，
+// 写类命令不重跑，于是 GBK 内容被按 UTF-8 误解后写出去）。
 func probeTextFile(path string) TextEncoding {
 	f, err := os.Open(path)
 	if err != nil {
@@ -257,7 +269,16 @@ func probeTextFile(path string) TextEncoding {
 	defer f.Close()
 	buf := make([]byte, 64*1024)
 	n, _ := f.Read(buf)
-	return detectTextEncoding(buf[:n])
+	b := buf[:n]
+	if enc := detectTextEncoding(b); enc != EncUnknown {
+		return enc
+	}
+	for cut := 1; cut <= 3 && cut < len(b); cut++ {
+		if enc := detectTextEncoding(b[:len(b)-cut]); enc != EncUnknown {
+			return enc
+		}
+	}
+	return EncUnknown
 }
 
 const mojibakeSample = "銆锛鈥鍜閿鑴娴鏂绋缂鍐鑻鏈宸璁鏄鍚瀹鎴缁鍒鏃鍙锟"

@@ -600,7 +600,7 @@ func runWriteFile(t *toolContext, args json.RawMessage) (string, error) {
 
 func editFileTool() Tool {
 	return Tool{
-		Spec: toolSpec("edit", "对既有文本文件做局部修改：把 old_string 字面量替换为 new_string（匹配时 CRLF/LF 行尾视为等价，写回自动保持文件原行尾风格）。非 UTF-8 文件（GBK/GB18030/UTF-16）按原编码解码后匹配、并按**原编码写回**（GBK 文件仍是 GBK、BOM 保留）；new_string 含原编码无法表示的字符（如 emoji 写进 GBK 文件）时直接报错、文件不改——改用 write 以 UTF-8 保存。默认要求 old_string 在文件中恰好出现一次（多次出现时给出更长的片段或设 replace_all）。只读档被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
+		Spec: toolSpec("edit", "对既有文本文件做局部修改：把 old_string 字面量替换为 new_string（匹配时 CRLF/LF 行尾视为等价，写回自动保持文件原行尾风格）。非 UTF-8 文件（GBK/GB18030/UTF-16）按原编码解码后匹配、并按**原编码写回**（GBK 文件仍是 GBK、BOM 保留）；new_string 含原编码无法表示的字符（如 emoji 写进 GBK 文件）时直接报错、文件不改——改用 write 以 UTF-8 保存；编码无法确定（既非合法 UTF-8 也非合法 GB 族）的文件按 UTF-8 无 BOM 写回，并在结果里注明。默认要求 old_string 在文件中恰好出现一次（多次出现时给出更长的片段或设 replace_all）。只读档被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 sandbox_permissions=full 与 justification 重试一次即可申请放行（弹审批）。",
 			objSchema(map[string]any{
 				"path":                strProp("文件路径"),
 				"old_string":          strProp("要被替换的原文（需保证唯一）"),
@@ -694,8 +694,13 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	// write 覆盖随之放行（对齐 DSH「刚编辑过视为已观察」）。
 	t.markObserved(path)
 	keepNote := ""
-	if enc.needsPreserveBytes() {
+	switch {
+	case enc.needsPreserveBytes():
 		keepNote = fmt.Sprintf("（保持原 %s 编码写回）", enc)
+	case enc == EncUnknown:
+		// 编码无法确定的文件只能按 UTF-8 落盘；写回时明确说出来，不能让编码
+		// 在模型不知情的情况下悄悄变掉。
+		keepNote = "（原文件编码无法确定，已按 UTF-8 无 BOM 写回）"
 	}
 	return fmt.Sprintf("已编辑 %s（替换 %d 处）%s%s", filepath.ToSlash(path), replaced, keepNote,
 		readBackNote(outBytes, readBack, verified, false)), nil

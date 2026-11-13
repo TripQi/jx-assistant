@@ -40,6 +40,8 @@ func newQueueTestApp(t *testing.T) (*App, *SessionMeta) {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 默认模型体系：会话没手选时一律跟全局默认模型
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	// 执行体收尾会向声明式组件广播 run.end：测试里给一个空注册表（真进程由
 	// NewApp 建好），免得 nil 指针在收尾路径上打日志
 	a.Components = &ComponentRegistry{}

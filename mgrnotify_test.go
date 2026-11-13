@@ -35,7 +35,11 @@ func newMgrNotifyTestApp(t *testing.T) (a *App, mgr, task, solo *SessionMeta) {
 	a.initRuntime()
 	a.sessLocks = map[string]*sync.Mutex{}
 	a.Cfg.Workspace = t.TempDir()
-	a.Cfg.Providers = nil
+	// 通知链要真的跑模型轮（经理被叫醒后要用工具代答），配一个离线 mock 渠道
+	// 当全局默认模型：BaseURL=mock 不要密钥，也不会真的发请求。
+	a.Cfg.Providers = []ProviderCfg{{ID: "mock", Name: "离线演示", BaseURL: "mock",
+		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}}}}
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	mk := func(id, title, mode, dispatchedBy string) *SessionMeta {
 		m := &SessionMeta{ID: id, Title: title, Mode: mode, Workspace: a.Cfg.Workspace,
 			Permission: permWorkspace, DispatchedBy: dispatchedBy, CreatedAt: now(), UpdatedAt: now()}

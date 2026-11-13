@@ -28,7 +28,7 @@ func TestCallAuditRowCarriesModel(t *testing.T) {
 	a := newCompactTestApp(t)
 	a.initRuntime()
 	a.Cfg.Workspace = t.TempDir()
-	a.Cfg.Providers = []ProviderCfg{{ID: "fakep", Name: "假渠道", BaseURL: srv.URL,
+	a.Cfg.Providers = []ProviderCfg{{ID: "fakep", Name: "假渠道", BaseURL: srv.URL, APIKey: "test",
 		Models: []ModelCfg{{ID: "fake-m"}}}}
 	// 默认模型体系：会话没手选时跟全局默认模型（必设，不再拿第一个渠道充数）
 	a.Cfg.DefaultModel = ModelRef{Provider: "fakep", Model: "fake-m"}

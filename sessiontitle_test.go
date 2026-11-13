@@ -24,7 +24,7 @@ import (
 )
 
 // fakeLLMServer 起一个 OpenAI 兼容的 SSE 假模型：无 tools 的请求回复 *reply
-//（指向变量的指针：测试中途可切换后续回复）。sysGot 非空时记录最近一次请求
+// （指向变量的指针：测试中途可切换后续回复）。sysGot 非空时记录最近一次请求
 // 的 system 提示词（E2E 断言 worker 用的命名规则版式用）。
 func fakeLLMServer(t *testing.T, reply *string, sysGot *string) *httptest.Server {
 	t.Helper()
@@ -60,7 +60,11 @@ func newTitleTestApp(t *testing.T, llmURL string) *App {
 	a := newCompactTestApp(t)
 	a.initRuntime()
 	a.Cfg.Workspace = t.TempDir()
-	a.Cfg.Providers = nil
+	a.Cfg.Providers = []ProviderCfg{{ID: "fakep", Name: "假渠道", BaseURL: llmURL, APIKey: "test",
+		Models: []ModelCfg{{ID: "fake-m"}}}}
+	// 默认模型体系：会话没手选模型时跟全局默认模型（空着会报「还没有设置全局
+	// 默认模型」，渠道 Key 也不能为空——新语义下两者都会在发请求前就被拒）
+	a.Cfg.DefaultModel = ModelRef{Provider: "fakep", Model: "fake-m"}
 	a.Cfg.BaseURL = llmURL
 	a.Cfg.Model = "fake-model"
 	return a
@@ -287,7 +291,9 @@ func TestSessionTitleWorkerEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runEnd := func() { a.emitComponentHooks("run.end", map[string]any{"sessionID": "s-e2e", "status": "done", "error": ""}) }
+	runEnd := func() {
+		a.emitComponentHooks("run.end", map[string]any{"sessionID": "s-e2e", "status": "done", "error": ""})
+	}
 	titleOf := func() string {
 		m, _ := a.Store.Get("s-e2e")
 		if m == nil {

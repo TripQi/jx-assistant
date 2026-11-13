@@ -1244,6 +1244,11 @@ func (a *App) appendMessageThinking(sess *SessionMeta, m Message, thinking strin
 // modelTries 与 modelRetryDelays 是模型调用失败后的自动重试参数：总共尝试
 // 5 次（首次 + 4 次重试），失败间隔 1s/2s/3s/4s 递增——网络抖动/网关瞬断
 // 通常在数秒内恢复；连不通 5 次就停手，等人工处理好环境再点「重试」。
+//
+// 只管**非连接类**的瞬态错误（限流 429、网关 5xx、流中途断开）：连接类失败
+// 由拨号层的 1/2/3/4/5s 阶梯（llm.go connRetryDelays，最多 6 次尝试）包完，
+// 整步层不接（isRetryableModelErr 对「无法连接模型服务」返回 false）——两层
+// 各做满会把最坏等待放大成 5×15=75 秒，用户会以为卡死。
 const modelTries = 5
 
 var modelRetryDelays = [modelTries - 1]time.Duration{
@@ -1369,9 +1374,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 		var calls []ToolCall
 		var usage *Usage // 本步流尾用量（审计行用；网关不带 usage 则为 nil）
 		// 模型调用（含网络自动重试）：同一请求最多尝试 modelTries 次，失败间隔
-		// 1s/2s/3s/4s 递增；等待可用停止按钮打断。瞬态网络故障（连接失败、
-		// 超时、流中途断开、网关 5xx/限流 429）自动重试；请求级错误（鉴权/
-		// 余额/模型不存在/请求非法）与上下文超限重试无益，直接交给下方兜底。
+		// 1s/2s/3s/4s 递增；等待可用停止按钮打断。瞬态业务错误（流中途断开、
+		// 网关 5xx/限流 429）自动重试；**连接类失败（connFailure）不在这一层
+		// 重试**——拨号层已经把同一地址 1/2/3/4/5s、最多 6 次尝试做完了，这里
+		// 再叠一次只会把等待放大成分钟级（见 llm.go isRetryableModelErr）；
+		// 请求级错误（鉴权/余额/模型不存在/请求非法）与上下文超限重试无益，
+		// 直接交给下方兜底。
 		// 每次尝试都从零累积输出：上一次失败尝试流出的半截作废（前端收到
 		// retry 事件也同步清掉），成功后从完整输出继续。
 		var err error

@@ -245,7 +245,8 @@ var altPreferred sync.Map // providerID → bool（true=优先外网）
 // target.BaseURL 配为 "mock" 时走内置演示模型，便于离线验证整条链路。
 // target.Protocol 选渠道协议（""＝OpenAI 兼容 chat/completions、anthropic、
 // responses，实现见 llmproto.go）；配了外网备用地址（AltBaseURL，公司通道由
-// 公告下发）且主地址连接失败时，自动改走备用地址重试一次，成功后粘住备用
+// 公告下发）且主地址把自己的拨号重试探梯（connRetryDelays，1/2/3/4/5s）跑完
+// 仍连接失败时，自动改走备用地址（备用地址同样跑一遍阶梯），成功后粘住备用
 // 地址直到它再失败——故障转移对三种协议一视同仁。
 func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb StreamCallbacks) error {
 	if target.BaseURL == "mock" {
@@ -341,11 +342,20 @@ func markAltPreferred(target LLMTarget, preferAlt bool) {
 	setAltPreferred(target.ProviderID, preferAlt)
 }
 
-// connRetryBackoff 拨号瞬断（拒连/连接重置）在单次连接内「短退避再试同一地址
-// 一次」的等待时长。只补一次、只在本层：外层 agent.go 的整步重试（5 次 ×
-// 1/2/3/4s）语义不变，两层叠加后每次尝试的间隔只多出这 200ms（计时测试的
-// 容差 400ms 内）。
-var connRetryBackoff = 200 * time.Millisecond
+// connRetryDelays 拨号瞬断（拒连/连接重置/连接被强制关闭/管道断开/unexpected
+// eof）的重试探梯：首试失败后按 1s、2s、3s、4s、5s 依次退避重试**同一地址**，
+// 最多 5 次重试——合计最多 6 次尝试、最坏约 15 秒。
+//
+// 早先只补一次、间隔 200ms：对「代理内核正在切节点」这类真实的瞬断太短，等同
+// 直接报错（用户 2026-11-13 反馈「200ms 太短」）。阶梯只由本处集中定义，任何
+// 退避数值都从这里取，别在调用点再散落魔法数。
+//
+// 只在拨号层退避：外层 agent.go 的整步重试（5 次 × 1/2/3/4s）**不接连接类
+// 失败**（isRetryableModelErr 对「无法连接模型服务」返回 false）——两层各做满
+// 会把最坏等待放大成 5×(1+2+3+4+5)=75 秒，用户会以为程序卡死。
+var connRetryDelays = []time.Duration{
+	1 * time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second,
+}
 
 // sleepCtx 等 d，期间 ctx 取消（用户点停止/插话打断）立即返回 false，绝不睡满。
 func sleepCtx(ctx context.Context, d time.Duration) bool {
@@ -365,28 +375,40 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // streamProtoOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体，
 // 三种协议共用：端点路径、鉴权头与流解析都来自 proto）。
 //
-// 顺序固定为：**主地址首试失败 → 短退避再试主地址一次 → 仍失败才由 StreamChat
-// 改走备用地址（alt）**。短退避只认拨号瞬断（连接被拒/连接重置，见
+// 顺序固定为：**先在这个地址上把 connRetryDelays 的整条阶梯跑完（首试 +
+// 1s/2s/3s/4s/5s 各重试一次，最多 6 次尝试）→ 仍失败才由 StreamChat 改走
+// 备用地址（alt），alt 也按同一阶梯从首试开始跑一遍**。主地址没跑完自己的
+// 阶梯，绝不去碰备用地址（内网地址只是瞬断时不该提前切外网）。
+//
+// 阶梯只认拨号瞬断（连接被拒/重置/强制关闭/管道断开/unexpected eof，见
 // isDialTransient）；429 限流、鉴权失败、余额不足、模型不存在、上下文超限都是
 // 业务错误，压根不是 connFailure，走不到这里；超时/域名解析/证书也不重试。
+// 每一步等待都走 sleepCtx：ctx 取消（用户点停止/插话打断）立即放弃，不睡满。
 func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
 	url := baseURL + proto.path
 	// 拨号目标：端点地址的 host:port（也就是 target.BaseURL 的 host:port）。
 	// 只用于报错细节，不参与请求构造——不为此改任何签名。
 	target := urlHost(url)
 	if cb.OnRequest != nil {
-		cb.OnRequest(url, body)
+		cb.OnRequest(url, body) // 只报一次：本次调用（含阶梯重试）是同一个请求
 	}
-	err := streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
-	var cf *connFailure
-	if !errors.As(err, &cf) || !cf.retryable || ctx.Err() != nil {
-		return err
+	var err error
+	for i := 0; ; i++ {
+		err = streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
+		var cf *connFailure
+		if !errors.As(err, &cf) || !cf.retryable || ctx.Err() != nil {
+			return err
+		}
+		if i >= len(connRetryDelays) { // 阶梯跑完：交给 StreamChat 决定要不要切备用地址
+			return err
+		}
+		delay := connRetryDelays[i]
+		log.Printf("[模型] %s 拨号瞬断（%s），%s 后重试同一地址（第 %d/%d 次重试）",
+			target, cf.kind, delay, i+1, len(connRetryDelays))
+		if !sleepCtx(ctx, delay) {
+			return err // ctx 取消：立即退出（不睡满），也不再多试
+		}
 	}
-	log.Printf("[模型] %s 拨号瞬断（%s），%s 后重试同一地址一次", target, cf.kind, connRetryBackoff)
-	if !sleepCtx(ctx, connRetryBackoff) {
-		return err // ctx 取消：立即退出（不睡满），也不再多试
-	}
-	return streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
 }
 
 // streamProtoTry 向一个地址实发一次请求：构造请求 → 拨号/收响应头 → 状态码
@@ -629,17 +651,27 @@ func isModelUnavailableErr(err error) bool {
 	return containsAnyFold(s, hardWords)
 }
 
-// isRetryableModelErr 判断一次模型调用失败是否值得自动重试。值得的是瞬态
-// 网络类：连接失败/超时（"无法连接模型服务"）、流中途断开（parseSSE 抛出的
-// 原始 IO 错误）、网关 5xx 与限流 429。请求级错误（400/401/402/403/404——
-// 请求非法/鉴权失败/余额不足/模型不存在）换个时机结果一样；上下文超限交给
+// isRetryableModelErr 判断一次模型调用失败是否值得在**整步层**自动重试（
+// agent.go 的 5 次 × 1/2/3/4s）。值得的是瞬态业务类：流中途断开（parseSSE
+// 抛出的原始 IO 错误）、网关 5xx 与限流 429。请求级错误（400/401/402/403/404
+// ——请求非法/鉴权失败/余额不足/模型不存在）换个时机结果一样；上下文超限交给
 // overflowCompact 兜底——两者都不在此重试。调用方还需自行排除 ctx 取消
 // （用户点了停止，绝不重试）。
+//
+// 连接类失败（"无法连接模型服务"，含报「请求已取消」形态的那一种）**不在这里
+// 重试**：拨号层（streamProtoOnce → connRetryDelays）已经把同一地址 1/2/3/4/5s、
+// 最多 6 次尝试做完了。两层叠乘会把最坏等待放大到 5×15=75 秒（分钟级），用户
+// 会以为程序卡死；「连接建立不通」这类重试同一件事由拨号层做一次就够。
+// 被取消的请求本来也不该重试（与原先一样不重试，既有语义不变）。
 func isRetryableModelErr(err error) bool {
 	if err == nil || isOverflowError(err) {
 		return false
 	}
 	s := err.Error()
+	// 连接类失败：拨号层已把阶梯跑完，整步层不再叠乘（见函数注释里的动机）
+	if strings.Contains(s, "无法连接模型服务") || isConnFailure(err) {
+		return false
+	}
 	for _, sc := range []int{400, 401, 402, 403, 404} {
 		if strings.Contains(s, fmt.Sprintf("模型服务返回 %d", sc)) {
 			return false

@@ -1613,6 +1613,14 @@ body.rp-open .w-handle { display: none; }
 }
 .prov-add button:hover { color: var(--accent); border-color: rgba(77, 107, 254, .4); }
 
+/* 设置 · 模型页「默认模型」：每行是 下拉 + 右侧当前实际生效值（不可用时红字） */
+.dm-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dm-row .pf-input { flex: 0 0 280px; }
+.dm-eff { font-size: 11px; color: var(--text-3); }
+.dm-eff.bad { color: #c22f2f; }
+/* 这两行比其余表单项宽（右边要摆「当前生效」文字），不被 .set-field 的 420px 卡住 */
+#default-model-block .set-field { max-width: none; }
+
 /* 设置页：上下文压缩 */
 .compact-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 /* 设置 · 对话历史与压缩：长期助理主对话按版本管理（新建一版为主入口，压缩次之）。

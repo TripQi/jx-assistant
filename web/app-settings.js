@@ -403,6 +403,7 @@ async function openSettings(pane) {
   provNew = null;
   resetProvDraft(c);
   renderProvCards();
+  loadDefaultModels(); // 模型页下方「默认模型」两块（与服务端算好的生效值一起）
   selRefs.compactMode.set(c.compactMode === 'llm' ? 'llm' : 'rule');
   $('set-keepchars').value = c.keepChars || 100000; // 10 万字 ≈ 7.5 万 token
   $('set-compact-interval').value = c.compactInterval != null ? Math.round(c.compactInterval / 1000) : 400;
@@ -854,7 +855,116 @@ async function reloadProviders() {
   resetProvDraft(c);
   // 不清 provNew：「添加提供方」的草稿卡片由保存/取消按钮显式处理，避免重载时误丢输入
   renderProvCards();
-  loadModels();
+  await loadModels();
+  await loadDefaultModels(); // 渠道/模型变了：默认模型下拉与「当前生效」跟着算一次
+}
+
+/* ---------- 模型页：默认模型（全局默认 / 派发任务默认） ----------
+   两个显式默认都由服务端算好「当前实际生效值」（跟随主会话时也算到具体模型，
+   不让用户自己推）。保存是即时接口，不跟着卡片底部的「保存」。 */
+let dmCache = null;
+
+async function loadDefaultModels() {
+  if (!(state.models || []).length) {
+    try { await loadModels(); } catch (e) { /* 模型清单拿不到：按空清单渲染 */ }
+  }
+  try { dmCache = await api('/api/default-models'); } catch (e) { dmCache = null; }
+  renderDefaultModels();
+}
+
+// 默认模型下拉：按渠道分组（与对话区模型菜单那套分组一致），
+// value = provider|keyId|modelId（modelKeyOf，重名模型靠 Key 归属区分）。
+function defaultModelOptions() {
+  let html = '<option value="">— 未设置 —</option>';
+  const groups = new Map();
+  for (const m of (state.models || [])) {
+    const k = m.providerId + '\u0000' + (m.providerName || m.providerId) + '\u0000' + (m.providerOff ? '1' : '');
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(m);
+  }
+  for (const [k, list] of groups) {
+    const [pid, pname, off] = k.split('\u0000');
+    html += '<optgroup label="' + esc(pname) + (off ? '（已停用）' : '') + '">';
+    for (const m of list) {
+      const v = modelKeyOf(m.providerId, m.keyId, m.modelId);
+      const label = (m.modelName || m.modelId) + (m.keyLabel ? '（' + m.keyLabel + '）' : '');
+      html += '<option value="' + esc(v) + '"' + (off ? ' disabled' : '') + '>' + esc(label) + '</option>';
+    }
+    html += '</optgroup>';
+  }
+  return html;
+}
+
+// 行右侧的生效值：可用＝灰字「当前生效：…」；未设置/不可用＝红字。
+function dmSetEff(el, view, suffix) {
+  if (!el) return;
+  const v = view || {};
+  const text = v.text || '';
+  let out, bad = false;
+  if (!text) {
+    out = v.error || '未设置';
+    bad = true;
+  } else if (v.available) {
+    out = '当前生效：' + text + (suffix ? '（' + suffix + '）' : '');
+  } else {
+    out = '不可用：' + (v.error || '');
+    bad = true;
+  }
+  el.textContent = out;
+  el.classList.toggle('bad', bad);
+}
+
+function renderDefaultModels() {
+  const selG = $('set-default-model');
+  const modeSel = $('set-dispatch-mode');
+  const selD = $('set-dispatch-model');
+  if (!selG || !modeSel || !selD) return;
+  const g = (dmCache && dmCache.global) || {};
+  const d = (dmCache && dmCache.dispatch) || {};
+  const opts = defaultModelOptions();
+  selG.innerHTML = opts;
+  selG.value = g.provider ? modelKeyOf(g.provider, g.providerKey, g.model) : '';
+  modeSel.value = d.mode === 'custom' ? 'custom' : 'follow';
+  selD.innerHTML = opts;
+  const eff = d.ref || {};
+  selD.value = eff.provider ? modelKeyOf(eff.provider, eff.providerKey, eff.model) : '';
+  selD.style.display = modeSel.value === 'custom' ? '' : 'none';
+  dmSetEff($('set-default-model-eff'), g, '');
+  dmSetEff($('set-dispatch-model-eff'), eff, modeSel.value === 'custom' ? '' : '跟随主会话');
+}
+
+async function saveDefaultModels() {
+  const toRef = (v) => {
+    const p = v ? v.split('|') : [];
+    return { provider: p[0] || '', providerKey: p[1] || '', model: p[2] || '' };
+  };
+  const custom = $('set-dispatch-mode').value === 'custom';
+  try {
+    dmCache = await api('/api/default-models', {
+      method: 'POST',
+      body: JSON.stringify({
+        global: toRef($('set-default-model').value || ''),
+        dispatch: custom ? toRef($('set-dispatch-model').value || '') : null,
+      }),
+    });
+    renderDefaultModels();
+    loadModels(); // 首页输入框的「默认模型」名跟着刷新
+  } catch (e) {
+    alert('保存默认模型失败：' + (e.message || e));
+    loadDefaultModels();
+  }
+}
+
+if ($('set-default-model')) {
+  $('set-default-model').onchange = () => { void saveDefaultModels(); };
+  $('set-dispatch-model').onchange = () => { void saveDefaultModels(); };
+  // 切到「指定渠道 + 模型」但还没选模型时不存（服务端会拒「没选全」），等选完再存
+  $('set-dispatch-mode').onchange = () => {
+    const custom = $('set-dispatch-mode').value === 'custom';
+    $('set-dispatch-model').style.display = custom ? '' : 'none';
+    if (custom && !$('set-dispatch-model').value) return;
+    void saveDefaultModels();
+  };
 }
 
 function renderProvCards() {

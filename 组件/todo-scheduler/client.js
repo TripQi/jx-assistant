@@ -28,12 +28,15 @@
     weekly: '每周某几天', weekdays: '仅工作日', interval: '每隔（分钟）',
   };
   const STATUS_LABEL = { ok: '完成', failed: '失败', running: '执行中' };
+  // 待办「任务模型」三档（与 todo.go 的 todoModel* 常量对应）：空/未写＝跟随派发设置
+  const MODEL_MODE_LABEL = { dispatch: '跟随派发设置', global: '全局默认模型', custom: '指定模型' };
   const TRIGGER_LABEL = { schedule: '定时', manual: '手动', 'catch-up': '补跑' };
   const PAGE_TITLE = '待办与定时任务';
 
   /* 运行期状态：清单 + 工作目录候选 + 界面开关。 */
   const st = {
     tasks: [], records: [], missed: [], store: '',
+    models: [],       // /api/models 的清单（表单里「指定模型」下拉的分组来源）
     tab: 'todo',      // 子页签：todo=待执行（默认，现在的页面） | done=已完成
     workspaces: [], busy: false, armedDelete: '', expanded: {}, open: {}, editing: null,
     page: false,      // 本页是否正占着主列
@@ -326,6 +329,9 @@
     html += '<div class="td-meta">';
     html += '<span><b>' + (cmd ? '工作目录' : '执行目标') + '</b>：' +
       (cmd ? esc(t.dir || '未指定（编辑里选一个）') : esc(t.target === 'task' ? '新的工作任务' : '长期助理')) + '</span>';
+    // AI 任务：模型三档 + 当前实际生效值（服务端算好；不可用时红字带原因）。
+    // 点这一行＝打开编辑弹窗，直接改模型档位。
+    if (!cmd) html += modelMetaHTML(t);
     if (t.enabled && t.schedule.kind === 'manual') html += '<span>不定时 · 手动执行</span>';
     if (t.enabled && t.nextRunAt) html += '<span><b>下次执行</b>：' + fmt(t.nextRunAt) + '</span>';
     html += '<span><b>上次执行</b>：' + fmt(t.lastRunAt) + '</span>';
@@ -366,6 +372,19 @@
     }
     html += '</div>';
     return html + '</div>';
+  }
+
+  /* 卡片「模型：跟随派发设置（生效：DC3 · deepseek-v4.1-flash-1017）」那一行。
+     值全部来自服务端 modelView（三档取值链算出的当前实际生效值）；点一下打开编辑
+     弹窗改档位。不可用时红字带原因（不静默）。 */
+  function modelMetaHTML(t) {
+    const mv = t.modelView || {};
+    const mode = t.modelMode === 'global' || t.modelMode === 'custom' ? t.modelMode : 'dispatch';
+    let line = '模型：' + MODEL_MODE_LABEL[mode];
+    if (mv.text) line += '（' + (mv.available ? '生效：' + mv.text : '不可用：' + (mv.error || '')) + '）';
+    else line += '（' + (mv.error || '未设置') + '）';
+    return '<button type="button" class="td-link td-model' + (mv.available ? '' : ' bad') + '"' +
+      ' data-act="edit" data-id="' + esc(t.id) + '" title="改任务模型">' + esc(line) + '</button>';
   }
 
   function onListClick(e) {
@@ -442,12 +461,35 @@
 
   /* ---------- 表单 ---------- */
 
+  /* 表单/卡片共用的模型下拉：按渠道分组（与设置页、对话区模型菜单同一种分组），
+     value = provider|keyId|modelId（重名模型靠 Key 归属区分）。 */
+  function modelOptions(picked) {
+    let html = '<option value="">— 请选择渠道 + 模型 —</option>';
+    const groups = new Map();
+    for (const m of (st.models || [])) {
+      const k = m.providerId + '\u0000' + (m.providerName || m.providerId) + '\u0000' + (m.providerOff ? '1' : '');
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(m);
+    }
+    for (const [k, list] of groups) {
+      const [pid, pname, off] = k.split('\u0000');
+      html += '<optgroup label="' + esc(pname) + (off ? '（已停用）' : '') + '">';
+      for (const m of list) {
+        const v = m.providerId + '|' + (m.keyId || '') + '|' + m.modelId;
+        const label = (m.modelName || m.modelId) + (m.keyLabel ? '（' + m.keyLabel + '）' : '');
+        html += '<option value="' + esc(v) + '"' + (v === picked ? ' selected' : '') + (off ? ' disabled' : '') + '>' + esc(label) + '</option>';
+      }
+      html += '</optgroup>';
+    }
+    return html;
+  }
+
   function blankForm() {
     return {
       editingId: '', title: '', description: '', executor: 'assistant', target: 'manager', kind: 'manual',
       onceAt: '', time: '09:00', days: [false, true, true, true, true, true, false],
       everyMinutes: '30', dir: '', command: '', shell: 'powershell', permission: 'workspace-write',
-      enabled: true,
+      enabled: true, modelMode: 'dispatch', modelValue: '',
     };
   }
 
@@ -468,6 +510,10 @@
     f.shell = t.shell || 'powershell';
     f.permission = t.permission || 'workspace-write';
     f.enabled = t.enabled;
+    // 任务模型三档（老数据没这字段＝跟随派发设置）；选定值存 provider|key|model
+    f.modelMode = t.modelMode === 'global' || t.modelMode === 'custom' ? t.modelMode : 'dispatch';
+    const mr = t.model || {};
+    f.modelValue = mr.provider ? mr.provider + '|' + (mr.providerKey || '') + '|' + mr.model : '';
     return f;
   }
 
@@ -478,18 +524,24 @@
     else if (f.kind === 'interval') schedule = { kind: 'interval', everyMinutes: Number(f.everyMinutes) };
     else if (f.kind === 'weekly') schedule = { kind: 'weekly', time: f.time, days: f.days.map((on, d) => (on ? d : -1)).filter((d) => d >= 0) };
     else schedule = { kind: f.kind, time: f.time };
+    const custom = f.executor === 'assistant' && f.modelMode === 'custom';
+    const parts = custom && f.modelValue ? f.modelValue.split('|') : [];
     return {
       id: f.editingId, title: f.title.trim(), description: f.description.trim(),
       executor: f.executor, target: f.executor === 'assistant' ? f.target : '', schedule,
       dir: f.executor === 'command' ? f.dir : '',
       command: f.executor === 'command' ? f.command.trim() : '',
       shell: f.shell, permission: f.permission, enabled: f.enabled,
+      // 任务模型：dispatch/global/custom；只有 custom 带具体指向（含 Key 归属）
+      modelMode: f.executor === 'assistant' ? f.modelMode : '',
+      model: custom ? { provider: parts[0] || '', providerKey: parts[1] || '', model: parts[2] || '' } : null,
     };
   }
 
   function formError(f) {
     if (!f.title.trim()) return '请填写标题';
     if (!f.description.trim()) return '请填写详细描述 / 要求';
+    if (f.executor === 'assistant' && f.modelMode === 'custom' && !f.modelValue) return '「指定模型」需要选一个渠道 + 模型';
     if (f.executor === 'command') {
       if (!f.command.trim()) return '程序任务需要填写要运行的命令';
       if (!f.dir) return '程序任务必须选择工作目录';
@@ -515,6 +567,11 @@
       const d = await api('/api/todos/workspaces');
       st.workspaces = d.items || [];
     } catch (e) { st.workspaces = []; }
+    // 模型清单：「指定模型」下拉按渠道分组（与设置页同一套模型清单）
+    try {
+      const d = await api('/api/models');
+      st.models = d.models || [];
+    } catch (e) { st.models = []; }
     if (!st.editing.dir && st.workspaces.length) st.editing.dir = st.workspaces[0].path;
     renderForm();
     formEl.classList.remove('hidden');
@@ -558,6 +615,18 @@
               '<p class="td-hint">' + (f.target === 'task'
                 ? '到点自动创建一个新的工作任务会话，任务描述直接发给它执行；长期助理不被打扰，结果在工作任务会话和这里的执行记录里看。'
                 : '到点把任务描述转交给长期助理（数字助理主对话），由它安排执行并在完成后汇报结果。') + '</p>', true)
+          : '') +
+        (!cmd ? field('任务模型',
+          '<div class="td-seg">' +
+            '<button type="button" class="' + (f.modelMode === 'dispatch' ? 'primary' : '') + '" data-f="modelmode" data-v="dispatch">跟随派发设置</button>' +
+            '<button type="button" class="' + (f.modelMode === 'global' ? 'primary' : '') + '" data-f="modelmode" data-v="global">全局默认模型</button>' +
+            '<button type="button" class="' + (f.modelMode === 'custom' ? 'primary' : '') + '" data-f="modelmode" data-v="custom">指定模型</button>' +
+          '</div>' +
+          (f.modelMode === 'custom'
+            ? '<select id="td-f-model">' + modelOptions(f.modelValue) + '</select>'
+            : '<p class="td-hint">' + (f.modelMode === 'global'
+              ? '用「设置 → 模型 → 默认模型」里的全局默认模型。'
+              : '按派发设置为准；派发设置是「跟随主会话」时（待办没有主会话可跟）落到全局默认模型。') + '</p>'), true)
           : '') +
         field('标题',
           '<input id="td-f-title" type="text" placeholder="例如：每周整理一次周报" value="' + esc(f.title) + '">', true) +
@@ -611,6 +680,9 @@
     card.querySelectorAll('button[data-f=target]').forEach((el) => {
       el.onclick = () => { readForm(); st.editing.target = el.dataset.v; renderForm(); };
     });
+    card.querySelectorAll('button[data-f=modelmode]').forEach((el) => {
+      el.onclick = () => { readForm(); st.editing.modelMode = el.dataset.v; renderForm(); };
+    });
     const pick = card.querySelector('#td-f-pick');
     if (pick) {
       pick.onclick = async () => {
@@ -650,6 +722,7 @@
     if (card.querySelector('#td-f-shell')) f.shell = val('td-f-shell');
     if (card.querySelector('#td-f-perm')) f.permission = val('td-f-perm');
     if (card.querySelector('#td-f-dir')) f.dir = val('td-f-dir').trim();
+    if (card.querySelector('#td-f-model')) f.modelValue = val('td-f-model');
     const on = card.querySelector('#td-f-enabled');
     if (on) f.enabled = on.checked;
   }

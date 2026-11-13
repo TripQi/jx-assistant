@@ -148,30 +148,59 @@ func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) string {
 		"被派发的会话完成后系统会自动收到【派发回报】并触发你处理回报。现在可以先回用户一句「已经安排」。", sub.ID, sub.Title, note)
 }
 
-// dispatchModelChoice 解析派发工具的模型参数：先经 resolveDispatchModel 校验
-//（裸模型名走错渠道在建会话之前被拒，见该函数注释），再返回应落到新会话上的
-// (provider, providerKey, model)。无参数时继承派发方会话手选的服务商/模型——
-// 用户在主对话选了什么，派出去的子对话/工作任务就用什么（多 Key 供应商连
-// 「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上）；主会话跟着全局默认
-//（未手选）时返回空，子会话同样走全局默认。
-// 显式指定 providerId/modelId 时不带 Key 归属：由 resolveKey 按模型名找回该
-// 供应商下提供这个模型的那把 Key（同名模型多把 Key 都有时取第一把）。
+// dispatchModelChoice 解析派发工具的模型参数，返回应落到新会话上的
+// (provider, providerKey, model)。取值链（见 defaultmodels.go 文件头）：
+// 显式 model 参数 > 派发任务默认模型（设置页）> 跟随主会话（派发者手选的
+// 渠道/模型/Key；派发者自己也没手选时跟随全局默认模型）。任一环取到的值不可用
+// 就直接报错，不往下试也不换渠道——废会话在建出来之前就被挡掉。
 func (t *toolContext) dispatchModelChoice(model string) (provider, providerKey, mdl string, err error) {
-	m, err := t.resolveDispatchModel(model)
-	if err != nil {
-		return "", "", "", err
-	}
-	if m != "" {
-		provider, mdl = "", m
-		if i := strings.Index(m, "/"); i > 0 {
-			provider, mdl = m[:i], m[i+1:]
+	if m := strings.TrimSpace(model); m != "" {
+		ref, rerr := t.app.resolveDispatchModelRef(m, t.sess.Provider)
+		if rerr != nil {
+			return "", "", "", rerr
 		}
-		if t.app.providerByID(provider) != nil {
-			return provider, "", mdl, nil
+		tgt, rerr := t.app.resolveModelRef(ref, whereDispatchTool)
+		if rerr != nil {
+			return "", "", "", rerr
 		}
-		return "", "", mdl, nil // 完整格式但渠道未配置：模型名保留，渠道走会话默认
+		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
 	}
-	return t.sess.Provider, t.sess.ProviderKey, t.sess.Model, nil
+	if ref, custom := t.app.dispatchDefaultRef(); custom {
+		tgt, rerr := t.app.resolveModelRef(ref, whereDispatchDefault)
+		if rerr != nil {
+			return "", "", "", fmt.Errorf("派发任务默认模型不可用：%w", rerr)
+		}
+		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
+	}
+	// 派发设置是「跟随主会话」（默认）：派发者手选的渠道/模型/Key 原样继承——
+	// 多 Key 供应商连「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上。
+	if pid := strings.TrimSpace(t.sess.Provider); pid != "" {
+		ref := ModelRef{Provider: pid, ProviderKey: t.sess.ProviderKey, Model: t.sess.Model}
+		if strings.TrimSpace(ref.Model) == "" {
+			// 派发者只钉了渠道没钉模型：按该渠道的 Key 解析出具体模型（会话运行时
+			// 就是这么算的），先落到具体模型上再校验。
+			if p := t.app.providerByID(pid); p != nil {
+				k := p.resolveKey(t.sess.ProviderKey, "")
+				if len(k.Models) > 0 {
+					ref.Model, ref.ProviderKey = k.Models[0].ID, k.ID
+				}
+			}
+		}
+		tgt, rerr := t.app.resolveModelRef(ref, whereSessionModel)
+		if rerr != nil {
+			return "", "", "", fmt.Errorf("派发设置为「跟随主会话」，但本会话的模型不可用：%w", rerr)
+		}
+		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
+	}
+	// 派发者自己也没手选（它跟全局默认）：子会话同样跟全局默认，先确认它真的可用。
+	ref := t.app.globalDefaultRef()
+	if ref.Empty() {
+		return "", "", "", errNoGlobalDefault
+	}
+	if err := t.app.checkModelRef(ref, whereGlobalDefault); err != nil {
+		return "", "", "", fmt.Errorf("派发设置为「跟随主会话」而本会话没手选模型，落到全局默认模型时不可用：%w", err)
+	}
+	return "", "", "", nil
 }
 // providerLabel 渠道的中文名（没配名字时回退 id）。
 func providerLabel(a *App, id string) string {
@@ -231,36 +260,51 @@ func (a *App) modelChannelHint(model, curProviderID string) string {
 		"；同一模型名可能在多个渠道提供，请用 providerId/modelId 完整格式指明渠道"
 }
 
-// resolveDispatchModel 校验并归一派发工具的 model 参数（dispatch_task / dispatch_sub
-// 共用）。完整格式（providerId/modelId，且该 providerId 在本地配置里存在）原样
-// 放行；裸模型名做一道**渠道兜底校验**：本地配置里存在这个名字、而本次派发实际
-// 会用的渠道不提供它——立刻拒绝并列出全部可用渠道（报错发生在建会话之前，不留
-// 半个空任务），提示改用完整格式。名字在哪个渠道都没配过（自建渠道的 ep- 接入点、
-// 刚上线的新模型等）原样放行：那属于「用户/模型自己知道要什么」，不该由本地清单裁决。
-func (t *toolContext) resolveDispatchModel(req string) (string, error) {
+// resolveDispatchModelRef 把派发工具的 model 参数解析成完整指向（dispatch_task /
+// dispatch_sub 共用）：完整格式（providerId/modelId，渠道在本地配置里）直接用它
+// 并补全 Key 归属；裸模型名只认「派发者自己的渠道」与「全本地唯一提供它的渠道」
+// 这两神——多个渠道都提供就拒绝并列出清单，让他改用完整格式，绝不替他猜渠道。
+func (a *App) resolveDispatchModelRef(req, preferProvider string) (ModelRef, error) {
 	m := strings.TrimSpace(req)
 	if m == "" {
-		return "", nil
+		return ModelRef{}, nil
 	}
-	if i := strings.Index(m, "/"); i > 0 && t.app.providerByID(m[:i]) != nil {
-		return m, nil
+	if i := strings.Index(m, "/"); i > 0 {
+		ref := ModelRef{Provider: m[:i], Model: m[i+1:]}
+		if a.providerByID(ref.Provider) == nil {
+			return ModelRef{}, fmt.Errorf("model=%q 里的渠道「%s」本地没有配置：请改用已配置的渠道，或到「设置 → 模型」添加它", m, ref.Provider)
+		}
+		return a.withKey(ref), nil
 	}
-	// 本次派发实际会用的渠道：会话手选的渠道 > 全局默认（第一个可用渠道）
-	cur := strings.TrimSpace(t.sess.Provider)
-	if cur == "" {
-		if p := t.app.firstSelectableProvider(); p != nil {
-			cur = p.ID
+	if p := a.providerByID(strings.TrimSpace(preferProvider)); p != nil {
+		if k, ok := p.locateModel(m); ok {
+			return ModelRef{Provider: p.ID, ProviderKey: k.ID, Model: m}, nil
 		}
 	}
-	hint := t.app.modelChannelHint(m, cur)
-	if hint == "" {
-		return m, nil
+	hits := []ModelRef{}
+	for i := range a.Cfg.Providers {
+		p := &a.Cfg.Providers[i]
+		if !p.IsSelectable() {
+			continue
+		}
+		if k, ok := p.locateModel(m); ok {
+			hits = append(hits, ModelRef{Provider: p.ID, ProviderKey: k.ID, Model: m})
+		}
 	}
-	curLabel := "全局默认渠道"
-	if cur != "" {
-		curLabel = "渠道「" + providerLabel(t.app, cur) + "」（" + cur + "）"
+	switch len(hits) {
+	case 0:
+		if chans := a.modelChannelsOf(m); len(chans) > 0 {
+			return ModelRef{}, fmt.Errorf("model=%q 是裸模型名，提供它的渠道都已停用（%s）：请先用「设置 → 模型」启用，或用 providerId/modelId 指明渠道", m, strings.Join(chans, "、"))
+		}
+		return ModelRef{}, fmt.Errorf("model=%q 是裸模型名，本地任何渠道的模型清单里都没有它：请用 providerId/modelId 完整格式指明渠道，并在「设置 → 模型」给该渠道拉取模型", m)
+	case 1:
+		return hits[0], nil
 	}
-	return "", fmt.Errorf("model=%q 是裸模型名，本次派发会走%s，而它的模型清单里没有这个名字：%s", m, curLabel, hint)
+	specs := make([]string, 0, len(hits))
+	for _, h := range hits {
+		specs = append(specs, h.Provider+"/"+h.Model)
+	}
+	return ModelRef{}, fmt.Errorf("model=%q 是裸模型名，而本地有 %d 个渠道都提供它：%s；同一模型名可能在多个渠道提供，请用 providerId/modelId 完整格式指明渠道", m, len(hits), strings.Join(specs, "、"))
 }
 
 // resolveDispatchMode 解析 dispatch_task 的 mode 参数：不传＝通用工作任务

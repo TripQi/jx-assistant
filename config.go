@@ -64,7 +64,15 @@ type Config struct {
 	BaseURL    string        `json:"baseURL"`
 	APIKey     string        `json:"apiKey"`
 	Model      string        `json:"model"`
-	Providers  []ProviderCfg `json:"providers"`
+	// DefaultModel 全局默认模型（完整格式：渠道 + 模型 + Key 归属）。手动新建任务
+	// 会话（首页输入框默认选中的模型）用它；待办在派发设置为「跟随主会话」时也落到
+	// 它（待办没有主会话可跟）。老配置里那个裸模型名（Model）是单模型时代的遗留，
+	// 加载时折算到这里（见 defaultmodels.go 的 migrateDefaultModel），之后不再参与解析。
+	DefaultModel ModelRef `json:"defaultModel"`
+	// DispatchModel 派发任务默认模型：空＝跟随主会话（派发者当前的渠道/模型/Key，
+	// 也就是这个设置出现之前的现状）；非空＝dispatch_task 派出的顶层任务会话用它。
+	DispatchModel ModelRef    `json:"dispatchModel,omitempty"`
+	Providers     []ProviderCfg `json:"providers"`
 	Workspace  string        `json:"workspace"`
 	MaxSteps   int           `json:"maxSteps"` // 步数上限（一条消息触发的任务里连续步数）：0/负数 = 不限制（默认）
 	AllowShell bool          `json:"allowShell"`
@@ -649,10 +657,24 @@ func LoadConfig(path string) (*Config, error) {
 		p.Keys = []ProviderKeyCfg{{ID: newProviderKeyID(p), APIKey: p.APIKey, Models: p.Models}}
 		keysMigrated = true
 	}
+	// 默认模型迁移：单模型时代的裸模型名（Config.Model）折算成完整格式写进
+	// DefaultModel。只在配置文件里压根没有 defaultModel 这一键时执行——用户显式
+	// 清空过（存了空值）就不再复活他的选择。迁完在日志里写明落在哪个渠道。
+	defaultModelMigrated := false
+	var dmKeys map[string]json.RawMessage
+	if json.Unmarshal(data, &dmKeys) == nil {
+		if _, has := dmKeys["defaultModel"]; !has {
+			var note string
+			defaultModelMigrated, note = migrateDefaultModel(cfg)
+			if note != "" {
+				log.Printf("[模型] 全局默认模型迁移：%s", note)
+			}
+		}
+	}
 	// 步数上限从历次默认迁移过（旧默认 → 不限制）、压缩从百分比阈值迁移到
 	// 间隔制：立即落盘，让设置页读数、配置文件与运行时三者一致（免得用户看到
 	// 配置文件里还是旧键，以为没生效；其他补全都留给下一次保存）
-	if maxStepsBumped || remoteHostMigrated || compactMigrated || plainSelfMigrated || keysMigrated {
+	if maxStepsBumped || remoteHostMigrated || compactMigrated || plainSelfMigrated || keysMigrated || defaultModelMigrated {
 		if err := cfg.Save(path); err != nil {
 			log.Printf("回写配置迁移失败: %v", err)
 		}

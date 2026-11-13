@@ -687,7 +687,10 @@ func (a *App) contextStats(sess *SessionMeta) ctxStats {
 	for _, v := range cats {
 		total += v
 	}
-	out.Window = a.resolveTarget(sess).ContextWindow
+	out.Window = DefaultContextWindow
+	if t, err := a.resolveTarget(sess); err == nil {
+		out.Window = t.ContextWindow
+	}
 	out.Total = total
 	for _, name := range order {
 		tok := cats[name]

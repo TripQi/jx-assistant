@@ -381,9 +381,11 @@ func TestDispatchModelChannelGuard(t *testing.T) {
 	if _, err := runDispatchTask(ctx, mustArgs(t, map[string]any{"task": "再写一份", "model": "glm-5.3"})); err != nil {
 		t.Fatalf("本渠道提供该模型时不该拦：%v", err)
 	}
-	// 本地清单里查不到的模型名（自建接入点等）：放行，不擅自裁决
-	if _, err := runDispatchTask(ctx, mustArgs(t, map[string]any{"task": "自建接入点", "model": "ep-2026abc"})); err != nil {
-		t.Fatalf("清单外的模型名不该拦：%v", err)
+	// 本地清单里查不到的模型名（自建接入点等）：现在一律拒绝——「模型不在渠道
+	// 清单里」就是不可用，先到「设置 → 模型」给渠道拉取或补上模型再派发。
+	_, err = runDispatchTask(ctx, mustArgs(t, map[string]any{"task": "自建接入点", "model": "ep-2026abc"}))
+	if err == nil || !strings.Contains(err.Error(), "模型清单里都没有它") {
+		t.Fatalf("清单外的模型名应被拒绝：%v", err)
 	}
 }
 

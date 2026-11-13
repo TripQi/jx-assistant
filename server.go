@@ -300,6 +300,10 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.apiRoute(mux, "GET /api/voicetype/history/wav", a.handleVoicetypeHistoryWav, apiMeta{Summary: "第 i 条记录的原始语音（wav，试听）", Params: "i=序号", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/voicetype/history/reidentify", a.handleVoicetypeHistoryReidentify, apiMeta{Summary: "重新识别第 i 条记录", Params: "i=序号；输入法在跑则交它做（走完整分发）", Perm: permReadOnly})
 	a.apiRoute(mux, "GET /api/models", a.handleModels, apiMeta{Summary: "模型清单（全部渠道）", Perm: permReadOnly})
+	// 默认模型（defaultmodels.go）：设置页「模型」页两块——全局默认模型与派发任务默认
+	// 模型，连同算好的「当前生效值」一起下发（跟随主会话时算到具体模型，不让用户自己推）。
+	a.apiRoute(mux, "GET /api/default-models", a.handleDefaultModelsGet, apiMeta{Summary: "默认模型（全局默认 / 派发任务默认）与当前生效值", Perm: permReadOnly})
+	a.apiRoute(mux, "POST /api/default-models", a.handleDefaultModelsSet, apiMeta{Summary: "保存默认模型（全局默认模型 / 派发任务默认模型）", Params: "global（provider/providerKey/model）、dispatch（mode=follow|provider+model）", Perm: permWorkspace})
 	// 用户记忆（组件 user-memory，usermemory.go）：设置页与长期助理（call_api
 	// 整文件通道）共用；未启用时 404。
 	a.apiRoute(mux, "GET /api/user-memory", a.handleUserMemoryGet, apiMeta{Summary: "读用户记忆（用户称呼/身份与喜好/AI 名字/AI 身份/对话气泡颜色）", Perm: permReadOnly})
@@ -998,13 +1002,18 @@ func (a *App) handleSetDisplayMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
-	t := a.DefaultTarget()
+	t, targetErr := a.DefaultTarget()
+	targetErrText := ""
+	if targetErr != nil {
+		targetErrText = targetErr.Error()
+	}
 	ra := a.Cfg.RemoteAccess
 	writeJSON(w, 200, map[string]any{
 		"name":       "坚祥数字助理",
 		"version":    appVersion,
 		"android":    isAndroidRuntime, // 前端按平台隐藏「操作手机」权限芯片
 		"model":      t.Model,
+		"modelErr":   targetErrText, // 全局默认模型未设置/不可用时的原因（前端如实显示）
 		"hasKey":     t.APIKey != "",
 		"wizardDone": a.Cfg.WizardDone || a.Cfg.CompanyLinkOff, // 首启向导（app-wizard.js 据此自动弹出）；公司接入停用也视为"不用弹"
 		"mock":       t.BaseURL == "mock",
@@ -1029,13 +1038,10 @@ func updateSnapshot() UpdateState {
 	return updateState
 }
 
-// DefaultProviderID 返回全局默认提供方 id（第一个可用提供方；全停时回落
-// providers[0]，与 firstSelectableProvider 同口径）。
+// DefaultProviderID 返回全局默认模型所属的渠道 id（模型菜单/新建会话的默认选中项）。
+// 没设置全局默认时为空——不再拿「第一个可用渠道」充数。
 func (a *App) DefaultProviderID() string {
-	if p := a.firstSelectableProvider(); p != nil {
-		return p.ID
-	}
-	return ""
+	return a.globalDefaultRef().Provider
 }
 
 // handleChatModes 返回「人工新建会话」可选的工作模式清单（chatmodes.go 的
@@ -1084,11 +1090,13 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	t := a.DefaultTarget()
+	// 模型菜单的「默认模型」＝全局默认模型（设置页里那个显式选择）：没设置就空，
+	// 不再拿「第一个可用渠道的第一个模型」冒充——那个静默回落就是本次要拆的。
+	def := a.globalDefaultRef()
 	writeJSON(w, 200, map[string]any{
 		"models":          items,
-		"defaultProvider": a.DefaultProviderID(),
-		"defaultModel":    t.Model,
+		"defaultProvider": def.Provider,
+		"defaultModel":    def.Model,
 		// 公司通道额度快照（模型菜单顶部显示；服务端下发才有，私人通道场景为空）
 		"companyQuota": a.Cfg.CompanyQuota,
 	})
@@ -1501,7 +1509,13 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	for _, p := range DefaultProviders() {
 		presets = append(presets, presetView{ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Protocol: p.Protocol, Note: p.Note})
 	}
-	t := a.DefaultTarget()
+	// 当前生效目标（全局默认模型）只用于展示：没设置或不可用就留空并把原因一起
+	// 发下去，前端如实显示「未设置」，不再拿第一个渠道的数据顶上。
+	t, targetErr := a.DefaultTarget()
+	targetErrText := ""
+	if targetErr != nil {
+		targetErrText = targetErr.Error()
+	}
 	// 搜索服务的「当前生效地址」：交给前端原样显示（空/报错即「还打不出去」）
 	searchBase, searchBaseErr := a.searchEndpointBase()
 	searchBaseErrText := ""
@@ -1512,6 +1526,7 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"baseURL":       t.BaseURL,
 		"apiKeyMasked":  maskKey(t.APIKey),
 		"model":         t.Model,
+		"modelErr":      targetErrText, // 全局默认模型未设置/不可用的原因
 		"providers":     providers,
 		"presets":       presets,
 		"workspace":     a.Cfg.Workspace,
@@ -2107,6 +2122,19 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		InheritContext bool             `json:"inheritContext"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body) // 允许空请求体
+	// 人工新建会话的模型：没选就用全局默认模型（三类默认之一），选了就先判定能不能
+	// 用——不可用直接拒绝，不把跑不起来的废会话建出来（分支克隆例外：它照搬父会话）。
+	body.Provider = strings.TrimSpace(body.Provider)
+	body.ProviderKey = strings.TrimSpace(body.ProviderKey)
+	body.Model = strings.TrimSpace(body.Model)
+	if !body.InheritContext {
+		p, k, m, merr := a.applySessionModelDefault(body.Provider, body.ProviderKey, body.Model)
+		if merr != nil {
+			writeErr(w, 400, merr.Error())
+			return
+		}
+		body.Provider, body.ProviderKey, body.Model = p, k, m
+	}
 	// 建会话全部收口在 createSession（sessioncreate.go）：字段构造、权限默认、
 	// 能力默认、分支克隆、历史继承、演示材料兜底——HTTP 人工建会话与
 	// dispatch_task / dispatch_sub 派发建会话走同一处，「人工是什么效果，

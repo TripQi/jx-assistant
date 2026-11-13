@@ -24,7 +24,10 @@ func newDispatchTestApp(t *testing.T) (*App, *SessionMeta) {
 	a.initRuntime()
 	a.sessLocks = map[string]*sync.Mutex{} // NewApp 才有的一份运行态（sessLock 用），测试里补上
 	a.Cfg.Workspace = t.TempDir()
-	a.Cfg.Providers = nil
+	// 模型：派发要过「建会话之前」的可用性判定（不回落），这里配一个 mock 渠道
+	// 当全局默认模型（BaseURL=mock 不要密钥，也不会真的发请求）。
+	a.Cfg.Providers = []ProviderCfg{{ID: "mock-prov", Name: "演示", BaseURL: "mock", Models: []ModelCfg{{ID: "mock-model"}}}}
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock-prov", Model: "mock-model"}
 	// 防回归闸门：登记库经 DataDir 落盘，DataDir 没隔离就会污染仓库真实
 	// data/remote_workspaces.json——直接炸出来，不静默写脏用户数据
 	if !filepath.IsAbs(a.Cfg.DataDir) {

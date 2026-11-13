@@ -68,7 +68,12 @@ func (e *ContextEngine) Assemble(sess *SessionMeta, emit func(Event)) *Assembly 
 	sys, envRaw, tools := e.materials(sess)
 	env := e.app.maybeAppendEnvSnapshot(sess, envRaw, emit)
 	msgs := e.app.buildContext(sess, sys)
-	msgs = inlineImagesForRequest(e.app, msgs, e.app.resolveTarget(sess))
+	// 图片内联跟随当前会话的模型能力；模型不可用时不内联（真正的报错在调模型时给）
+	inlineTarget := LLMTarget{}
+	if t, err := e.app.resolveTarget(sess); err == nil {
+		inlineTarget = t
+	}
+	msgs = inlineImagesForRequest(e.app, msgs, inlineTarget)
 	return &Assembly{Sys: sys, Env: env, Tools: toolDefsOf(tools), Msgs: msgs,
 		EstTokens: estimateTokens(msgs), SysHash: promptHash(sys), EnvHash: promptHash(env)}
 }
@@ -185,7 +190,10 @@ const summarizerPrompt = "你是严谨的对话历史压缩助手。"
 // CallSummarizer 由引擎拼装并发起摘要模型调用，流式收齐全文返回。mock 目标
 // （离线演示）直接给占位摘要，不发请求也不落调用痕。
 func (e *ContextEngine) CallSummarizer(sess *SessionMeta, input string) (string, error) {
-	target := e.app.resolveTarget(sess)
+	target, terr := e.app.resolveTarget(sess)
+	if terr != nil {
+		return "", terr // 模型不可用：如实报错，不让摘要悄悄走别的渠道
+	}
 	if target.BaseURL == "mock" {
 		return "（离线演示摘要：本段历史已完成创建演示文件并验证，细节见原始记录。）", nil
 	}

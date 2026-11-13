@@ -16,6 +16,7 @@ func TestSyncApplyAnnounce(t *testing.T) {
 	a.Cfg.MarketURL = "http://old:PORT/market/manifest.json"
 	a.Cfg.UpdateURL = "http://old:PORT/updates/latest"
 	a.Cfg.Model = "removed-model"
+	a.Cfg.DefaultModel = ModelRef{Provider: wizardProviderID, Model: "removed-model"}
 	a.Cfg.Providers = []ProviderCfg{
 		{ID: wizardProviderID, Name: "旧公司·内部通道", BaseURL: "http://old:3000/v1", APIKey: "sk-x",
 			Models: []ModelCfg{{ID: "removed-model"}}},
@@ -48,8 +49,11 @@ func TestSyncApplyAnnounce(t *testing.T) {
 	if p.APIKey != "sk-x" {
 		t.Fatalf("key 不应被动: %q", p.APIKey)
 	}
-	if a.Cfg.Model != "deepseek-flash" { // 已选模型被下线 → 回默认
-		t.Fatalf("已选模型应回落默认: %q", a.Cfg.Model)
+	// 已选模型被下线：不再自动改成该渠道第一个模型——用户的选择原样保留，
+	// 由 checkModelRef 判定「不可用」在界面上红字提示重选。（Cfg.Model 只是老版本
+	// exe 回退的镜像，随渠道清单走，不代表用户的选择。）
+	if dm := a.Cfg.DefaultModel; dm.Provider != wizardProviderID || dm.Model != "removed-model" {
+		t.Fatalf("全局默认模型应保留用户选择（只标记不可用，不换成清单里第一个）: %+v", dm)
 	}
 	if a.Cfg.MarketURL != ann.MarketURL || a.Cfg.UpdateURL != ann.UpdateURL || a.Cfg.WizardServer != "http://new:PORT" {
 		t.Fatalf("地址未跟随: %v %v %v", a.Cfg.MarketURL, a.Cfg.UpdateURL, a.Cfg.WizardServer)

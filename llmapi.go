@@ -44,12 +44,20 @@ func (a *App) handleLLMAsk(w http.ResponseWriter, r *http.Request) {
 	if len(user) > llmAskMaxInput { // 防御截断：调用方负责预算，这里只兜底
 		user = user[:llmAskMaxInput]
 	}
-	target := a.DefaultTarget()
+	target, terr := a.DefaultTarget()
+	if terr != nil {
+		writeErr(w, 400, terr.Error())
+		return
+	}
 	var sess *SessionMeta
 	if body.Session != "" {
-		if m, err := a.Store.Get(body.Session); err == nil && m != nil {
-			target = a.resolveTarget(m)
-			sess = m
+		if m, gerr := a.Store.Get(body.Session); gerr == nil && m != nil {
+			if t, rerr := a.resolveTarget(m); rerr != nil {
+				writeErr(w, 400, rerr.Error())
+				return
+			} else {
+				target, sess = t, m
+			}
 		}
 	}
 	msgs := make([]Message, 0, 2)

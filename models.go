@@ -297,54 +297,69 @@ func (a *App) providerByID(id string) *ProviderCfg {
 	return nil
 }
 
-// firstSelectableProvider 第一个可用（手动启用且未被自动停用）的提供方；
-// 全部停用时回落 providers[0]（返回 nil 当没有任何提供方）——全停是用户自己的
-// 选择，仍按原顺序解析，调用报错即可，不静默换通道。
-func (a *App) firstSelectableProvider() *ProviderCfg {
-	for i := range a.Cfg.Providers {
-		if a.Cfg.Providers[i].IsSelectable() {
-			return &a.Cfg.Providers[i]
+// DefaultTarget 返回全局默认调用目标（状态栏、模型菜单、辅助调用都看它）。
+// 只认「设置 → 模型 → 默认模型 → 全局默认模型」这一个显式选择：没有设置或它不可用
+// 就返回错误——不再拿第一个渠道或老配置的 BaseURL/APIKey/Model 顶上（那条静默
+// 回落的路径会把用户的账单与输出悄悄换成别的模型，见 defaultmodels.go）。
+func (a *App) DefaultTarget() (LLMTarget, error) {
+	ref := a.globalDefaultRef()
+	if ref.Empty() {
+		return LLMTarget{}, errNoGlobalDefault
+	}
+	return a.resolveModelRef(ref, whereGlobalDefault)
+}
+
+// resolveTarget 按会话解析调用目标。规则（不回落，只报错）：
+//   - 会话手选了渠道/模型 → 就用它；渠道被停用/删了、Key 被清空就报错，不再自动
+//     换到别的渠道（换了等于偷偷换模型）；
+//   - 会话没手选（新建时选了「跟随全局默认」）→ 全局默认模型；
+//   - 老会话只存了裸模型名（单模型时代）→ 按模型名在配置里找回它所属的渠道。
+//
+// 会话的模型名允许是渠道清单里没有的手填值（ep- 接入点、刚上线的新模型这类）：
+// 那份「在不在清单里」的判定只在建会话之前做一次（checkModelRef），运行时不拿
+// 清单裁决，免得老会话/手填模型被新加的校验卡死。
+func (a *App) resolveTarget(sess *SessionMeta) (LLMTarget, error) {
+	pid := strings.TrimSpace(sess.Provider)
+	model := strings.TrimSpace(sess.Model)
+	if pid == "" && model == "" {
+		ref := a.globalDefaultRef()
+		if ref.Empty() {
+			return LLMTarget{}, errNoGlobalDefault
 		}
+		return a.resolveModelRef(ref, whereGlobalDefault)
 	}
-	if len(a.Cfg.Providers) > 0 {
-		return &a.Cfg.Providers[0]
+	if pid == "" {
+		ref, err := a.bareModelRef(model, "")
+		if err != nil {
+			return LLMTarget{}, err
+		}
+		return a.resolveModelRef(ref, whereSessionModel)
 	}
-	return nil
-}
-
-// DefaultTarget 返回全局默认调用目标（第一个可用 provider 的默认模型）。
-func (a *App) DefaultTarget() LLMTarget {
-	if len(a.Cfg.Providers) == 0 {
-		return LLMTarget{BaseURL: a.Cfg.BaseURL, APIKey: a.Cfg.APIKey, Model: a.Cfg.Model, ContextWindow: DefaultContextWindow}
-	}
-	return a.targetOf(a.firstSelectableProvider(), "", "")
-}
-
-// resolveTarget 按会话解析调用目标：会话指定了 provider/model 就用会话的，
-// 否则跟随全局默认（第一个可用 provider）；会话指定的 provider 已停用时也回落
-// 默认——否则出公司后旧会话仍钉死在已停用的公司通道上。
-// sess.ProviderKey 是模型归属的那把 Key：老会话没有这一项，targetOf 会按模型
-// 名找回它的 Key（找不到用第一把可用 Key），所以老会话/老草稿照常可用。
-func (a *App) resolveTarget(sess *SessionMeta) LLMTarget {
-	p := a.providerByID(sess.Provider)
-	if p != nil && !p.IsSelectable() {
-		p = nil // 停用（手动或自动）的提供方不接会话调用
-	}
+	p := a.providerByID(pid)
 	if p == nil {
-		p = a.firstSelectableProvider()
-		if p == nil {
-			return LLMTarget{BaseURL: a.Cfg.BaseURL, APIKey: a.Cfg.APIKey, Model: sess.Model, ContextWindow: DefaultContextWindow}
-		}
-		// 回落到了别的提供方：原会话模型不在它目录里就不带过去（换用其默认模型）
-		if sess.Provider != "" && p.ID != sess.Provider && !p.hasModel(sess.Model) {
-			return a.targetOf(p, "", "")
-		}
+		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」本地没有配置（可能已被删除）。请到%s换一个模型", pid, whereSessionModel)
 	}
-	return a.targetOf(p, sess.ProviderKey, sess.Model)
+	name := providerLabel(a, pid)
+	switch {
+	case p.Enabled != nil && !*p.Enabled:
+		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）已被手动停用，不再有可用模型。请到「设置 → 模型」重新启用它，或到%s换一个模型", name, pid, whereSessionModel)
+	case p.AutoDisabled:
+		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）因连不上公司服务端被自动停用。请到「设置 → 模型」手动开启它，或到%s换一个模型", name, pid, whereSessionModel)
+	}
+	t := a.targetOf(p, sess.ProviderKey, model)
+	if strings.TrimSpace(t.Model) == "" {
+		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）没有可用模型（模型清单为空）。请到「设置 → 模型」给该渠道拉取模型，或到%s换一个渠道", name, pid, whereSessionModel)
+	}
+	if strings.TrimSpace(p.BaseURL) != "mock" && strings.TrimSpace(t.APIKey) == "" {
+		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）没有可用的 API Key（密钥为空或未填）。请到「设置 → 模型」补上密钥，或到%s换一个渠道", name, pid, whereSessionModel)
+	}
+	return t, nil
 }
 
 // targetOf 解析「某供应商 + 某把 Key（空=按模型归属找回/第一把可用）+ 某模型」
 // 的调用目标；BaseURL 是供应商级的，密钥与协议（Key 级覆盖优先）来自那把 Key。
+// 模型为空且该 Key 的目录也没模型时不再兜老配置的裸模型名（那条静默回落已删）：
+// 调用方按空模型报错，绝不替用户挑一个。
 func (a *App) targetOf(p *ProviderCfg, keyID, modelID string) LLMTarget {
 	k := p.resolveKey(keyID, modelID)
 	t := LLMTarget{BaseURL: p.BaseURL, APIKey: k.APIKey, ContextWindow: DefaultContextWindow,
@@ -362,9 +377,6 @@ func (a *App) targetOf(p *ProviderCfg, keyID, modelID string) LLMTarget {
 			t.MaxOutput = m.MaxOutput
 			break
 		}
-	}
-	if t.Model == "" {
-		t.Model = a.Cfg.Model // 兜底：老配置里的裸模型名
 	}
 	return t
 }

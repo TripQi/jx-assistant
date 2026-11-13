@@ -45,7 +45,7 @@ const (
 	todoMaxRecords    = 200              // 执行记录上限（超出裁掉最旧的）
 	todoCmdTimeout    = 10 * time.Minute // 程序任务单次超时
 	todoDataKey       = "todo_tasks"     // meta 表里的数据键
-	todoDataVersion   = 1                // 数据版本
+	todoDataVersion   = 2                // 数据版本（2：任务加了「任务模型」三档字段）
 	todoComponentID   = "todo-scheduler" // 承载本功能的组件 id
 )
 
@@ -96,6 +96,11 @@ type TaskItem struct {
 	Enabled     bool     `json:"enabled"`
 	Executor    string   `json:"executor"`         // assistant | command
 	Target      string   `json:"target,omitempty"` // 仅 assistant 类：manager=长期助理（默认）| task=新工作任务
+	// 任务模型（仅 assistant 类）三档：空=跟随派发设置（默认，老数据没这个字段就是它）/ "global"=全局默认
+	// 模型 / "custom"=指定渠道+模型（Model 存完整指向，含 Key 归属）。取值链与
+	// 「不可用就报错」的判定见 defaultmodels.go。
+	ModelMode string    `json:"modelMode,omitempty"`
+	Model     *ModelRef `json:"model,omitempty"`
 	Schedule    Schedule `json:"schedule"`
 	// 以下仅 command 类：工作目录、要在那里运行的命令、执行档位（沙箱 / 完全访问）。
 	Dir        string `json:"dir,omitempty"`
@@ -120,6 +125,9 @@ type TaskItem struct {
 type TaskView struct {
 	TaskItem
 	NextRunAt int64 `json:"nextRunAt,omitempty"`
+	// ModelView 待办卡片「模型：…（生效：…）」那行的数据：三档取值链算出来的
+	// 当前实际生效值与可用性（仅 AI 任务；不可用时 Error 里是点名的原因）。
+	ModelView *ModelRefView `json:"modelView,omitempty"`
 }
 
 // RunRecord 是一次执行（触发）的记录。
@@ -606,7 +614,31 @@ func (s *todoScheduler) load() *TodoData {
 	if d.Version == 0 {
 		d.Version = todoDataVersion
 	}
+	s.migrateData(&d)
 	return &d
+}
+
+// migrateData 数据版本升级（落盘时机：load 之后由调用方统一持久化）。
+// v1 → v2：任务多了「任务模型」三档字段。老单据读出来 ModelMode 为空——正好是
+// 默认档「跟随派发设置」，Model 为空，不需要逐条改写（只是把版本号推上去，并把
+// 「存了指向却没写档位」这种半残数据补成 custom）。
+func (s *todoScheduler) migrateData(d *TodoData) {
+	if d.Version >= todoDataVersion {
+		return
+	}
+	for _, t := range d.Tasks {
+		if t.ModelMode == todoModelFollowDispatch && t.Model != nil && t.Model.Complete() {
+			t.ModelMode = todoModelCustom
+		}
+		if t.ModelMode != todoModelCustom {
+			t.Model = nil
+		} else if t.Model != nil {
+			m := t.Model.norm()
+			t.Model = &m
+		}
+	}
+	d.Version = todoDataVersion
+	s.persist(d)
 }
 
 // seedTodoData 首启种子：只有一条示例任务（不定时，只记着不自动执行）。
@@ -787,9 +819,14 @@ func (s *todoScheduler) snapshot() map[string]any {
 	}
 }
 
-// toView 给任务附上下次执行时间（停用、已完成或不自动执行的不附）。
+// toView 给任务附上下次执行时间（停用、已完成或不自动执行的不附）与「任务模型」
+// 三档取值链算出的当前生效值（AI 任务才有：卡片上要写清「生效：…」）。
 func (s *todoScheduler) toView(t *TaskItem, now int64) TaskView {
 	v := TaskView{TaskItem: *t}
+	if t.Executor == execAssistant {
+		mv := s.app.todoModelView(t.ModelMode, derefModel(t.Model))
+		v.ModelView = &mv
+	}
 	if !t.Enabled || t.Done {
 		return v
 	}
@@ -797,6 +834,14 @@ func (s *todoScheduler) toView(t *TaskItem, now int64) TaskView {
 		v.NextRunAt = next
 	}
 	return v
+}
+
+// derefModel 取指向的副本（nil＝没存）。
+func derefModel(r *ModelRef) ModelRef {
+	if r == nil {
+		return ModelRef{}
+	}
+	return *r
 }
 
 // find 按 id 取任务（返回内存副本的指针；调用方需持有 s.mu 才能改）。
@@ -823,6 +868,11 @@ type todoRequest struct {
 	Command     string    `json:"command"`
 	Shell       string    `json:"shell"`
 	Permission  string    `json:"permission"`
+	// 任务模型（仅 AI 任务）：modelMode = dispatch（跟随派发设置，默认）| global（全局
+	// 默认模型）| custom（指定渠道+模型，model 里给完整指向）。只传 modelMode 即可
+	// 换档；custom 必须带 model。
+	ModelMode string    `json:"modelMode,omitempty"`
+	Model     *ModelRef `json:"model,omitempty"`
 	Enabled     *bool     `json:"enabled"`
 	Done        *bool     `json:"done"` // 标记完成 / 重新打开（仅 update：完成是终态归档，调度随之停）
 }
@@ -865,6 +915,23 @@ func (r todoRequest) normalize() (executor, dir, command, shell, perm, target st
 	return executor, dir, command, shell, perm, target, nil
 }
 
+// normalizeModel 归一三档「任务模型」字段：程序任务一律清空（它不经过模型）；
+// custom 必须带完整的渠道+模型。返回存进 TaskItem 的模态与指向。
+func (r todoRequest) normalizeModel(executor string) (string, *ModelRef, error) {
+	if executor != execAssistant {
+		return todoModelFollowDispatch, nil, nil
+	}
+	mode := normTodoModelMode(r.ModelMode)
+	if mode != todoModelCustom {
+		return mode, nil, nil
+	}
+	if r.Model == nil || !r.Model.Complete() {
+		return "", nil, fmt.Errorf("待办选了「指定渠道+模型」，但渠道或模型没选全（编辑弹窗里选一个）")
+	}
+	m := r.Model.norm()
+	return mode, &m, nil
+}
+
 // create 新建一条任务。
 func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 	title := strings.TrimSpace(r.Title)
@@ -885,12 +952,17 @@ func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 	if err != nil {
 		return nil, err
 	}
+	modelMode, modelRef, err := r.normalizeModel(executor)
+	if err != nil {
+		return nil, err
+	}
 	ts := time.Now().UnixMilli()
 	t := &TaskItem{
 		ID: "task-" + newID()[:8], Title: title, Description: description,
 		Enabled:  r.Enabled == nil || *r.Enabled,
 		Executor: executor, Schedule: *r.Schedule,
 		Dir: dir, Command: command, Shell: shell, Permission: perm,
+		ModelMode: modelMode, Model: modelRef,
 		CreatedAt: ts, UpdatedAt: ts,
 	}
 	if executor == execAssistant {
@@ -974,6 +1046,23 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 	}
 	if resetBase {
 		next.LastRunAt = 0
+	}
+	// 任务模型（三档）：显式给了档位或指向就重算（"dispatch" 就是改回跟随派发设置）
+	if r.ModelMode != "" || r.Model != nil {
+		if next.Executor != execAssistant {
+			return nil, fmt.Errorf("程序任务没有「任务模型」（它不经过模型）")
+		}
+		merged := todoRequest{ModelMode: firstNonEmpty(r.ModelMode, next.ModelMode)}
+		if r.Model != nil {
+			merged.Model = r.Model
+		} else {
+			merged.Model = next.Model
+		}
+		mode, ref, err := merged.normalizeModel(next.Executor)
+		if err != nil {
+			return nil, err
+		}
+		next.ModelMode, next.Model = mode, ref
 	}
 	next.UpdatedAt = time.Now().UnixMilli()
 	*t = next
@@ -1190,11 +1279,19 @@ func (s *todoScheduler) handToTaskSession(task *TaskItem, record *RunRecord) (st
 	if title == "" {
 		title = truncateRunes(task.Description, 20)
 	}
+	// 待办是系统调度器派出的（DispatchedBy=todo-scheduler），没有主会话可跟：
+	// 模型按三档链路取（待办自选 → 派发设置 → 全局默认），任一环不可用就报错，
+	// 不建会话、不留跑不起来的废会话。
+	provider, providerKey, model, _, err := s.app.todoDispatchModel(task)
+	if err != nil {
+		return "", err
+	}
 	sub, err := s.app.createSession(createSessionParams{
 		Mode:         "task", // 按任务性质默认通用工作任务（与 dispatch_task 不传 mode 同一默认）
 		Title:        title,
 		Workspace:    s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与长期助理主对话同口径）
 		Permission:   permWorkspace,
+		Provider:     provider, ProviderKey: providerKey, Model: model,
 		DispatchedBy: todoComponentID, // 系统派生标记：回报链查无此会话，不自动回报、不打扰长期助理
 	})
 	if err != nil {

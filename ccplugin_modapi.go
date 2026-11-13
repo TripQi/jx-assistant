@@ -603,7 +603,10 @@ func logModError(h *modHost, where string, err error) {
 func (a *App) modModelComplete(ctx context.Context, opts map[string]any) (string, error) {
 	prompt, _ := opts["prompt"].(string)
 	system, _ := opts["system"].(string)
-	target := a.DefaultTarget()
+	target, terr := a.DefaultTarget()
+	if terr != nil {
+		return "", terr
+	}
 	if m, ok := opts["model"].(string); ok && strings.TrimSpace(m) != "" {
 		target.Model = strings.TrimSpace(m)
 	}

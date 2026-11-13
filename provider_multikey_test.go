@@ -160,7 +160,8 @@ func TestConfigSaveRoundTripsMultiKey(t *testing.T) {
 // 都找不到落第一把可用 Key（不能让调用直接挂掉）。
 func TestResolveKeyAndTarget(t *testing.T) {
 	p := multiKeyProvider()
-	a := &App{Cfg: &Config{Providers: []ProviderCfg{p}, Model: "shared"}}
+	a := &App{Cfg: &Config{Providers: []ProviderCfg{p}, Model: "shared",
+		DefaultModel: ModelRef{Provider: "custom-1", Model: "shared"}}}
 
 	// 显式 Key：密钥与协议都取那把的（Key 级协议覆盖优先于供应商级）
 	p.Protocol = "responses" // 供应商级默认
@@ -171,18 +172,19 @@ func TestResolveKeyAndTarget(t *testing.T) {
 	}
 	// 会话带着 Key 归属：解析到同一把（重名模型靠它定位）
 	sess := &SessionMeta{Provider: "custom-1", ProviderKey: "k2", Model: "shared"}
-	if got := a.resolveTarget(sess); got.APIKey != "sk-claude-2222" {
-		t.Fatalf("会话 Key 归并未生效: %+v", got)
+	if got, err := a.resolveTarget(sess); err != nil || got.APIKey != "sk-claude-2222" {
+		t.Fatalf("会话 Key 归并未生效: %+v %v", got, err)
 	}
 	// 老会话（没有 Key 归属）：按模型名找回那把 Key
 	sess = &SessionMeta{Provider: "custom-1", Model: "claude-x"}
-	if got := a.resolveTarget(sess); got.APIKey != "sk-claude-2222" {
-		t.Fatalf("应按模型清单找回 Key: %+v", got)
+	if got, err := a.resolveTarget(sess); err != nil || got.APIKey != "sk-claude-2222" {
+		t.Fatalf("应按模型清单找回 Key: %+v %v", got, err)
 	}
 	// 模型名不在任何 Key 的清单里（手工改过清单的场景）：落第一把可用 Key
+	// （运行时不再拿清单卡老会话的手填模型名，只在建会话之前判定）
 	sess = &SessionMeta{Provider: "custom-1", Model: "not-in-catalog"}
-	if got := a.resolveTarget(sess); got.APIKey != "sk-daily-1111" || got.Model != "not-in-catalog" {
-		t.Fatalf("找不到归属应落第一把可用 Key: %+v", got)
+	if got, err := a.resolveTarget(sess); err != nil || got.APIKey != "sk-daily-1111" || got.Model != "not-in-catalog" {
+		t.Fatalf("找不到归属应落第一把可用 Key: %+v %v", got, err)
 	}
 	// 第一把 Key 没密钥时落「第一把有密钥的」
 	p2 := ProviderCfg{ID: "c2", BaseURL: "https://x/v1", Keys: []ProviderKeyCfg{
@@ -195,9 +197,9 @@ func TestResolveKeyAndTarget(t *testing.T) {
 	if k := p2.resolveKey("", ""); k.ID != "b" {
 		t.Fatalf("无模型可依据时应落第一把有密钥的: %#v", k)
 	}
-	// 默认目标走第一把 Key 的第一个模型
-	if got := a.DefaultTarget(); got.APIKey != "sk-daily-1111" || got.Model != "shared" {
-		t.Fatalf("默认目标不对: %+v", got)
+	// 默认目标：全局默认模型那一个（不再拿「第一个渠道的第一个模型」充数）
+	if got, err := a.DefaultTarget(); err != nil || got.APIKey != "sk-daily-1111" || got.Model != "shared" {
+		t.Fatalf("默认目标不对: %+v %v", got, err)
 	}
 }
 

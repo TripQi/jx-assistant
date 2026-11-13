@@ -1177,11 +1177,16 @@ func (a *App) gitSummarize(ctx context.Context, session, repo string) (string, e
 		diffText = diffText[:gitSummaryMaxChars]
 	}
 	// 调用目标跟随会话（会话选了哪个模型就用哪个），没有会话用全局默认
-	target := a.DefaultTarget()
+	target, terr := a.DefaultTarget()
 	if session != "" {
-		if m, err := a.Store.Get(session); err == nil && m != nil {
-			target = a.resolveTarget(m)
+		if m, gerr := a.Store.Get(session); gerr == nil && m != nil {
+			if t, rerr := a.resolveTarget(m); rerr == nil {
+				target, terr = t, nil
+			}
 		}
+	}
+	if terr != nil {
+		return "", terr
 	}
 	sctx, cancel := context.WithTimeout(ctx, gitSummaryTimeout)
 	defer cancel()

@@ -24,7 +24,10 @@ func newTodoDispatchApp(t *testing.T) (*App, *todoScheduler, *SessionMeta) {
 	a.initRuntime()
 	a.sessLocks = map[string]*sync.Mutex{}
 	a.Cfg.Workspace = t.TempDir()
-	a.Cfg.Providers = nil
+	// 待办派发要走三档模型取值链（默认档落到全局默认模型），这里配一个 mock 渠道：
+	// BaseURL=mock 不要密钥，投递后的执行也不会真的请求网络。
+	a.Cfg.Providers = []ProviderCfg{{ID: "mock-prov", Name: "演示", BaseURL: "mock", Models: []ModelCfg{{ID: "mock-model"}}}}
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock-prov", Model: "mock-model"}
 	s := &todoScheduler{app: a, busy: map[string]bool{}, tombs: map[string]bool{},
 		data: &TodoData{Version: todoDataVersion, Tasks: []*TaskItem{}, Records: []*RunRecord{}}}
 	// 长期助理主对话：真实环境由 assistantSession 找/建，这里手动放一个

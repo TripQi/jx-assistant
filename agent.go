@@ -1278,7 +1278,11 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	for _, tl := range a.toolsFor(sess.Mode) {
 		runs[tl.Spec.Function.Name] = tl.Run
 	}
-	target := a.resolveTarget(sess)
+	target, err := a.resolveTarget(sess)
+	if err != nil {
+		// 渠道被停用/详情被清空这类问题：如实报错（前端报错区可见），不偷偷换渠道
+		return err
+	}
 	overflowRetried := false // 上下文超限强制压缩重发只兜一次
 	modelFallback := false   // 专家预设模型不可用 → 切全局默认重试过一次（防循环）
 	autoSwitched := false    // 公司通道连接失败 → 自动停用并切可用提供方（每轮执行体一次）
@@ -1465,14 +1469,20 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// 提供方重试——出公司用私人模型的场景不等 5 分钟轮询才切换。每轮
 			// 执行体只切一次（autoSwitched），切完的目标再连不上就走正常报错。
 			if isConnFailure(err) && !autoSwitched && a.noteProviderConnFail(target) {
-				if nt := a.resolveTarget(sess); nt.BaseURL != target.BaseURL || nt.Model != target.Model {
+				// 公司通道刚被自动停用：不再「随手换成第一个可用渠道」，而是明确切到
+				// 全局默认模型（用户配过的那个）——切了就把新旧模型与原因落审计、在
+				// 会话里说清楚，没配全局默认就让它报错。
+				if nt, nerr := a.resolveModelRef(a.globalDefaultRef(), whereGlobalDefault); nerr == nil &&
+					(nt.BaseURL != target.BaseURL || nt.Model != target.Model) {
+					sess.Provider, sess.ProviderKey, sess.Model = nt.ProviderID, nt.KeyID, nt.Model
+					_ = a.Store.SaveMeta(sess)
 					a.auditWrite(sess, map[string]any{"type": "model_fallback",
 						"from_model": target.Model + " @ " + target.BaseURL, "to_model": nt.Model,
-						"reason": "公司通道连接失败，自动停用并切换", "error": truncateRunes(err.Error(), 300)})
+						"reason": "公司通道连接失败，自动停用并切到全局默认模型", "error": truncateRunes(err.Error(), 300)})
 					target = nt
 					autoSwitched = true
 					emit(Event{Type: "tool_wait", Name: "model-fallback",
-						Output: "公司通道连不上，已自动停用并切换到 " + nt.Model + " 继续执行（回到公司网络会自动恢复）"})
+						Output: "公司通道连不上，已自动停用并切到全局默认模型 " + nt.Model + " 继续执行（回到公司网络会自动恢复）"})
 					continue
 				}
 			}
@@ -1527,11 +1537,16 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// 重试本步并落库，后续步不再撞同一个错；调用日志里两次调用都可查。
 			// 只兜专家会话：用户在普通会话手选的模型被拒时应如实报错，不静默降级。
 			if !modelFallback && sess.Expert != "" && isModelUnavailableErr(err) {
-				if def := a.DefaultTarget(); def.Model != target.Model || def.BaseURL != target.BaseURL {
+				def, derr := a.DefaultTarget()
+				if derr == nil && (def.Model != target.Model || def.BaseURL != target.BaseURL) {
 					from := target.Model + " @ " + target.BaseURL
 					sess.Provider, sess.Model, sess.ProviderKey = "", "", ""
 					_ = a.Store.SaveMeta(sess)
-					target = a.resolveTarget(sess)
+					nt, nerr := a.resolveTarget(sess)
+					if nerr != nil {
+						return nerr // 全局默认也跑不起来：如实报错，不再一层层试
+					}
+					target = nt
 					modelFallback = true
 					a.auditWrite(sess, map[string]any{"type": "model_fallback",
 						"expert": sess.Expert, "from_model": from, "to_model": target.Model,

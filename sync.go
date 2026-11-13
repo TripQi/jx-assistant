@@ -271,8 +271,12 @@ func applyAnnounce(a *App, ann *announcePayload, server string, fromPublic bool)
 			models := buildWizardModels(ann.API.Models)
 			p.SetPrimaryKey(p.APIKey, models)
 			changed = append(changed, fmt.Sprintf("模型×%d", len(ann.API.Models)))
-			if m := a.Cfg.Model; m != "" && !providerHasModel(p, m) { // 已选模型被下线：回默认
-				a.Cfg.Model = firstModelID(models)
+			// 用户选中的模型被下线时不再自动改成该渠道第一个模型（旧行为：
+			// a.Cfg.Model = firstModelID(models)）——选择是用户的，只标记为不可用：
+			// 全局默认模型保留原值，设置页与相关卡片按 checkModelRef 的判定红字
+			// 提示「该模型已不在渠道清单里，请重选」，绝不静默换成别的模型。
+			if ref := a.Cfg.DefaultModel.norm(); ref.Provider == p.ID && ref.Model != "" && !providerHasModel(p, ref.Model) {
+				log.Printf("[公司同步] 全局默认模型「%s」已不在渠道「%s」的清单里：保留用户选择不自动改，请到设置 → 模型 → 默认模型重选", ref.Model, p.ID)
 			}
 		}
 	}

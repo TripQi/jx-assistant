@@ -532,10 +532,10 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 		items = []readItem{{Path: p.Path, Offset: p.Offset, Limit: p.Limit}}
 	}
 	if len(items) == 0 {
-		return "", fmt.Errorf("files 不能为空：请给出 1-%d 个要读取的文件，例如 {\"files\":[{\"path\":\"a.go\"}]}", readMaxFiles)
+		return "", fmt.Errorf("files 不能为空：请给出 1-%d 个要读取的文件，例如 {\"files\":[{\"path\":\"a.go\"}]}（本次未做任何改动）", readMaxFiles)
 	}
 	if len(items) > readMaxFiles {
-		return "", fmt.Errorf("一次最多读 %d 条（收到 %d 条）：请分批，每批最多 %d 条", readMaxFiles, len(items), readMaxFiles)
+		return "", fmt.Errorf("一次最多读 %d 条（收到 %d 条）：请分批，每批最多 %d 条（本次未做任何改动）", readMaxFiles, len(items), readMaxFiles)
 	}
 
 	var b strings.Builder
@@ -575,6 +575,17 @@ type readSeg struct {
 	startLine int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
 }
 
+// textLines 把文本切成行，行数与编辑器的口径一致：文件末尾那个换行只是「最后一行
+// 结束」的标记，不再多算一行（"a\nb\nc\n" 是 3 行，不是 4 行）；"a\n\n" 中间那个
+// 空行是真的一行，所以是 2 行；空字符串是 0 行。
+func textLines(text string) []string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
+}
+
 // readSection 读一条（一个文件的一个区间）并装成一段。任何失败都只落在这一段里
 // ——批量读取的价值就在「一条坏不影响五条好」，所以这里不返回 error，把所有
 // 失败都变成段内的一行原因。
@@ -610,10 +621,15 @@ func (t *toolContext) readSection(it readItem) readSeg {
 		seg.errText = "是二进制文件，不能按文本读取"
 		return seg
 	}
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	lines := textLines(text)
 	start := it.Offset
 	if start < 1 {
 		start = 1
+	}
+	if len(lines) == 0 {
+		// 空文件是 0 行，不是「起始行超出范围」：给一个空段，不当失败报
+		seg.header = fmt.Sprintf("===== %s（空文件，共 0 行）=====", seg.disp)
+		return seg
 	}
 	if start > len(lines) {
 		seg.header = fmt.Sprintf("===== %s（起始行 %d 超出文件范围，共 %d 行）=====", seg.disp, it.Offset, len(lines))
@@ -804,10 +820,11 @@ func editFileTool() Tool {
 	return Tool{
 		Spec: toolSpec("edit",
 			"批量修改既有文本文件（唯一形态：edits 数组，1-5 条；空数组或超过 5 条直接报错）。示例：{\"edits\":[{\"path\":\"a.go\",\"old_string\":\"x\",\"new_string\":\"y\"},{\"path\":\"a.go\",\"old_string\":\"z\",\"new_string\":\"w\",\"replace_all\":true}]}\n"+
-				"- 每条把 old_string 字面量替换为 new_string（CRLF/LF 行尾等价匹配，写回保持原行尾风格）；replace_all=true 替换全部出现，缺省要求恰好出现一次。\n"+
+				"- 每条把 old_string 字面量替换为 new_string（CRLF/LF 行尾等价匹配，写回保持原行尾风格）；replace_all=true 替换全部出现（行号为第一处命中），缺省要求恰好出现一次。\n"+
 				"- 每条各自原子：某条失败（未找到/多次出现未设 replace_all/编码无法表示）该条零改动、其余照常生效；同一文件的多条按顺序生效，全部应用完只写一次盘。\n"+
 				"- 非 UTF-8 文件（GBK/GB18030/UTF-16）按原编码解码匹配、按**原编码写回**（GBK 仍是 GBK、BOM 保留）；emoji 等原编码无法表示的字符 → 该条失败，改用 write 存 UTF-8。\n"+
-				"- 结果是逐条状态（✅ 文件名:行号 / ❌ 未生效原因），文件级失败单独一行；每个被改文件自动打快照。\n"+
+				"- 结果是逐条状态：条目行「✅ 文件:行号 已替换 N 处」/「❌ 文件 第 N 条未生效：原因」；文件级信息（编码保持、回读异常、整文件读写失败）另起一行、以 ↳ 缩进标记，不归属相邻条目。\n"+
+				"- 每个被改文件自动打快照（编辑历史可回退）；例外：.jxai 系统子目录（tmp 等）下的文件不落快照、不可回退。\n"+
 				"- 只读档被拒后，工作区内目标带 sandbox_permissions=workspace-write、工作区外目标带 full 与 justification 重试一次即可申请放行（弹审批）。\n"+
 				"多文件或多处修改一律一次调用，禁止逐条调用。",
 			objSchema(map[string]any{
@@ -837,27 +854,29 @@ type editFileState struct {
 	eol      string
 	orig     string // 落盘前内容（LF 归一域）
 	content  string // 按序应用成功条目后的内容（LF 归一域）
-	note     string // 落盘成功后的注记（编码保持/回读异常）
+	note     string // 文件级注记（编码保持/回读异常），单独成 ↳ 行
 	items    []int  // 该文件涉及的条目下标（输入顺序）
-	lastOK   int    // 该文件最后一条成功条目的下标（-1 = 没有）
 	okCount  int    // 该文件成功条目的条数
 }
 
 // 批量 edit 结果行的状态标记（context.go 的折叠视图按它们数成功/失败条数，
-// 两边必须同源）。
+// 两边必须同源）。editNoteMark 是文件级行的缩进标记：条目行只讲该条自己的事，
+// 编码保持/回读异常这类「整个文件的事」单独成行——挂在最后一条成功行上会
+// 看起来像是「只有那一条没校验/没按原编码写」。
 const (
 	editOKMark   = "✅ "
 	editFailMark = "❌ "
+	editNoteMark = "↳ "
 )
 
-// editItemResult 是一条修改的结果，渲染成一行 ✅/❌。
+// editItemResult 是一条修改的结果，渲染成一行 ✅/❌。条目行只装这一条自己的事
+// （行号、替换处数、失败原因），文件级的注记不进这里。
 type editItemResult struct {
 	disp       string
 	line       int
 	count      int
 	replaceAll bool
 	fail       string
-	extra      string // 成功行的附加注记（落盘后的编码/回读情况）
 }
 
 func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
@@ -871,10 +890,10 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 		items = []editItem{p.editItem}
 	}
 	if len(items) == 0 {
-		return "", fmt.Errorf("edits 不能为空：请给出 1-%d 条修改，例如 {\"edits\":[{\"path\":\"a.go\",\"old_string\":\"a\",\"new_string\":\"b\"}]}", editMaxItems)
+		return "", fmt.Errorf("edits 不能为空：请给出 1-%d 条修改，例如 {\"edits\":[{\"path\":\"a.go\",\"old_string\":\"a\",\"new_string\":\"b\"}]}（本次未做任何改动）", editMaxItems)
 	}
 	if len(items) > editMaxItems {
-		return "", fmt.Errorf("一次最多 %d 条修改（收到 %d 条）：请分批，每批最多 %d 条", editMaxItems, len(items), editMaxItems)
+		return "", fmt.Errorf("一次最多 %d 条修改（收到 %d 条）：请分批，每批最多 %d 条（本次未做任何改动）", editMaxItems, len(items), editMaxItems)
 	}
 
 	states := make(map[string]*editFileState, len(items))
@@ -944,7 +963,6 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 		}
 		st.content = next
 		st.okCount++
-		st.lastOK = i
 		res.line, res.count = 1+strings.Count(cur[:idx], "\n"), replaced
 	}
 
@@ -974,19 +992,20 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 		// 盲改不可能通过），故不设 read 前置；落盘后记为已观察，后续 write 覆盖
 		// 随之放行（对齐 DSH「刚编辑过视为已观察」）。
 		t.markObserved(st.abs)
-		st.note = editKeepNote(st.enc) + readBackAnomaly(outBytes, readBack, verified)
-	}
-
-	// 文件级注记挂到该文件最后一条成功的结果行上，避免每个文件多一行噪音。
-	for _, st := range order {
-		if st.note != "" && st.lastOK >= 0 {
-			results[st.lastOK].extra = st.note
-		}
+		st.note = editFileNote(st.enc, outBytes, readBack, verified)
 	}
 
 	var b strings.Builder
 	okSum, failSum := 0, 0
 	fileLine := make(map[string]bool, len(order))
+	// 每个文件的最后一条条目下标：文件级注记在那里单独成行（↳ 缩进），不挂在最后
+	// 一条成功行的尾巴上——挂上去看起来像是「只有那一条没校验/没按原编码写」。
+	lastOfFile := make(map[string]int, len(order))
+	for i, st := range itemState {
+		if st != nil {
+			lastOfFile[st.key] = i
+		}
+	}
 	for i, res := range results {
 		st := itemState[i]
 		if st != nil && (st.loadErr != "" || st.writeErr != "") {
@@ -998,25 +1017,29 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 			if st.writeErr != "" {
 				kind, reason = "写入失败", st.writeErr
 			}
-			fmt.Fprintf(&b, "%s%s：%s：%s（该文件内这 %d 条均未生效）\n", editFailMark, st.disp, kind, strings.TrimSpace(reason), len(st.items))
+			// 整文件读写失败：保留 ❌（折叠视图靠它认部分失败），但用 ↳ 缩进表明
+			// 作用域是整个文件，不与「第 N 条未生效」的条目行混同。
+			fmt.Fprintf(&b, "%s%s%s：%s：%s（该文件内这 %d 条均未生效）\n", editNoteMark, editFailMark, st.disp, kind, strings.TrimSpace(reason), len(st.items))
 			failSum += len(st.items)
 			continue
 		}
 		if res.fail != "" {
 			fmt.Fprintf(&b, "%s%s 第 %d 条未生效：%s%s\n", editFailMark, res.disp, i+1, res.fail, editSiblingsNote(st, res))
 			failSum++
-			continue
+		} else {
+			// 成功行只讲这一条：文件名:命中行号 + 替换处数（便捷核对改的是哪一处）
+			line := fmt.Sprintf("%s%s:%d 已替换 %d 处", editOKMark, res.disp, res.line, res.count)
+			if res.replaceAll && res.count > 1 {
+				// 多处替换时行号只是第一处命中的位置：不说清会被当成唯一定位点
+				line += "（replace_all，行号为第一处）"
+			}
+			b.WriteString(line + "\n")
+			okSum++
 		}
-		// 成功行：文件名:命中行号 + 替换处数（便捷核对，模型一眼看出改的是哪一处）
-		line := fmt.Sprintf("%s%s:%d 已替换 %d 处", editOKMark, res.disp, res.line, res.count)
-		if res.replaceAll {
-			line += "（replace_all）"
+		// 文件级信息：等该文件的条目都排完再单独一行（只在有话说时出现）
+		if st != nil && lastOfFile[st.key] == i && st.note != "" {
+			fmt.Fprintf(&b, "%s%s：%s\n", editNoteMark, st.disp, st.note)
 		}
-		if res.extra != "" {
-			line += res.extra
-		}
-		b.WriteString(line + "\n")
-		okSum++
 	}
 	out := strings.TrimRight(b.String(), "\n")
 	if len(items) > 1 {
@@ -1038,7 +1061,7 @@ func editFileKey(t *toolContext, abs string) string {
 // openEditFile 读入一个文件并解成文本（批量 edit 的读取阶段）。失败原因写进
 // loadErr 而不是返回 error：同批其它文件照常改，这个文件的条目统一报这一个原因。
 func (t *toolContext) openEditFile(abs, disp, key string) *editFileState {
-	st := &editFileState{abs: abs, disp: disp, key: key, lastOK: -1}
+	st := &editFileState{abs: abs, disp: disp, key: key}
 	if _, err := t.authorize(permAction{Op: "read", Tool: "edit", Path: abs}); err != nil {
 		st.loadErr = err.Error()
 		return st
@@ -1061,28 +1084,37 @@ func (t *toolContext) openEditFile(abs, disp, key string) *editFileState {
 	return st
 }
 
-// editKeepNote 说明写回用了哪种编码（编码悄悄变掉是 edit 最坏的失败方式之一）。
-func editKeepNote(enc TextEncoding) string {
+// editFileNote 组装文件级注记（↳ 行的正文）：编码保持、回读异常这类「整个文件」
+// 的信息不挂在某条成功行尾巴上（挂上去会读成「只有那条没校验」）。回读一致且
+// 编码未变时返回空串——正常情况不刷屏。
+func editFileNote(enc TextEncoding, wrote, readBack []byte, verified bool) string {
+	var parts []string
 	switch {
 	case enc.needsPreserveBytes():
-		return fmt.Sprintf("（已写盘，保持原 %s 编码写回）", enc)
+		parts = append(parts, fmt.Sprintf("已写盘，保持原 %s 编码写回", enc))
 	case enc == EncUnknown:
 		// 编码无法确定的文件只能按 UTF-8 落盘；明确说出来，不让它在模型不知情时变掉
-		return "（已写盘，原文件编码无法确定，已按 UTF-8 无 BOM 写回）"
+		parts = append(parts, "已写盘，原文件编码无法确定，已按 UTF-8 无 BOM 写回")
 	}
-	return ""
+	if rb := readBackAnomalyText(wrote, readBack, verified); rb != "" {
+		if len(parts) == 0 {
+			parts = append(parts, "已写盘")
+		}
+		parts = append(parts, rb)
+	}
+	return strings.Join(parts, "；")
 }
 
-// readBackAnomaly 只报异常：回读成功且一致时不占篇幅（批量里每文件一句
+// readBackAnomalyText 只报异常：回读成功且一致时返回空串（批量里每文件一句
 // 「回读一致」纯属噪音），不一致或没回读成时必须让模型当场看见。
-func readBackAnomaly(wrote, readBack []byte, verified bool) string {
+func readBackAnomalyText(wrote, readBack []byte, verified bool) string {
 	if !verified {
-		return "；未回读校验"
+		return "未回读校验"
 	}
 	if bytes.Equal(wrote, readBack) {
 		return ""
 	}
-	note := fmt.Sprintf("；⚠ 回读与写入不一致（写 %d 读 %d 字节），可能被外部程序改写或转了编码", len(wrote), len(readBack))
+	note := fmt.Sprintf("⚠ 回读与写入不一致（写 %d 读 %d 字节），可能被外部程序改写或转了编码", len(wrote), len(readBack))
 	if bytes.HasPrefix(readBack, []byte{0xEF, 0xBB, 0xBF}) {
 		note += "，且回读带 UTF-8 BOM"
 	}

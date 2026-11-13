@@ -41,6 +41,8 @@
      弹窗层（dialog/pop/confirm）之间留空档，插新层往空档里放。
        70   久等声光提醒层：压聊天区；有意让位给设置页（--z-page）——提醒里那行
             「可在设置·常规里关闭」的入口要点得动（见 #settings 处注释）
+     150   图片悬停预览层：悬停缩略图弹出的放大浮层（见 .img-zoom）——只是「多看一眼」
+           的辅助视窗，压聊天区，但让位给下面所有页面层与弹层
      200   动画幽灵层：加号吞卡片的飞行动画（app-chat.js vanishIntoPlus 内联引用）
      210   窄屏整屏页面：左/右栏
      220   窄屏顶栏（页面层）
@@ -50,6 +52,7 @@
      250   居中确认框：可能叠在任何页面与弹窗之上（设置内删技能等），弹窗里永远最高
     10000  更新横幅 / 10001 轻提示：全局最上，不受页面弹窗影响 */
   --z-ask-alert: 70;
+  --z-zoom: 150;
   --z-ghost: 200;
   --z-panel: 210;
   --z-topbar: 220;
@@ -2845,6 +2848,35 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
   border: 1px solid var(--border-2); cursor: zoom-in; display: block;
 }
 .tc-img:hover { border-color: var(--accent); }
+
+/* ---------- 图片悬停放大预览浮层（输入框附件缩略图 .attach-thumb 与消息里的图片
+   .tc-img 共用同一枚；行为见 app-chat.js「图片悬停放大预览」节） ----------
+   挂 body + position:fixed 是硬要求：图片坐在 .bubble / .proc-body / .attach-rail
+   这些有 overflow 裁剪的容器里，就地插入的浮层会被切掉。
+   按原图比例展示靠 img 的 max-width/max-height（80vw × 80vh）；「放哪」由 JS 算。
+   隐藏态用 visibility 而不是 display:none——量尺寸时必须有布局。 */
+.img-zoom {
+  position: fixed; left: 0; top: 0; z-index: var(--z-zoom);
+  padding: 6px; border-radius: 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  box-shadow: 0 14px 44px rgba(16, 20, 26, .22);
+  /* 整块浮层（含边框与内边距）不超 80vw × 80vh；下面的 img 再按扣掉 14px
+     （6px 内边距 ×2 + 1px 边框 ×2）的上限收一次，两条一起才不会因为镶边多出十几像素 */
+  max-width: 80vw; max-height: 80vh;
+  visibility: hidden; opacity: 0; transform: scale(.985);
+  transition: opacity .12s ease, transform .12s ease;
+  pointer-events: none; /* 未显示时不挡鼠标：否则浮层位置会吃掉下面的悬停 */
+}
+/* 显示后接指针事件：从缩略图挪进浮层算「还在看」，不收起（见 JS 的 pointerenter） */
+.img-zoom.show { visibility: visible; opacity: 1; transform: none; pointer-events: auto; }
+.img-zoom img {
+  display: block; border-radius: 8px;
+  /* 按原图比例：只给上限、不写死宽高，双上限自然等比缩放 */
+  max-width: calc(80vw - 14px); max-height: calc(80vh - 14px);
+}
+:root[data-theme='dark'] .img-zoom { background: #1d2026; box-shadow: 0 14px 44px rgba(0, 0, 0, .55); }
+/* 可预览的图：触屏长按＝预览（同一枚浮层），别让系统的图片长按菜单抢先弹出来 */
+.attach-thumb, .tc-img { -webkit-touch-callout: none; }
 
 /* ---------- 提问/计划审批卡片 与 待办面板 ---------- */
 .q-card .ap-body p { margin: 0; font-size: 13px; color: var(--text); }

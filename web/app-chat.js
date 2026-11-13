@@ -8768,6 +8768,205 @@ function setupScrollTuck() {
   }
 }
 
+/* ---------- 图片悬停放大预览（输入框附件缩略图 / 消息里的图片共用一枚浮层） ----------
+   两处图片来源：输入框上方的待发附件缩略图 .attach-thumb，以及消息里显示的图片
+   .tc-img。它们各自被 overflow 容器裁着（.attach-rail / .bubble / .proc-body），
+   所以浮层只能挂 body + position:fixed，全页只建一枚节点、反复复用——图片密集的
+   消息里连续划过不新建 DOM，也就不会卡。
+
+   为什么要延迟：一碰就弹，扫过一排缩略图就是一路闪。停 340ms 才算「想看」；移开
+   140ms 才收——这段空隙正是缩略图与浮层之间的距离，指针落进浮层即取消收起，来回
+   移动不会闪。
+
+   点击行为一律不动：鼠标照旧是图片原有的行为（.tc-img 是打开原图的链接，缩略图
+   本来没有点击动作），浮层只是「多看一眼」。触屏没有 hover：长按 450ms 出同一枚
+   浮层，点空白处收；短按仍走原有行为。 */
+
+const ZOOM_SEL = '.attach-thumb, .tc-img'; // 可预览的图（新增图片型展示时加进这里即可）
+const ZOOM_SHOW_DELAY = 340;  // 悬停多久才弹（300–500ms 区间：够稳，又不至于等得以为没反应）
+const ZOOM_HIDE_DELAY = 140;  // 移开后多久收（留出「缩略图 → 浮层」的空隙）
+const ZOOM_LONG_PRESS = 450;  // 触屏长按阈值
+const ZOOM_MOVE_TOL = 8;      // 长按期间手指移动超过它就算滑动，取消预览
+const ZOOM_MARGIN = 10;       // 浮层与视口边缘的最小留白
+const ZOOM_GAP = 12;          // 浮层与图片之间的间距
+
+let zoomBox = null, zoomPic = null;
+let zoomAnchor = null;        // 浮层当前对应的那张缩略图（收起时清空）
+let zoomShown = false;
+let zoomShowTimer = 0, zoomHideTimer = 0;
+let zoomPress = null, zoomPressTimer = 0, zoomClickGuard = false;
+
+// 浮层节点（懒建、全页唯一）：图与外壳一起复用，只换 img 的地址
+function zoomNode() {
+  if (zoomBox) return zoomBox;
+  zoomBox = document.createElement('div');
+  zoomBox.className = 'img-zoom';
+  zoomPic = document.createElement('img');
+  zoomPic.alt = '';
+  zoomPic.decoding = 'async';
+  // 浮层里的图自己失败（附件被 ✕ 掉 objectURL 已回收、远端 404）：立刻收，不留空白框
+  zoomPic.addEventListener('error', zoomHideNow);
+  zoomPic.addEventListener('load', () => { if (zoomAnchor && zoomPic.naturalWidth) zoomReveal(); });
+  zoomBox.appendChild(zoomPic);
+  document.body.appendChild(zoomBox); // 挂 body：哪一层 overflow 都裁不到它
+  zoomBox.addEventListener('pointerenter', zoomCancelHide);   // 指针挪进浮层：别收
+  zoomBox.addEventListener('pointerleave', zoomScheduleHide);
+  zoomBox.addEventListener('click', (e) => e.stopPropagation()); // 点浮层不穿透到下面的消息
+  return zoomBox;
+}
+
+// 定位：原图比例与 80vw×80vh 上限由 CSS 的 max-width/max-height 保证，这里只解决
+// 「放哪」——优先图片右侧，右侧放不下换左侧（避免盖住刚悬停的那张），左右都不行
+// （460px 窄屏就是这样）再试上下，四边都放不下就把居中对齐夹回视口内。任何情况
+// 都不越界、不被裁。
+function zoomPlace(rect, w, h) {
+  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const m = ZOOM_MARGIN;
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const maxL = vw - m - w, maxT = vh - m - h;
+  const cx = clamp(rect.left + rect.width / 2 - w / 2, m, maxL); // 水平居中（已夹回视口）
+  const cy = clamp(rect.top + rect.height / 2 - h / 2, m, maxT); // 垂直居中（已夹回视口）
+  const fits = (l, t) => l >= m && t >= m && l + w <= vw - m && t + h <= vh - m;
+  const cands = [
+    [rect.right + ZOOM_GAP, cy],     // 右
+    [rect.left - ZOOM_GAP - w, cy],  // 左
+    [cx, rect.bottom + ZOOM_GAP],    // 下
+    [cx, rect.top - ZOOM_GAP - h],   // 上
+  ];
+  for (const [l, t] of cands) if (fits(l, t)) return { left: l, top: t };
+  return { left: cx, top: cy }; // 都放不下：居中夹回视口（窄屏兜底，绝不越界）
+}
+
+// 弹出：等浮层里的图解码好再显示（没画出来的图弹出来只会是一个空框）
+function zoomShowFor(img) {
+  if (!img) return;
+  const src = img.currentSrc || img.src;
+  if (!src) return;                                // 还没有地址（远程 blob 未就绪等）
+  if (img.complete && !img.naturalWidth) return;    // 源图自己就没加载成功：不弹
+  zoomNode();
+  zoomAnchor = img;
+  zoomCancelHide();
+  if (zoomPic.getAttribute('src') !== src) zoomPic.src = src; // 复用节点：只换地址
+  if (zoomPic.complete && zoomPic.naturalWidth) zoomReveal(); // 已缓存：立刻出
+  // 否则等 zoomNode 里那个 load 监听（届时若已移开，zoomAnchor 已清空，自然不弹）
+}
+
+function zoomReveal() {
+  if (!zoomAnchor || !zoomPic.naturalWidth) return;
+  // 隐藏态用 visibility:hidden，仍有布局，可直接量出「按原图比例 + 80vw/80vh 上限」的尺寸
+  const w = zoomBox.offsetWidth, h = zoomBox.offsetHeight;
+  const pos = zoomPlace(zoomAnchor.getBoundingClientRect(), w, h);
+  zoomBox.style.left = pos.left + 'px';
+  zoomBox.style.top = pos.top + 'px';
+  zoomBox.classList.add('show');
+  zoomShown = true;
+}
+
+function zoomHideNow() {
+  clearTimeout(zoomShowTimer); zoomShowTimer = 0;
+  clearTimeout(zoomHideTimer); zoomHideTimer = 0;
+  zoomAnchor = null;
+  zoomShown = false;
+  if (zoomBox) zoomBox.classList.remove('show');
+}
+
+function zoomScheduleHide() {
+  if (!zoomShown) { zoomAnchor = null; return; }
+  if (zoomHideTimer) return; // 已排上：多个 pointerout（子元素/嵌套）不重复排
+  zoomHideTimer = setTimeout(() => {
+    zoomHideTimer = 0;
+    // 到点再看一眼指针实际在哪：浮层正好弹在指针下方时（大图盖住缩略图），
+    // pointerenter(浮层) 与 pointerout(缩略图) 的先后没有保证，只靠「取消计时」
+    // 会漏一次——指针其实还压在图/浮层上，就不收。
+    if (zoomBox && zoomBox.matches(':hover')) return;
+    if (zoomAnchor && zoomAnchor.matches(':hover')) return;
+    zoomHideNow();
+  }, ZOOM_HIDE_DELAY);
+}
+
+function zoomCancelHide() {
+  if (zoomHideTimer) { clearTimeout(zoomHideTimer); zoomHideTimer = 0; }
+}
+
+function zoomClosestImg(el) {
+  return el && el.closest ? el.closest(ZOOM_SEL) : null; // 只认 Element（文本节点没有 closest）
+}
+
+function setupImageZoom() {
+  const isTouch = (e) => e.pointerType === 'touch' || e.pointerType === 'pen';
+
+  // 悬停进入：计时弹；从一个缩略图挪到另一张时重排计时（浮层跟着换图）
+  document.addEventListener('pointerover', (e) => {
+    if (isTouch(e)) return; // 触屏走长按，不做悬停
+    const img = zoomClosestImg(e.target);
+    if (!img) return;
+    zoomCancelHide(); // 浮层 → 缩略图：不收了
+    if (zoomAnchor === img && zoomShown) return;
+    clearTimeout(zoomShowTimer);
+    zoomShowTimer = setTimeout(() => { zoomShowTimer = 0; zoomShowFor(img); }, ZOOM_SHOW_DELAY);
+  });
+
+  // 悬停离开：还没弹就取消计时（扫过一排图根本不会弹）；已经弹了排上延迟收起
+  document.addEventListener('pointerout', (e) => {
+    if (isTouch(e)) return;
+    if (!zoomClosestImg(e.target)) return;
+    clearTimeout(zoomShowTimer); zoomShowTimer = 0;
+    if (zoomShown) zoomScheduleHide();
+  });
+
+  // 触屏：长按出同一枚浮层；按在空白处则收
+  document.addEventListener('pointerdown', (e) => {
+    const img = zoomClosestImg(e.target);
+    if (!img) {
+      if (zoomShown && !zoomBox.contains(e.target)) zoomHideNow(); // 点空白处关闭
+      return;
+    }
+    if (!isTouch(e)) return; // 鼠标靠悬停
+    zoomPress = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    clearTimeout(zoomPressTimer);
+    zoomPressTimer = setTimeout(() => {
+      zoomPressTimer = 0;
+      zoomPress = null;
+      // 长按之后浏览器还会补一个 click（点图片＝打开原图）：只吞这一次余波
+      zoomClickGuard = true;
+      setTimeout(() => { zoomClickGuard = false; }, 700);
+      zoomShowFor(img);
+    }, ZOOM_LONG_PRESS);
+  }, { passive: true });
+
+  document.addEventListener('pointermove', (e) => {
+    if (!zoomPress || e.pointerId !== zoomPress.id) return;
+    if (Math.abs(e.clientX - zoomPress.x) > ZOOM_MOVE_TOL ||
+        Math.abs(e.clientY - zoomPress.y) > ZOOM_MOVE_TOL) {
+      clearTimeout(zoomPressTimer); zoomPressTimer = 0;
+      zoomPress = null; // 滑起来了：这是滚动，不是长按
+    }
+  }, { passive: true });
+
+  const zoomPressEnd = (e) => {
+    if (!zoomPress || (e && e.pointerId !== zoomPress.id)) return;
+    clearTimeout(zoomPressTimer); zoomPressTimer = 0;
+    zoomPress = null;
+  };
+  document.addEventListener('pointerup', zoomPressEnd, { passive: true });
+  document.addEventListener('pointercancel', zoomPressEnd, { passive: true });
+
+  // 长按弹出的余波 click 吞掉（capture 抢在图片链接/卡片之前）；短按照旧
+  document.addEventListener('click', (e) => {
+    if (!zoomClickGuard) return;
+    zoomClickGuard = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+
+  // 位置会变的一切情况（滚动、改窗口大小）一律收起，不留一张飘在原处的浮层；
+  // Esc 同效。scroll 不冒泡，用 capture 才能听到内层容器的滚动
+  document.addEventListener('scroll', () => { if (zoomShown || zoomShowTimer) zoomHideNow(); }, true);
+  window.addEventListener('resize', () => { if (zoomShown || zoomShowTimer) zoomHideNow(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && zoomShown) zoomHideNow(); });
+}
+
 $('btn-send').onclick = send;
 $('btn-stop').onclick = () => stopRun(mainView);
 $('btn-plus').onclick = () => openPlusMenu(mainView);
@@ -9051,4 +9250,5 @@ $('input').addEventListener('input', () => {
   scheduleMainDraft();
 });
 window.addEventListener('beforeunload', () => { flushMainDraft(); flushSubDraft(); });
+setupImageZoom(); // 图片悬停预览：文档级委托（两处图片、两个视图共用一套）
 jxDiag('init:app-chat.js 顶层执行完毕');

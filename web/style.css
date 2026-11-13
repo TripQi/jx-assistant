@@ -2780,6 +2780,44 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
   font-size: 12px; color: #c22f2f; border: none; background: none; cursor: pointer; padding: 2px 0;
 }
 .mr-del2:hover { text-decoration: underline; }
+
+/* 上下文窗口 / 最大输出：数字框 + 右侧展开的预设档位下拉（可输入的下拉）。
+   浮层由 JS 挂到 body 上并 position:fixed——模型编辑区在 .model-cat（overflow:
+   hidden）与设置滚动容器里，就地绝对定位会被裁掉；JS 按输入框位置上下翻转、
+   左右夹进视口，460px 窄屏也不越界、不横向溢出。 */
+.tok-combo { position: relative; display: block; }
+.tok-combo-in { padding-right: 30px; }
+/* 数字框的原生加减箭头会与本控件右侧的展开箭头叠在一起，去掉原生那对
+   （上下键的档位选择由本控件接管） */
+.tok-combo-in::-webkit-outer-spin-button,
+.tok-combo-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.tok-combo-btn {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; padding: 0; display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px; background: none; color: var(--text-3); cursor: pointer;
+}
+.tok-combo-btn:hover { color: var(--accent); background: var(--hover); }
+.tok-combo-btn svg { width: 14px; height: 14px; }
+.tok-combo-pop {
+  position: fixed; z-index: var(--z-dialog); padding: 5px; box-sizing: border-box;
+  max-height: min(280px, 50vh); overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(20, 24, 32, .14);
+}
+:root[data-theme='dark'] .tok-combo-pop { box-shadow: 0 8px 28px rgba(0, 0, 0, .5); }
+/* 每行两段：易读简称 + 精确数字（简称只是入口，填进输入框的始终是精确值） */
+.tok-opt {
+  display: flex; align-items: baseline; gap: 2px; width: 100%;
+  padding: 7px 10px; font-size: 13px; color: var(--text-2); text-align: left;
+  background: none; border: none; border-radius: 8px; cursor: pointer;
+  white-space: nowrap; overflow: hidden;
+}
+.tok-opt:hover, .tok-opt.active { background: var(--hover); color: var(--text); }
+.tok-opt-k { flex: none; }
+.tok-opt-v { color: var(--text-3); font-size: 12px; font-family: Consolas, "Courier New", monospace; }
+.tok-opt.cur { color: var(--accent); font-weight: 600; }
+.tok-opt.cur .tok-opt-v { color: var(--accent); }
+
 .mc-add {
   width: 100%; padding: 8px; border: none; border-top: 1px solid var(--border);
   background: var(--bg); color: var(--text-2); font-size: 12px; cursor: pointer;

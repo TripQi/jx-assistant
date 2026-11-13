@@ -366,6 +366,8 @@ func TestRequestManagerEndToEndWithFakeModel(t *testing.T) {
 	a.Cfg.Providers = []ProviderCfg{{ID: "fake", Name: "假模型", BaseURL: srv.URL, APIKey: "test",
 		Models: []ModelCfg{{ID: "fake-1", Name: "假模型"}}}}
 	a.Cfg.BaseURL = "" // 不留裸配置回落，调用一律走假模型
+	// 默认模型体系：会话没手选时跟全局默认模型（不再拿第一个渠道充数）
+	a.Cfg.DefaultModel = ModelRef{Provider: "fake", Model: "fake-1"}
 
 	run, ok := a.beginRun(task.ID)
 	if !ok {

@@ -69,6 +69,8 @@ func TestSteerInterruptsModelStream(t *testing.T) {
 	a.Cfg.Workspace = t.TempDir()
 	a.Cfg.Providers = []ProviderCfg{{ID: "fakep", Name: "假渠道", BaseURL: srv.URL,
 		Models: []ModelCfg{{ID: "fake-m"}}}}
+	// 默认模型体系：会话没手选时跟全局默认模型
+	a.Cfg.DefaultModel = ModelRef{Provider: "fakep", Model: "fake-m"}
 	a.Components = &ComponentRegistry{}
 	m := &SessionMeta{ID: "steerkick", Title: "插话打断测试", Mode: "task",
 		Workspace: a.Cfg.Workspace, CreatedAt: now(), UpdatedAt: now()}
@@ -188,6 +190,8 @@ func TestSteerDuringToolRunWaitsForNextStep(t *testing.T) {
 	a.Cfg.Workspace = t.TempDir()
 	a.Cfg.Providers = []ProviderCfg{{ID: "fakep", Name: "假渠道", BaseURL: srv.URL,
 		Models: []ModelCfg{{ID: "fake-m"}}}}
+	// 默认模型体系：会话没手选时跟全局默认模型
+	a.Cfg.DefaultModel = ModelRef{Provider: "fakep", Model: "fake-m"}
 	a.Components = &ComponentRegistry{}
 	m := &SessionMeta{ID: "steertool", Title: "工具中插话测试", Mode: "task",
 		Workspace: a.Cfg.Workspace, CreatedAt: now(), UpdatedAt: now()}

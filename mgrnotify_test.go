@@ -429,6 +429,8 @@ func TestMgrNotifyEndToEndManagerProxiesViaCallAPI(t *testing.T) {
 	a.Cfg.Providers = []ProviderCfg{{ID: "fake", Name: "假模型", BaseURL: srv.URL, APIKey: "test",
 		Models: []ModelCfg{{ID: "fake-1", Name: "假模型"}}}}
 	a.Cfg.BaseURL = ""
+	// 默认模型体系：会话没手选时跟全局默认模型
+	a.Cfg.DefaultModel = ModelRef{Provider: "fake", Model: "fake-1"}
 
 	// 任务会话（经理派生）挂一张没人答的提问卡，等通知把经理叫醒
 	q := &UserQuestion{Kind: askKindAsk, Question: "选哪个方案？",

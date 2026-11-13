@@ -39,6 +39,8 @@ func newAssistantOpsFixture(t *testing.T) *assistantOpsFixture {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 默认模型体系：会话没手选时一律跟全局默认模型（不再自动拿第一个渠道）
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	newSess := func(id, title, mode, parent string) *SessionMeta {
 		m := &SessionMeta{ID: id, Title: title, Mode: mode, ParentID: parent,
 			Workspace: a.Cfg.Workspace, CreatedAt: now(), UpdatedAt: now()}

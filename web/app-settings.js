@@ -118,6 +118,195 @@ function modelDraftOf(m) {
   };
 }
 
+/* ---------- 上下文窗口 / 最大输出的预设档位 ---------- */
+
+// 「拉取模型」拉回来的条目常常没有这两个数（服务端不报），用户只能手敲六七位
+// 数字、还得自己数零——这里给一组常见档位，点一下就填精确值。
+// 每组都同时留「整数 K/M」与「2 的幂」两种口径：不同厂商报的不是一回事
+//（配置里实测见过 maxOutput 393216 这种整数 K 写法），只给一种口径会把人带偏。
+const TOKEN_PRESETS = {
+  contextWindow: [
+    ['32K', 32768], ['128K', 131072], ['200K', 204800], ['256K', 262144],
+    ['400K', 409600], ['500K', 512000], ['1M', 1000000], ['1M', 1048576],
+    ['1.05M', 1050000],
+  ],
+  maxOutput: [
+    ['4K', 4096], ['8K', 8192], ['16K', 16384], ['32K', 32768], ['64K', 65536],
+    ['128K', 128000], ['128K', 131072], ['256K', 262144], ['384K', 393216],
+    ['500K', 512000],
+  ],
+};
+
+// 当前展开的档位浮层（同一时刻只开一个；卡片重渲染、关设置时统一收起）
+let tokenComboOpen = null;
+
+function closeTokenCombo() {
+  if (tokenComboOpen) tokenComboOpen.close();
+}
+
+// 千分位：档位里的精确值要能被人一眼逐位核对（1048576 → 1,048,576）
+function tokNum(n) { return n.toLocaleString('en-US'); }
+
+// tokenCombo(kind, value, apply, placeholder)：数字输入框 + 预设档位下拉，即
+// 「可输入的下拉」。空串/0 的语义、手输解析（parseInt||0）全部走原来的 apply
+// ——点档位与手敲是同一条路，不新增任何校验分支。
+// 三条刻意的取舍：
+//   1. 输入框里只显示原始数字（与配置文件一致），简称只出现在下拉里，免得用户
+//      以为自己填的是「1M」；
+//   2. 打开下拉不做任何自动改写——已有自定义值不会被「纠正」成预设档位；
+//   3. 浮层挂到 body 上做 position:fixed：模型编辑区在 .model-cat（overflow:hidden）
+//      与设置滚动容器里，就地绝对定位会被裁掉；JS 按输入框位置翻上下、左右夹在
+//      视口内，460px 窄屏也不越界。
+function tokenCombo(kind, value, apply, placeholder) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tok-combo';
+  const input = document.createElement('input');
+  input.className = 'pf-input tok-combo-in';
+  input.type = 'number';
+  input.min = '0';
+  input.placeholder = placeholder || '';
+  input.value = value || '';
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-expanded', 'false');
+  input.setAttribute('aria-haspopup', 'listbox');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tok-combo-btn';
+  btn.tabIndex = -1;        // Tab 停在输入框上就够，不必多一站
+  btn.title = '选择预设档位';
+  btn.setAttribute('aria-label', '选择预设档位');
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+  wrap.appendChild(input);
+  wrap.appendChild(btn);
+
+  const commit = () => apply(input.value); // 手输与点档位共用这一个出口
+  input.oninput = () => commit();
+
+  let pop = null;      // 本次展开的浮层
+  let items = [];      // 档位按钮（键盘高亮按它走）
+  let active = -1;
+
+  const close = () => {
+    if (!pop) return;
+    document.removeEventListener('mousedown', onDocDown, true);
+    window.removeEventListener('resize', place);
+    window.removeEventListener('scroll', onScroll, true);
+    input.setAttribute('aria-expanded', 'false');
+    pop.remove();
+    pop = null; items = []; active = -1;
+    if (tokenComboOpen === handle) tokenComboOpen = null;
+  };
+  const handle = { close };
+
+  // 按输入框的当前位置摆放浮层：下方放不下且上方更宽裕就翻到上面，左右夹在视口内
+  const place = () => {
+    if (!pop) return;
+    if (!input.isConnected) { close(); return; }
+    const r = input.getBoundingClientRect();
+    if (!r.width) { close(); return; }
+    const vw = document.documentElement.clientWidth || window.innerWidth || 0;
+    const vh = document.documentElement.clientHeight || window.innerHeight || 0;
+    const w = Math.min(Math.max(r.width, 140), vw - 16);
+    pop.style.width = Math.round(w) + 'px';
+    pop.style.left = Math.round(Math.min(Math.max(8, r.left), vw - w - 8)) + 'px';
+    const ph = pop.offsetHeight; // open 后已 display:block，能量到真实高度
+    const gap = 4;
+    const below = vh - r.bottom - gap - 8;
+    const above = r.top - gap - 8;
+    const up = below < ph && above > below;
+    pop.style.top = Math.round(up ? Math.max(8, r.top - gap - ph) : r.bottom + gap) + 'px';
+  };
+  function onScroll() { place(); }
+  function onDocDown(e) {
+    if (!pop) return;
+    if (wrap.contains(e.target) || pop.contains(e.target)) return;
+    close();
+  }
+
+  const setActive = (i) => {
+    if (!items.length) return;
+    active = (i + items.length) % items.length;
+    items.forEach((el, idx) => el.classList.toggle('active', idx === active));
+    items[active].scrollIntoView({ block: 'nearest' });
+  };
+
+  const pick = (num) => {
+    input.value = String(num);
+    commit();     // 与手输同一条保存路径：模型草稿即时更新，点「保存」落盘
+    close();
+    input.focus(); // 选完停在输入框，接着手改数字也不用再点一次
+  };
+
+  const open = (dir) => {
+    if (pop) { close(); return; } // 再点一次＝收起
+    closeTokenCombo();            // 同时只开一个
+    const curNum = parseInt(input.value, 10) || 0;
+    pop = document.createElement('div');
+    pop.className = 'tok-combo-pop';
+    pop.setAttribute('role', 'listbox');
+    pop.setAttribute('aria-label', (kind === 'maxOutput' ? '最大输出' : '上下文窗口') + '预设档位');
+    items = (TOKEN_PRESETS[kind] || []).map(([short, num]) => {
+      const it = document.createElement('button');
+      it.type = 'button';
+      it.className = 'tok-opt' + (curNum > 0 && num === curNum ? ' cur' : '');
+      it.setAttribute('role', 'option');
+      it.setAttribute('aria-selected', curNum > 0 && num === curNum ? 'true' : 'false');
+      it.title = short + '（' + tokNum(num) + '）';
+      it.dataset.v = String(num); // Enter 确认时按它取精确值（不解析显示文本）
+      const k = document.createElement('span');
+      k.className = 'tok-opt-k';
+      k.textContent = short;
+      const v = document.createElement('span');
+      v.className = 'tok-opt-v';
+      v.textContent = '（' + tokNum(num) + '）';
+      it.appendChild(k);
+      it.appendChild(v);
+      it.onmousedown = (e) => e.preventDefault(); // 别抢走输入框的焦点，展开后上下键即刻可用
+      it.onclick = (e) => { e.stopPropagation(); pick(num); };
+      pop.appendChild(it);
+      return it;
+    });
+    document.body.appendChild(pop);
+    tokenComboOpen = handle;
+    input.setAttribute('aria-expanded', 'true');
+    // 打开时把高亮落在「当前值恰好是某个档位」的那一项上；自定义值就从头数
+    const curIdx = items.findIndex((el) => el.classList.contains('cur'));
+    if (dir) setActive(curIdx >= 0 ? curIdx : (dir === 'last' ? items.length - 1 : 0));
+    place();
+    document.addEventListener('mousedown', onDocDown, true);
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', onScroll, true);
+  };
+
+  btn.onmousedown = (e) => e.preventDefault(); // 保持焦点在输入框，键盘操作连贯
+  btn.onclick = (e) => { e.stopPropagation(); open(''); };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (pop) { e.preventDefault(); close(); } // 只收起浮层，别顺手把设置页也关了
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); // 数字框的原生 ±1 让位给档位的上下选择
+      const back = e.key === 'ArrowUp';
+      if (!pop) open(back ? 'last' : 'first');
+      else setActive(active < 0 ? (back ? items.length - 1 : 0) : active + (back ? -1 : 1));
+      return;
+    }
+    if (e.key === 'Enter' && pop) {
+      if (active >= 0 && items[active]) {
+        e.preventDefault();
+        pick(parseInt(items[active].dataset.v, 10) || 0);
+      }
+      return;
+    }
+    if (e.key === 'Tab') close(); // Tab 离开即收起（该跳哪跳哪，不拦）
+  });
+
+  return wrap;
+}
+
 // Key 草稿（编辑期结构）：一把 Key 自带分组备注名、密钥、协议覆盖与它自己拉到
 // 的模型。老单 Key 供应商（预置提供方、公司通道）加载时合成一把 id 为空的 Key
 // ——卡片只有一套渲染，保存时按供应商类型折算成单 Key 字段或 keys[]。
@@ -669,6 +858,7 @@ async function reloadProviders() {
 }
 
 function renderProvCards() {
+  closeTokenCombo(); // 卡片要整块重渲：先收起挂在外面的档位浮层（它不在卡片 DOM 里）
   const box = $('prov-list');
   if (!box) return;
   box.innerHTML = '';
@@ -1150,21 +1340,13 @@ function buildKeyBlock(p, kd, ki) {
       inMname.value = m.name;
       inMname.oninput = () => { m.name = inMname.value; };
       edit.appendChild(mk('显示名称', inMname));
-      const inCtx = document.createElement('input');
-      inCtx.className = 'pf-input';
-      inCtx.type = 'number';
-      inCtx.min = '0';
-      inCtx.placeholder = '默认 262144';
-      inCtx.value = m.contextWindow || '';
-      inCtx.oninput = () => { m.contextWindow = parseInt(inCtx.value, 10) || 0; };
+      const inCtx = tokenCombo('contextWindow', m.contextWindow, (v) => {
+        m.contextWindow = parseInt(v, 10) || 0;
+      }, '默认 262144');
       edit.appendChild(mk('上下文窗口（tokens）', inCtx));
-      const inMax = document.createElement('input');
-      inMax.className = 'pf-input';
-      inMax.type = 'number';
-      inMax.min = '0';
-      inMax.placeholder = '不限';
-      inMax.value = m.maxOutput || '';
-      inMax.oninput = () => { m.maxOutput = parseInt(inMax.value, 10) || 0; };
+      const inMax = tokenCombo('maxOutput', m.maxOutput, (v) => {
+        m.maxOutput = parseInt(v, 10) || 0;
+      }, '不限');
       edit.appendChild(mk('最大输出（tokens）', inMax));
       // 支持图片：苹果式开关
       const tg = document.createElement('label');
@@ -2368,6 +2550,7 @@ function navGoto(pane) {
 }
 
 function closeSettingsUI(fromPop) {
+  closeTokenCombo(); // 设置关了，挂在 body 上的档位浮层不能留在屏幕上
   setNav.open = false;
   setNav.level = 1; // 复位未选中态，下次打开从默认页起步
   renderNav();

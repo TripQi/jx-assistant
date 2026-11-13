@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -199,9 +200,21 @@ func (u Usage) CacheMiss() int {
 // connFailure 连接层面的失败（拨号失败/超时/拒连，区别于模型服务返回的业务
 // 错误）。调用层拿它判断要不要走备用地址（公司通道外网故障转移）以及要不要
 // 触发公司通道自动停用（sync.go noteProviderConnFail）。
-type connFailure struct{ err error }
+//
+// 它同时带着这次失败的现场：一句人话 + 实际拨号目标 + 底层错误原文 + 是否经
+// 代理 + 耗时。只用「连接被拒绝」一句话根本判不出是不是本机 TUN + fake-ip
+// 代理栈那条路（实测 api.travel7.org 被解析成 198.18.0.13、内核回 RST），
+// 事后无法追查；这些细节现在原样进报错文案（见 connErrText）。
+type connFailure struct {
+	err       error         // 底层错误原文（Unwrap 用；文案里也要原文）
+	kind      string        // 一句人话（连接被拒绝/连接超时/域名解析/证书）
+	target    string        // 实际拨号目标 host:port（取不到则空）
+	proxy     string        // "未经代理" / "经代理 http://127.0.0.1:7890"
+	elapsed   time.Duration // 从发起到失败的耗时（含 DNS/TCP/TLS）
+	retryable bool          // 拨号瞬断（拒连/连接重置）：单次连接内值得短退避重试一次
+}
 
-func (e *connFailure) Error() string { return e.err.Error() }
+func (e *connFailure) Error() string { return "无法连接模型服务：" + connErrText(e) }
 func (e *connFailure) Unwrap() error { return e.err }
 
 func isConnFailure(err error) bool {
@@ -328,28 +341,74 @@ func markAltPreferred(target LLMTarget, preferAlt bool) {
 	setAltPreferred(target.ProviderID, preferAlt)
 }
 
+// connRetryBackoff 拨号瞬断（拒连/连接重置）在单次连接内「短退避再试同一地址
+// 一次」的等待时长。只补一次、只在本层：外层 agent.go 的整步重试（5 次 ×
+// 1/2/3/4s）语义不变，两层叠加后每次尝试的间隔只多出这 200ms（计时测试的
+// 容差 400ms 内）。
+var connRetryBackoff = 200 * time.Millisecond
+
+// sleepCtx 等 d，期间 ctx 取消（用户点停止/插话打断）立即返回 false，绝不睡满。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return ctx.Err() == nil
+	}
+}
+
 // streamProtoOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体，
 // 三种协议共用：端点路径、鉴权头与流解析都来自 proto）。
+//
+// 顺序固定为：**主地址首试失败 → 短退避再试主地址一次 → 仍失败才由 StreamChat
+// 改走备用地址（alt）**。短退避只认拨号瞬断（连接被拒/连接重置，见
+// isDialTransient）；429 限流、鉴权失败、余额不足、模型不存在、上下文超限都是
+// 业务错误，压根不是 connFailure，走不到这里；超时/域名解析/证书也不重试。
 func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
 	url := baseURL + proto.path
+	// 拨号目标：端点地址的 host:port（也就是 target.BaseURL 的 host:port）。
+	// 只用于报错细节，不参与请求构造——不为此改任何签名。
+	target := urlHost(url)
 	if cb.OnRequest != nil {
 		cb.OnRequest(url, body)
 	}
+	err := streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
+	var cf *connFailure
+	if !errors.As(err, &cf) || !cf.retryable || ctx.Err() != nil {
+		return err
+	}
+	log.Printf("[模型] %s 拨号瞬断（%s），%s 后重试同一地址一次", target, cf.kind, connRetryBackoff)
+	if !sleepCtx(ctx, connRetryBackoff) {
+		return err // ctx 取消：立即退出（不睡满），也不再多试
+	}
+	return streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
+}
+
+// streamProtoTry 向一个地址实发一次请求：构造请求 → 拨号/收响应头 → 状态码
+// 检查 → 解流。连接失败时把现场（拨号目标、原始错误、代理形态、耗时）一并
+// 塞进 connFailure，供报错文案与「要不要短退避重试」判断。
+func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	proto.setAuth(apiKey, httpReq.Header)
+	started := time.Now()
 	resp, err := streamHTTP.Do(httpReq)
 	if err != nil {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
 		if ctx.Err() != nil {
-			return err // 调用方取消：原样返回，不算连接故障
+			return err // 调用方取消：原样返回，不算连接故障，也不重试
 		}
-		return &connFailure{err: fmt.Errorf("无法连接模型服务：%s", connErrText(err))}
+		return newConnFailure(httpReq, target, started, err)
 	}
 	// 登记强制断开器（停止看门狗用）：拿到响应体后交出一个可直接关闭它的
 	// abort；流结束（正常收尾/出错/ctx 取消）时回调 OnBody(nil) 注销，登记表
@@ -404,22 +463,136 @@ func upstreamErrText(status int, body []byte) string {
 	return fmt.Sprintf("模型服务返回 %d：%s", status, truncateRunes(text, 300))
 }
 
-// connErrText 把底层连接错误整理成一句人话（超时/拒连/证书各说各的）。
-func connErrText(err error) string {
-	msg := err.Error()
+// connErrDetailMax 报错文案里「括号细节」的长度上限（字）：整条文案按界面
+// 报错条约 300 字控制，人话在前不被截掉，细节部分自己让位。
+// connErrRawMax 是底层错误原文在细节里的长度上限：原文一长就把「是否经代理」
+// 「耗时」挤出去了，而这两项恰恰是排障时最要紧的。
+const (
+	connErrDetailMax = 260
+	connErrRawMax    = 200
+)
+
+// connErrText 把一次连接失败整理成一行文案：一句人话在前，括号里挂底层细节
+// （实际拨号目标、底层错误原文、是否经代理、耗时）。形如：
+//
+//	连接被拒绝，请确认 API 地址与端口可达（拨号 198.18.0.13:443 失败：dial tcp
+//	198.18.0.13:443: connectex: No connection could be made because the target
+//	machine actively refused it；耗时 3ms；未经代理）
+//
+// 界面报错条是一行提示，所以整体压平（strings.Fields）并限长，不撑成长条。
+func connErrText(e *connFailure) string {
+	kind := e.kind
+	if kind == "" {
+		kind = "连接建立失败"
+	}
+	var parts []string
+	if e.target != "" {
+		parts = append(parts, "拨号 "+e.target+" 失败")
+	}
+	if e.err != nil {
+		if raw := strings.Join(strings.Fields(e.err.Error()), " "); raw != "" {
+			parts = append(parts, truncateRunes(raw, connErrRawMax))
+		}
+	}
+	// 耗时总要报：<1ms 也是有用信息（说明这次是秒回 RST，不是等到超时）
+	if ms := e.elapsed.Milliseconds(); ms < 1 {
+		parts = append(parts, "耗时 <1ms")
+	} else {
+		parts = append(parts, fmt.Sprintf("耗时 %dms", ms))
+	}
+	if e.proxy != "" {
+		parts = append(parts, e.proxy)
+	}
+	if len(parts) == 0 {
+		return kind
+	}
+	return kind + "（" + truncateRunes(strings.Join(parts, "；"), connErrDetailMax) + "）"
+}
+
+// newConnFailure 记一次连接失败的全部现场。诊断本机 TUN + fake-ip 代理栈瞬断
+// （端点被解析成 198.18.x.x、内核直接回 RST）时，这几项缺一不可。
+func newConnFailure(req *http.Request, target string, started time.Time, err error) *connFailure {
+	return &connFailure{
+		err:       err,
+		kind:      connErrKind(err),
+		target:    target,
+		proxy:     proxyDesc(req),
+		elapsed:   time.Since(started),
+		retryable: isDialTransient(err),
+	}
+}
+
+// connErrKind 把底层连接错误归类成一句人话（超时/拒连/证书各说各的，不含细节）。
+func connErrKind(err error) string {
+	msg := strings.ToLower(err.Error())
 	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "请求超时，模型服务没有在预期时间内响应"
-	case strings.Contains(msg, "context canceled"):
+	case errors.Is(err, context.Canceled), strings.Contains(msg, "context canceled"):
 		return "请求已取消"
-	case strings.Contains(msg, "no such host"):
+	case errors.Is(err, context.DeadlineExceeded), strings.Contains(msg, "i/o timeout"),
+		strings.Contains(msg, "timeout"):
+		return "连接超时，模型服务没有在预期时间内响应"
+	case strings.Contains(msg, "no such host"), strings.Contains(msg, "server misbehaving"):
 		return "域名解析失败，请检查 API 地址（baseURL）是否正确"
 	case strings.Contains(msg, "certificate"), strings.Contains(msg, "x509"):
 		return "TLS 证书校验失败，请检查代理或证书配置"
 	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "actively refused"):
 		return "连接被拒绝，请确认 API 地址与端口可达"
 	}
-	return truncateRunes(strings.Join(strings.Fields(msg), " "), 300)
+	return "连接建立失败"
+}
+
+// isDialTransient 判断这次连接失败是不是「拨号瞬断」——连接被拒 / 连接被重置
+// 这类马上再试一次大概率就能过的情形（本机代理内核瞬抖正是这种）。超时、域名
+// 解析、证书一律不算：同一地址立刻重试结果一样，白等用户时间。
+func isDialTransient(err error) bool {
+	msg := strings.ToLower(err.Error())
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "timeout") || strings.Contains(msg, "context canceled") {
+		return false
+	}
+	for _, w := range []string{"connection refused", "actively refused", "connection reset",
+		"forcibly closed", "broken pipe", "unexpected eof"} {
+		if strings.Contains(msg, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// proxyFromEnv 解析代理环境变量（与 streamHTTP 的 Transport 同一口径）。
+// 抽成变量是为了单测能确定地拿到「未经代理」形态——开发机环境里真配了代理
+// 也不该让文案断言飘。
+var proxyFromEnv = http.ProxyFromEnvironment
+
+// proxyDesc 说明这次拨号是否经代理（报错细节里最要紧的一项：本机 TUN +
+// fake-ip 代理栈瞬断时，会话看起来就像「地址不可达」）。
+func proxyDesc(req *http.Request) string {
+	pu, err := proxyFromEnv(req)
+	if err != nil {
+		return "代理配置有误：" + truncateRunes(strings.Join(strings.Fields(err.Error()), " "), 80)
+	}
+	if pu == nil {
+		return "未经代理"
+	}
+	return "经代理 " + pu.Scheme + "://" + pu.Host
+}
+
+// urlHost 取请求地址的 host:port（缺省端口按 scheme 补全），作为拨号目标的
+// 兜底展示；解析失败返回空串，文案里就不写「拨号 … 失败」这一段。
+func urlHost(rawurl string) string {
+	u, err := neturl.Parse(rawurl)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Port() == "" {
+		switch u.Scheme {
+		case "https":
+			return u.Host + ":443"
+		case "http":
+			return u.Host + ":80"
+		}
+	}
+	return u.Host
 }
 
 // isModelUnavailableErr 判断一次模型调用失败是不是「这个模型/提供方用不了」：

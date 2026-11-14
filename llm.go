@@ -11,10 +11,12 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	neturl "net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -465,6 +467,14 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 	}
 }
 
+// submittedRequestError 表示请求可能已被处理，禁止本地址、备用地址及整步重发。
+type submittedRequestError struct{ detail *connFailure }
+
+func (e *submittedRequestError) Error() string {
+	return "请求体已完整写出，等待响应头阶段失败；服务端可能已处理，未自动重发：" + connErrText(e.detail)
+}
+func (e *submittedRequestError) Unwrap() error { return e.detail.err }
+
 // streamProtoTry 向一个地址实发一次请求：构造请求 → 拨号/收响应头 → 状态码
 // 检查 → 解流。连接失败时把现场（拨号目标、原始错误、代理形态、耗时）一并
 // 塞进 connFailure，供报错文案与「要不要短退避重试」判断。
@@ -475,6 +485,14 @@ func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	proto.setAuth(apiKey, httpReq.Header)
+	var bodyWritten atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				bodyWritten.Store(true)
+			}
+		},
+	}))
 	started := time.Now()
 	resp, err := streamHTTP.Do(httpReq)
 	if err != nil {
@@ -484,7 +502,11 @@ func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte
 		if ctx.Err() != nil {
 			return err // 调用方取消：原样返回，不算连接故障，也不重试
 		}
-		return newConnFailure(httpReq, target, started, err)
+		cf := newConnFailure(httpReq, target, started, err)
+		if bodyWritten.Load() {
+			return &submittedRequestError{detail: cf}
+		}
+		return cf
 	}
 	// 登记强制断开器（停止看门狗用）：拿到响应体后交出一个可直接关闭它的
 	// abort；流结束（正常收尾/出错/ctx 取消）时回调 OnBody(nil) 注销，登记表
@@ -775,6 +797,10 @@ func isModelUnavailableErr(err error) bool {
 // 被取消的请求本来也不该重试（与原先一样不重试，既有语义不变）。
 func isRetryableModelErr(err error) bool {
 	if err == nil || isOverflowError(err) {
+		return false
+	}
+	var submitted *submittedRequestError
+	if errors.As(err, &submitted) {
 		return false
 	}
 	s := err.Error()

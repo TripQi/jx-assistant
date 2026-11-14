@@ -1945,7 +1945,7 @@ func (a *App) intervalReached(sess *SessionMeta) bool {
 // 走（真超限时能用的都用），不再按 CompactMode 二选一——规则的先折（零模型
 // 调用、立即见效）：折到只留最近 1 轮，压不动（最近一轮自身超预算，前面又都
 // 已折叠）就全部折叠，否则百万级单轮永远压不下去；仍压不动且模型阈值启用时
-// 生成摘要（先摘要到只留 1 轮，再摘要全部历史）。
+// 生成独立有界摘要（覆盖全部可摘要历史），不重发已知超限的正常前缀。
 func (a *App) overflowCompact(sess *SessionMeta) error {
 	if a.Cfg.CompactInterval > 0 {
 		if a.ruleCompactAuto(sess, 1) > 0 || a.ruleCompactAuto(sess, 0) > 0 {
@@ -1953,10 +1953,8 @@ func (a *App) overflowCompact(sess *SessionMeta) error {
 		}
 	}
 	if a.Cfg.CompactLlmPct > 0 {
-		if _, err := a.doSummarize(sess, "manual", 1, 0); err == nil {
-			return nil
-		}
-		_, err := a.doSummarize(sess, "manual", 0, 0)
+		// 超限后不再复用正常摘要的同源前缀；独立有界救援只尝试一次。
+		_, err := a.doRescueSummarize(sess)
 		return err
 	}
 	if a.Cfg.CompactInterval > 0 {

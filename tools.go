@@ -493,6 +493,7 @@ type readItem struct {
 	Path   string `json:"path"`
 	Offset int    `json:"offset"`
 	Limit  *int   `json:"limit"`
+	ByteOffset int `json:"byte_offset,omitempty"` // 首行内已返回的 UTF-8 字节数，0 基
 }
 
 // readRequest 是 read 的完整入参。files 数组是**唯一公开形态**；path/offset/limit
@@ -521,6 +522,7 @@ func readFileTool() Tool {
 					"path":   strProp("文件路径（相对或绝对）"),
 					"offset": intProp("起始行号，从 1 开始，可选"),
 					"limit":  intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
+					"byte_offset": intProp("巨行续读：跳过 offset 行内已返回的 UTF-8 字节数（0 基，按截断提示传入）；后续行不受影响"),
 				}, "path")),
 			}, "files")),
 		Run: runReadFile,
@@ -596,6 +598,7 @@ type readSeg struct {
 	notes     string
 	errText   string
 	startLine int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
+	byteOffset int // 首行已跳过的 UTF-8 字节数
 }
 
 // textLines 把文本切成行，行数与编辑器的口径一致：文件末尾那个换行只是「最后一行
@@ -672,6 +675,12 @@ func (t *toolContext) readSection(it readItem) readSeg {
 	seg.header = fmt.Sprintf("===== %s（第 %d-%d 行，共 %d 行）=====", seg.disp, start, end, len(lines))
 	seg.startLine = start
 	seg.lines = lines[start-1 : end]
+	if it.ByteOffset < 0 || it.ByteOffset > len(seg.lines[0]) || !utf8.ValidString(seg.lines[0][:it.ByteOffset]) {
+		seg.errText = "byte_offset 必须在首行 UTF-8 字符边界内"
+		return seg
+	}
+	seg.byteOffset = it.ByteOffset
+	seg.lines[0] = seg.lines[0][it.ByteOffset:]
 	var notes []string
 	if end < len(lines) {
 		notes = append(notes, fmt.Sprintf("…（本段到第 %d 行为止，可调大 limit 或用 offset=%d 继续读）", end, end+1))
@@ -717,12 +726,7 @@ func appendReadSeg(b *strings.Builder, seg readSeg, limit int) (written, whole b
 		b.WriteString(head + body)
 		return true, true
 	}
-	linesOnly := strings.Join(seg.lines, "\n")
-	if b.Len()+len(head)+len(linesOnly) <= limit {
-		// 正文能全给、只是尾注（续读/编码提示）放不下：正文优先
-		b.WriteString(head + linesOnly)
-		return true, true
-	}
+	// 尾注也属于结果；放不下时同样预留不完整标记，不能静默丢弃。
 	b.WriteString(head)
 	room := limit - b.Len() - readCutNoteReserve
 	wrote, used := 0, 0
@@ -741,15 +745,16 @@ func appendReadSeg(b *strings.Builder, seg readSeg, limit int) (written, whole b
 		used += need
 	}
 	lastLine := seg.startLine + wrote - 1
-	if wrote == 0 {
-		// 首行就是巨行（minified 文件）：按 rune 边界硬裁一段，仍能给模型看到开头
-		lastLine = seg.startLine
-		if cut := runeHeadCut(seg.lines[0], room); cut > 0 {
-			b.WriteString(seg.lines[0][:cut])
-		}
+	if wrote == 0 && len(seg.lines) > 0 {
+		// 部分行不算完整行；用字节游标续读，避免重复同一前缀或跳过余部。
+		cut := runeHeadCut(seg.lines[0], room)
+		b.WriteString(seg.lines[0][:cut])
+		b.WriteString(fmt.Sprintf("\n…（不完整：第 %d 行未完整；用 offset=%d, byte_offset=%d 续读该行余部）",
+			seg.startLine, seg.startLine, seg.byteOffset+cut))
+		return true, false
 	}
-	b.WriteString(fmt.Sprintf("\n…（本段在第 %d 行处达到单次输出上限 %dKB 被截断：用 offset=%d 继续读本文件）",
-		lastLine, readOutputMaxBytes/1024, lastLine+1))
+	b.WriteString(fmt.Sprintf("\n…（不完整：正文/尾注达到输出上限被截断；已完整返回到第 %d 行，用 offset=%d 继续读本文件；编码信息可能未返回）",
+		lastLine, lastLine+1))
 	return true, false
 }
 

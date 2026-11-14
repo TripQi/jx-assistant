@@ -574,7 +574,7 @@ func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollo
 func (a *App) applySessionModelDefault(provider, providerKey, model string) (string, string, string, error) {
 	ref := ModelRef{Provider: provider, ProviderKey: providerKey, Model: model}.norm()
 	if ref.Empty() {
-		g := a.globalDefaultRef()
+		g := a.withKey(a.globalDefaultRef())
 		if g.Empty() {
 			return "", "", "", errNoGlobalDefault
 		}

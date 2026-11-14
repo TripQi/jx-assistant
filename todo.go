@@ -983,6 +983,10 @@ func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 	if err != nil {
 		return nil, err
 	}
+	if modelRef != nil {
+		pinned := s.app.withKey(*modelRef)
+		modelRef = &pinned
+	}
 	ts := time.Now().UnixMilli()
 	t := &TaskItem{
 		ID: "task-" + newID()[:8], Title: title, Description: description,
@@ -1100,6 +1104,10 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 		}
 		if err != nil {
 			return nil, err
+		}
+		if ref != nil {
+			pinned := s.app.withKey(*ref)
+			ref = &pinned
 		}
 		next.ModelMode, next.Model = mode, ref
 	}

@@ -829,6 +829,9 @@ func (s *todoScheduler) toView(t *TaskItem, now int64) TaskView {
 		custom := derefModel(t.Model)
 		custom.Thinking = t.Thinking
 		mv := s.app.todoModelView(t.ModelMode, custom)
+		if t.Target != targetTask {
+			mv = s.app.todoManagerModelView()
+		}
 		v.ModelView = &mv
 	}
 	if !t.Enabled || t.Done {
@@ -973,6 +976,10 @@ func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 		return nil, err
 	}
 	modelMode, modelRef, err := r.normalizeModel(executor)
+	if executor == execAssistant && target != targetTask {
+		// 长期助理是既有会话：待办模型配置不生效，也不据此拦截保存。
+		modelMode, modelRef, err = normTodoModelMode(r.ModelMode), r.Model, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1088,6 +1095,9 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 			merged.Model = next.Model
 		}
 		mode, ref, err := merged.normalizeModel(next.Executor)
+		if next.Target != targetTask {
+			mode, ref, err = normTodoModelMode(merged.ModelMode), merged.Model, nil
+		}
 		if err != nil {
 			return nil, err
 		}

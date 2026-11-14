@@ -482,6 +482,31 @@ func (a *App) dispatchSettingsView() map[string]any {
 	return map[string]any{"mode": "follow", "thinking": a.Cfg.DispatchModel.Thinking, "ref": v}
 }
 
+// todoManagerModelView 只读长期助理当前实际目标，不把待办设置套进既有会话。
+func (a *App) todoManagerModelView() ModelRefView {
+	v := ModelRefView{Source: "由长期助理当前模型执行"}
+	if a.Store == nil {
+		v.Error = "长期助理尚未创建；执行时由长期助理当前模型处理"
+		return v
+	}
+	m := a.currentAssistant()
+	if m == nil {
+		v.Error = "长期助理尚未创建；执行时由长期助理当前模型处理"
+		return v
+	}
+	tgt, err := a.resolveTarget(m)
+	if err != nil {
+		v.Error = err.Error()
+		return v
+	}
+	level, _ := normalizeThinkingLevel(m.Thinking)
+	v.Provider, v.ProviderKey, v.Model = tgt.ProviderID, tgt.KeyID, tgt.Model
+	v.Thinking, v.ThinkingText = level, " · " + thinkingLabel(level)
+	v.Text = providerLabel(a, tgt.ProviderID) + " · " + tgt.Model + v.ThinkingText
+	v.Available = true
+	return v
+}
+
 // todoModelView 待办卡片「模型：…（生效：…）」那行的数据：三档取值链算出来
 // 的当前实际生效值与可用性（不可用时原因进 Error，卡片红字原样显示）。
 func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
@@ -583,6 +608,7 @@ func (a *App) handleDefaultModelsGet(w http.ResponseWriter, r *http.Request) {
 		"thinkingLevels": thinkingLevels(),
 		"global":         a.globalSettingsView(),
 		"dispatch":       a.dispatchSettingsView(),
+		"manager":        a.todoManagerModelView(),
 	})
 }
 
@@ -636,6 +662,7 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		"thinkingLevels": thinkingLevels(),
 		"global":         a.globalSettingsView(),
 		"dispatch":       a.dispatchSettingsView(),
+		"manager":        a.todoManagerModelView(),
 	})
 }
 

@@ -44,9 +44,12 @@ type Message struct {
 	// 用指针是必需的：nil = 这条消息没有该字段（省略）；非 nil 指向 "" = 显式
 	// 空思考。二者对上游不等价——带 tools 时字段整个缺失会 400，而空串合法
 	// （模型当轮确实没产生思考，也要把字段带上）。见 fillReasoningStub。
-	ReasoningContent *string    `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	// 原生回传载荷仅用于同一次调用的纠偏，不泄漏到 chat 请求体。
+	ResponsesItems    []json.RawMessage `json:"-"`
+	AnthropicThinking []json.RawMessage `json:"-"`
+	ReasoningContent  *string           `json:"reasoning_content,omitempty"`
+	ToolCalls         []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID        string            `json:"tool_call_id,omitempty"`
 }
 
 func TextMessage(role, text string) Message {
@@ -122,10 +125,12 @@ func (r *ChatRequest) ApplyThinking(level string) {
 // 与流尾的用量统计（DeepSeek/GLM 等兼容网关在最后一个 chunk 附带 usage，
 // 含各形态的前缀缓存命中量，见 Usage.CacheHit）。
 type StreamCallbacks struct {
-	OnText      func(string)
-	OnReasoning func(string)
-	OnToolCall  func(ToolCall)
-	OnUsage     func(Usage)
+	// OnOutputItem 收集协议原生回传对象，不能由展示用推理文本重建。
+	OnOutputItem func(protocol string, item json.RawMessage)
+	OnText       func(string)
+	OnReasoning  func(string)
+	OnToolCall   func(ToolCall)
+	OnUsage      func(Usage)
 	// OnRequest 在请求真正发出前回调一次：url 是最终请求地址，body 是与线上
 	// 完全一致的请求体字节（含 model/stream/stream_options 等最终字段）。
 	// 「导出原始数据」靠它捕获最近一次发给模型的完整内容。

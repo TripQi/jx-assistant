@@ -28,10 +28,10 @@ const anthropicVersionHeader = "2023-06-01"
 // llmProtocol 是一种渠道协议的全部差异点。StreamChat 持有一个实现跑完整个
 // 调用流程，主备地址故障转移对三种协议一视同仁。
 type llmProtocol struct {
-	path    string                                     // 拼在 baseURL 后的端点路径
-	setAuth func(apiKey string, h http.Header)         // 鉴权头（Bearer / x-api-key+version）
+	path    string                                                  // 拼在 baseURL 后的端点路径
+	setAuth func(apiKey string, h http.Header)                      // 鉴权头（Bearer / x-api-key+version）
 	marshal func(target LLMTarget, req ChatRequest) ([]byte, error) // 统一消息 → 协议请求体
-	parse   func(r io.Reader, cb StreamCallbacks) error // 协议 SSE 流 → 统一回调
+	parse   func(r io.Reader, cb StreamCallbacks) error             // 协议 SSE 流 → 统一回调
 }
 
 // protocolOf 按渠道协议类型取实现；未知值一律回落 OpenAI 兼容（老配置只有空串）。
@@ -47,7 +47,7 @@ func protocolOf(kind string) llmProtocol {
 }
 
 // openAIProtocol 既有 chat/completions 渠道：报文与重构前逐字节一致
-//（fillReasoningStub / stream_options 等原有行为原样保留，见 llmproto_test
+// （fillReasoningStub / stream_options 等原有行为原样保留，见 llmproto_test
 // 的回归测试）。
 func openAIProtocol() llmProtocol {
 	return llmProtocol{
@@ -144,8 +144,11 @@ type anthropicMessage struct {
 // anthropicBlock content block：text/image/tool_use/tool_result 四种形态共用
 // 一个结构（omitempty 收掉不相干字段）。
 type anthropicBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
 	// image 形态
 	Source *anthropicSource `json:"source,omitempty"`
 	// tool_use 形态
@@ -156,6 +159,19 @@ type anthropicBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   any    `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+}
+
+// MarshalJSON 签名思考即使正文为空也必须保留 thinking 字段，不能由 omitempty 丢掉。
+func (b anthropicBlock) MarshalJSON() ([]byte, error) {
+	type plain anthropicBlock
+	if b.Type == "thinking" {
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}{b.Type, b.Thinking, b.Signature})
+	}
+	return json.Marshal(plain(b))
 }
 
 // anthropicSource 图片来源：内联 base64（本地视觉内容）或 URL。
@@ -260,8 +276,7 @@ func toAnthropicToolChoice(choice string) *anthropicToolChoice {
 // toAnthropicMessages 统一消息视图 → Anthropic messages + 顶层 system。
 // 规则：
 //   - system 消息合并为顶层 system 参数（多段以空行相连）；
-//   - assistant 的 tool_calls → tool_use block；reasoning_content 不回传
-//    （Anthropic 思考由自己的 thinking block 承载，回传会被拒）；
+//   - assistant 的 tool_calls → tool_use block；原生 thinking/signature 原样回传；
 //   - tool 消息 → user 消息里的 tool_result block，连续多条 tool 合并进
 //     同一条 user 消息（Anthropic 的标准形态）；
 //   - 图片：data: URL 内联 base64，http(s) URL 走 url source。
@@ -292,6 +307,13 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage, error) {
 			appendUser(pendingResults)
 			pendingResults = nil
 			var blocks []anthropicBlock
+			for _, raw := range m.AnthropicThinking {
+				var block anthropicBlock
+				if err := json.Unmarshal(raw, &block); err != nil {
+					return "", nil, err
+				}
+				blocks = append(blocks, block)
+			}
 			if s := m.Text(); s != "" {
 				blocks = append(blocks, anthropicBlock{Type: "text", Text: s})
 			}
@@ -395,6 +417,7 @@ type anthropicStreamEvent struct {
 		Type        string `json:"type"` // text_delta | thinking_delta | input_json_delta
 		Text        string `json:"text"`
 		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
 		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 	Usage *anthropicUsageEvent `json:"usage"` // message_delta 携带
@@ -427,12 +450,13 @@ func parseAnthropicSSE(r io.Reader, cb StreamCallbacks) error {
 
 // anthropicStreamAgg 单条流的聚合状态。
 type anthropicStreamAgg struct {
-	cb      StreamCallbacks
-	usage   anthropicUsageEvent
+	thinking map[int]*anthropicBlock
+	cb       StreamCallbacks
+	usage    anthropicUsageEvent
 	hasUsage bool
-	blocks  map[int]*anthropicToolAgg // content_block index → 聚合中的 tool_use
-	order   []int                     // 工具块出现的先后（回调按序）
-	err     error
+	blocks   map[int]*anthropicToolAgg // content_block index → 聚合中的 tool_use
+	order    []int                     // 工具块出现的先后（回调按序）
+	err      error
 }
 
 type anthropicToolAgg struct {
@@ -449,6 +473,13 @@ func (a *anthropicStreamAgg) event(ev anthropicStreamEvent) error {
 			a.hasUsage = true
 		}
 	case "content_block_start":
+		if ev.ContentBlock != nil && (ev.ContentBlock.Type == "thinking" || ev.ContentBlock.Type == "redacted_thinking") {
+			if a.thinking == nil {
+				a.thinking = map[int]*anthropicBlock{}
+			}
+			block := *ev.ContentBlock
+			a.thinking[ev.Index] = &block
+		}
 		if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
 			if a.blocks == nil {
 				a.blocks = map[int]*anthropicToolAgg{}
@@ -462,7 +493,14 @@ func (a *anthropicStreamAgg) event(ev anthropicStreamEvent) error {
 			if ev.Delta.Text != "" && a.cb.OnText != nil {
 				a.cb.OnText(ev.Delta.Text)
 			}
+		case "signature_delta":
+			if block := a.thinking[ev.Index]; block != nil {
+				block.Signature += ev.Delta.Signature
+			}
 		case "thinking_delta":
+			if block := a.thinking[ev.Index]; block != nil {
+				block.Thinking += ev.Delta.Thinking
+			}
 			if ev.Delta.Thinking != "" && a.cb.OnReasoning != nil {
 				a.cb.OnReasoning(ev.Delta.Thinking)
 			}
@@ -472,6 +510,12 @@ func (a *anthropicStreamAgg) event(ev anthropicStreamEvent) error {
 			}
 		}
 	case "content_block_stop":
+		if block := a.thinking[ev.Index]; block != nil {
+			if a.cb.OnOutputItem != nil {
+				a.cb.OnOutputItem("anthropic", mustJSON(block))
+			}
+			delete(a.thinking, ev.Index)
+		}
 		a.flushTool(ev.Index)
 	case "message_delta":
 		// 流尾 usage：output_tokens 为最终值；缓存字段 message_start 已带，取最大
@@ -553,27 +597,39 @@ func responsesProtocol() llmProtocol {
 
 // responsesRequest /v1/responses 请求体。
 type responsesRequest struct {
-	Model           string                `json:"model"`
-	Instructions    string                `json:"instructions,omitempty"`
-	Input           []responsesInputItem  `json:"input"`
-	Tools           []responsesTool       `json:"tools,omitempty"`
-	ToolChoice      any                   `json:"tool_choice,omitempty"`
-	Reasoning       *responsesReasoning   `json:"reasoning,omitempty"`
-	MaxOutputTokens int                   `json:"max_output_tokens,omitempty"`
-	Temperature     *float64              `json:"temperature,omitempty"`
-	Stream          bool                  `json:"stream"`
+	Include         []string             `json:"include"`
+	Store           bool                 `json:"store"`
+	Model           string               `json:"model"`
+	Instructions    string               `json:"instructions,omitempty"`
+	Input           []responsesInputItem `json:"input"`
+	Tools           []responsesTool      `json:"tools,omitempty"`
+	ToolChoice      any                  `json:"tool_choice,omitempty"`
+	Reasoning       *responsesReasoning  `json:"reasoning,omitempty"`
+	MaxOutputTokens int                  `json:"max_output_tokens,omitempty"`
+	Temperature     *float64             `json:"temperature,omitempty"`
+	Stream          bool                 `json:"stream"`
 }
 
 // responsesInputItem input 数组元素：消息形态（role+content）或工具往返形态
-//（function_call / function_call_output，type 必填）。
+// （function_call / function_call_output，type 必填）。
 type responsesInputItem struct {
-	Type      string `json:"type,omitempty"` // function_call | function_call_output
-	Role      string `json:"role,omitempty"` // user | assistant
-	Content   any    `json:"content,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Output    string `json:"output,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+	Type      string          `json:"type,omitempty"` // function_call | function_call_output
+	Role      string          `json:"role,omitempty"` // user | assistant
+	Content   any             `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
+}
+
+// MarshalJSON 保留 output item 的完整字段与 item 级配对信息。
+func (i responsesInputItem) MarshalJSON() ([]byte, error) {
+	if i.Raw != nil {
+		return i.Raw, nil
+	}
+	type plain responsesInputItem
+	return json.Marshal(plain(i))
 }
 
 // responsesInputContent 消息形态的 content part（input_text / input_image；
@@ -585,7 +641,7 @@ type responsesInputContent struct {
 }
 
 // responsesTool Responses 的 function 工具：name/description/parameters 平铺
-//（不嵌 function 层——与 chat/completions 的主要差异之一）。
+// （不嵌 function 层——与 chat/completions 的主要差异之一）。
 type responsesTool struct {
 	Type        string         `json:"type"` // function
 	Name        string         `json:"name"`
@@ -604,7 +660,9 @@ func marshalResponses(target LLMTarget, req ChatRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 本地管理历史，不依赖服务端存储；显式索取可回传的加密推理载荷。
 	out := responsesRequest{
+		Include:      []string{"reasoning.encrypted_content"},
 		Model:        target.Model,
 		Instructions: instructions,
 		Input:        items,
@@ -675,6 +733,12 @@ func toResponsesInput(msgs []Message) (string, []responsesInputItem, error) {
 				items = append(items, responsesInputItem{Role: "user", Content: content})
 			}
 		case "assistant":
+			if len(m.ResponsesItems) > 0 {
+				for _, raw := range m.ResponsesItems {
+					items = append(items, responsesInputItem{Raw: raw})
+				}
+				continue // 原生 output 已含正文和工具，不能重复生成
+			}
 			if s := m.Text(); s != "" {
 				items = append(items, responsesInputItem{Role: "assistant", Content: s})
 			}
@@ -699,10 +763,10 @@ func toResponsesInput(msgs []Message) (string, []responsesInputItem, error) {
 
 // responsesUsageEvent /v1/responses 的 usage 形态（response.completed 携带）。
 type responsesUsageEvent struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	TotalTokens         int `json:"total_tokens"`
-	InputTokensDetails  struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"input_tokens_details"`
 }
@@ -710,7 +774,7 @@ type responsesUsageEvent struct {
 // responsesStreamEvent 流事件的可辨识联合：按 type 前缀分发。
 type responsesStreamEvent struct {
 	Type        string `json:"type"`
-	Delta       string `json:"delta"` // output_text.delta / reasoning delta 的增量
+	Delta       string `json:"delta"`   // output_text.delta / reasoning delta 的增量
 	Message     string `json:"message"` // 裸 error 事件的顶层 message
 	OutputIndex int    `json:"output_index"`
 	ItemID      string `json:"item_id"`
@@ -722,8 +786,8 @@ type responsesStreamEvent struct {
 		Arguments string `json:"arguments"`
 	} `json:"item"`
 	Response *struct {
-		Usage    *responsesUsageEvent `json:"usage"`
-		Error    *struct {
+		Usage *responsesUsageEvent `json:"usage"`
+		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		IncompleteDetails *struct {
@@ -746,6 +810,14 @@ func parseResponsesSSE(r io.Reader, cb StreamCallbacks) error {
 		var ev responsesStreamEvent
 		if json.Unmarshal([]byte(payload), &ev) != nil {
 			return nil
+		}
+		var raw struct {
+			Item json.RawMessage `json:"item"`
+		}
+		if ev.Type == "response.output_item.done" && cb.OnOutputItem != nil {
+			if json.Unmarshal([]byte(payload), &raw) == nil && len(raw.Item) > 0 && string(raw.Item) != "null" {
+				cb.OnOutputItem("responses", raw.Item)
+			}
 		}
 		return agg.event(ev)
 	})
@@ -845,9 +917,9 @@ func (a *responsesStreamAgg) event(ev responsesStreamEvent) error {
 		if ev.Response != nil && ev.Response.Usage != nil {
 			u := *ev.Response.Usage
 			a.usage = &Usage{
-				PromptTokens:     u.InputTokens,
-				CompletionTokens: u.OutputTokens,
-				TotalTokens:      u.TotalTokens,
+				PromptTokens:        u.InputTokens,
+				CompletionTokens:    u.OutputTokens,
+				TotalTokens:         u.TotalTokens,
 				PromptTokensDetails: &PromptTokensDetails{CachedTokens: u.InputTokensDetails.CachedTokens},
 			}
 		}

@@ -214,6 +214,7 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 		var sb, reasoning strings.Builder
 		var usage *Usage
 		var calls []ToolCall
+		var responsesItems, anthropicThinking []json.RawMessage
 		start := time.Now()
 		// 记账点：每跳各建一次埋点、各收一次尾——明细里一跳一行；档位传本次请求
 		// 真正发出去的那一档（摘要请求自本改造起吃会话档位）
@@ -226,6 +227,13 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 				usage = &uu
 			},
 		})
+		meterCb.OnOutputItem = func(protocol string, item json.RawMessage) {
+			if protocol == "responses" {
+				responsesItems = append(responsesItems, item)
+			} else if protocol == "anthropic" {
+				anthropicThinking = append(anthropicThinking, item)
+			}
+		}
 		err := StreamChat(context.Background(), target, req, meterCb)
 		finishUsage(err) // 失败也落一行（ok=false + 错误摘要），压缩调用不留空账
 		p := map[string]any{"type": "call", "scope": "summarize", "model": target.AuditModel(),
@@ -273,7 +281,8 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 		// 纠偏跳完整回传首跳正文、真实思考和工具调用，不裁剪或改写思考原文。
 		// 没收到思考时保留 nil，并已在本跳审计说明；fillReasoningStub 仅负责
 		// 带 tools 协议所需的空字段兼容，不能用它代替实际收到的真实思考。
-		assistant := Message{Role: "assistant", ToolCalls: calls}
+		assistant := Message{Role: "assistant", ToolCalls: calls,
+			ResponsesItems: responsesItems, AnthropicThinking: anthropicThinking}
 		if sb.Len() > 0 {
 			assistant.Content = sb.String()
 		}

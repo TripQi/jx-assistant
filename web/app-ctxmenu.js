@@ -7,8 +7,8 @@
  * 菜单项按右键目标动态组装，弹层直接复用左栏的 openCtxMenu（动态 popover，
  * 定位/关闭/主题都已就绪）。编辑类动作对焦目标控件后用 document.execCommand
  * 执行——undo/redo/cut/copy/insertText 都作用在焦点元素上且保留原生撤销栈
- * （先例：app-core.js 的换行插入特意走 execCommand 就是这个原因）；剪贴板读
- * 权限桌面壳创建时已放行（库 SetPermission(ClipboardRead, Allow)）。 */
+ * （先例：app-core.js 的换行插入特意走 execCommand 就是这个原因）；剪贴板
+ * 写方向（writeText）可用，读方向见下方 clipboardForPaste 的注（走本机端点）。 */
 
 /* ---------- 朗读条目 ----------
  * 应用本体不带任何朗读实现：菜单里的「朗读 / 停止朗读」由语音组件经
@@ -38,43 +38,34 @@ function insertTextUndoable(ed, text) {
 }
 // 取剪贴板内容（右键「粘贴」用）。桌面壳里 navigator.clipboard.readText 会
 // 【永久挂起】——WebView2 的剪贴板读权限停在 prompt 且不弹授权 UI（真机诊断
-// 见 gui-test/ctxmenu-clipboard-diag.mjs），所以桌面壳直接读本机端点
-// /api/clipboard（Go 读系统剪贴板，仅回环可达，见 clipboard_windows.go）；
-// 网页模式 readText 行为正常（有权限提示），走标准 API。
+// 见 gui-test/ctxmenu-clipboard-diag.mjs），document.execCommand('paste') 同样
+// 一律被拒（真机带用户激活实测返回 false，判定见 gui-test/ctxmenu-paste-diag.mjs）。
+// 所以右键「粘贴」读本机端点 /api/clipboard（Go 读系统剪贴板，仅回环可达，见
+// clipboard_windows.go）：返回 {text, png, files}——纯文本、图片（PNG 注册格式
+// 优先，没有则 DIB 解码转 PNG）、资源管理器复制的文件真实路径列表一次带全。
 async function clipboardForPaste() {
-  if (document.documentElement.classList.contains('desktop-shell')) {
-    try { return await api('/api/clipboard'); } catch (e) { return { text: '' }; }
-  }
-  try { return { text: await navigator.clipboard.readText() }; } catch (e) { return { text: '' }; }
+  try { return await api('/api/clipboard'); } catch (e) { return { text: '' }; }
 }
 async function pasteIntoTarget(ed) {
   const clip = await clipboardForPaste();
-  if (clip && clip.text) { insertTextUndoable(ed, clip.text); return; }
   const view = ed === mainView.input ? mainView : (ed === subView.input ? subView : null);
-  if (!view) return;
-  // 文本为空：剪贴板里可能是截图 → 与 Ctrl+V 同口径入附件（主/子对话输入框）。
-  // 桌面壳用 /api/clipboard 带回的 PNG（截图工具常连带放置该格式）；网页模式
-  // 走 clipboard.read()。都拿不到就静默（与原生粘贴空剪贴板一致）。
-  if (clip && clip.png) {
-    const bin = atob(clip.png);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    stageFiles([new File([bytes], '剪贴板图片.png', { type: 'image/png' })], view);
-    return;
-  }
-  if (document.documentElement.classList.contains('desktop-shell')) return; // read() 同样会挂
-  try {
-    const items = await navigator.clipboard.read();
-    const files = [];
-    for (const it of items) {
-      const type = (it.types || []).find((x) => x.startsWith('image/'));
-      if (!type) continue;
-      const blob = await it.getType(type);
-      const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-      files.push(new File([blob], '剪贴板图片.' + ext, { type }));
+  // 分流与 Ctrl+V 的原生 paste 同口径（app-chat.js 的 paste 处理器：有文件就
+  // 入附件区、纯文本才进输入框，真机对照见 gui-test/ctxmenu-paste-diag.mjs）：
+  // 文件是真实路径，走 stagePaths（与桌面壳「文件上传」选择框同一条路径型
+  // 通路，登记原件路径，交付工具才能送回原处）；图片没有路径，转 File 走
+  // stageFiles。非对话输入框（设置页等）没有附件区：跳过文件/图片退回文本。
+  if (view && clip) {
+    if (clip.files && clip.files.length) { stagePaths(clip.files, view); return; }
+    if (clip.png) {
+      const bin = atob(clip.png);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      stageFiles([new File([bytes], '剪贴板图片.png', { type: 'image/png' })], view);
+      return;
     }
-    if (files.length) stageFiles(files, view);
-  } catch (e) { /* 剪贴板整体不可读：静默无操作 */ }
+  }
+  // 纯文本（execCommand 保撤销栈插入）；都没有就静默（与原生粘贴空剪贴板一致）
+  if (clip && clip.text) insertTextUndoable(ed, clip.text);
 }
 // textarea/input 的选区文本自己就能取到：直接 writeText，不赌 execCommand 的
 // 用户激活语义；删除选区仍走 execCommand('delete') 保住撤销栈

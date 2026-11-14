@@ -8322,8 +8322,9 @@ function renderAttachments(view) {
 }
 
 /* 粘贴与拖拽投放：都只入附件区，不碰工作区。
-   粘贴只吃剪贴板里的文件对象（截图、网页复制的图片），纯文本粘贴原样放行；
-   从资源管理器复制文件再粘贴时 Chromium 只给路径文本、拿不到文件对象，本轮不做。 */
+   粘贴吃剪贴板里的文件对象（截图、网页复制的图片、资源管理器复制的文件——
+   WebView2/Chromium 157 实测 CF_HDROP 也会读成 File 对象送到 paste 事件，证据
+   见 gui-test/ctxmenu-paste-diag.mjs），纯文本粘贴原样放行。 */
 function setupAttachDrop(view) {
   // 投放目标是输入卡本身，不是 composer-wrap：首页时输入卡被搬进页面中央的问候区
   // （wrap 里根本没有它），绑在 wrap 上会漏掉首页那次投放

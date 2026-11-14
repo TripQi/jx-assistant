@@ -3874,22 +3874,27 @@ func (a *App) handleSessionOpenOrReveal(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, 200, map[string]string{"ok": "1"})
 }
 
-// handleClipboardRead 读系统剪贴板（桌面壳右键「粘贴」的兜底：WebView2 里
-// navigator.clipboard.readText 会永久挂起，权限态停在 prompt 且没有授权 UI，
-// 见 clipboard_windows.go 头注）。返回 {text} 与可选 {png}（截图，base64）。
+// handleClipboardRead 读系统剪贴板（桌面壳右键「粘贴」的实现底座：WebView2 里
+// navigator.clipboard.readText 会永久挂起、execCommand('paste') 一律被拒，见
+// clipboard_windows.go 头注）。返回 {text} 与可选 {png}（图片 PNG 字节，base64）、
+// {files}（资源管理器复制的文件真实路径列表）。三样可能同在，前端按 Ctrl+V 的
+// 口径分流（文件>图片>文本，app-ctxmenu.js 的 pasteIntoTarget）。
 // 剪贴板属敏感数据：仅回环可达（loopbackOnly，与设备桥同闸），LAN/远程一律 403。
 func (a *App) handleClipboardRead(w http.ResponseWriter, r *http.Request) {
 	if !loopbackOnly(w, r) {
 		return
 	}
-	text, png, err := readClipboardWindows()
+	text, png, files, err := readClipboardWindows()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	resp := map[string]string{"text": text}
+	resp := map[string]any{"text": text}
 	if len(png) > 0 {
 		resp["png"] = base64.StdEncoding.EncodeToString(png)
+	}
+	if len(files) > 0 {
+		resp["files"] = files
 	}
 	writeJSON(w, 200, resp)
 }

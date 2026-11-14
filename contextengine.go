@@ -211,15 +211,16 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 	req := ChatRequest{Model: target.Model, Messages: msgs, Tools: tools}
 	req.ApplyThinking(sess.Thinking) // 会话级思考档位，与主循环同款信封
 	for hop := 0; ; hop++ {
-		var sb strings.Builder
+		var sb, reasoning strings.Builder
 		var usage *Usage
 		var calls []ToolCall
 		start := time.Now()
 		// 记账点：每跳各建一次埋点、各收一次尾——明细里一跳一行；档位传本次请求
 		// 真正发出去的那一档（摘要请求自本改造起吃会话档位）
 		meterCb, finishUsage := e.app.meterUsage(usagePurposeCompact, sess, target, sess.Thinking, StreamCallbacks{
-			OnText:     func(s string) { sb.WriteString(s) },
-			OnToolCall: func(tc ToolCall) { calls = append(calls, tc) },
+			OnText:      func(s string) { sb.WriteString(s) },
+			OnReasoning: func(s string) { reasoning.WriteString(s) },
+			OnToolCall:  func(tc ToolCall) { calls = append(calls, tc) },
 			OnUsage: func(u Usage) {
 				uu := u
 				usage = &uu
@@ -237,6 +238,10 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 			// 保持数组口径：导出与前端按 auditRow.Tools 是 []string 解析，
 			// 写成逗号串会让整行反序列化失败、运行日志缺行
 			p["tools"] = toolNamesOf(calls)
+			if reasoning.Len() == 0 {
+				// 无法区分模型未生成与服务端未透传；只说明流中实际收到的事实。
+				p["detail"] = "工具调用响应未收到非空思考增量（可能当轮无思考，或服务端/协议未透传）；纠偏不伪造思考，兼容协议仍可补空字段"
+			}
 		}
 		if usage != nil {
 			p["usage"] = auditUsage{Prompt: usage.PromptTokens, Hit: usage.CacheHit(),
@@ -265,10 +270,18 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 		if hop >= 1 {
 			return "", fmt.Errorf("摘要模型连续两次调用工具（%s），压缩中止", strings.Join(toolNamesOf(calls), ","))
 		}
-		// 纠偏跳：把模型刚才的工具调用如实回传并配「拒绝执行」的合成响应
-		//（每个调用一条，保住工具配对协议；fillReasoningStub 会在 StreamChat
-		// 里给这条合成的 assistant 补空思考字段防 400），再重申一次性任务令
-		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: calls})
+		// 纠偏跳完整回传首跳正文、真实思考和工具调用，不裁剪或改写思考原文。
+		// 没收到思考时保留 nil，并已在本跳审计说明；fillReasoningStub 仅负责
+		// 带 tools 协议所需的空字段兼容，不能用它代替实际收到的真实思考。
+		assistant := Message{Role: "assistant", ToolCalls: calls}
+		if sb.Len() > 0 {
+			assistant.Content = sb.String()
+		}
+		if reasoning.Len() > 0 {
+			original := reasoning.String()
+			assistant.ReasoningContent = &original
+		}
+		req.Messages = append(req.Messages, assistant)
 		for _, tc := range calls {
 			req.Messages = append(req.Messages, Message{Role: "tool", ToolCallID: tc.ID,
 				Content: "（错误：这是一次性压缩任务，不允许调用工具，本次调用不会执行。）"})

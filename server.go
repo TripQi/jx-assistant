@@ -58,7 +58,9 @@ type App struct {
 	compactRunMu        sync.Mutex                   // 手动模型摘要压缩的会话级互斥锁（server.go）
 	compactRunning      map[string]bool              // 会话id → 后台模型摘要进行中（拦截重复点火；前端「后台压缩中」状态同源）
 	runMu               sync.Mutex
-	runners             map[string]*sessionRun // 正在执行的会话（含后台派发）
+	runners             map[string]*sessionRun  // 正在执行的会话（含后台派发）
+	mgrTurns            map[string]mgrTurnGrant // 经理代批的轮次级授权（mgrnotify.go）：会话id → 授权的那一轮；runMu 保护
+	mgrTurnGen          map[string]int64        // 经理代批授权的撤销代数（mgrnotify.go）：用户亲发消息递增，晚到的旧授权作废；runMu 保护
 	permMu              sync.Mutex
 	grants              map[string]*Grant        // 授权凭证（perm.go）
 	approvals           map[string]*Approval     // 等待用户决定的越权审批（perm.go）
@@ -3240,6 +3242,10 @@ func (a *App) handleInterject(w http.ResponseWriter, r *http.Request) {
 		origin = "interject" // 插话来源标记：随消息落库，AI 自动标题等场景据此把插话与正常轮次区分开
 	}
 	pm := a.pushPending(m.ID, mode, strings.TrimSpace(body.Content), kindChat, origin)
+	// 用户亲发消息＝接管：插话注入的正是经理正在跑的那一轮，经理代批资格立即
+	// 撤销（mgrnotify.go，轮次级授权）；排队（本轮结束后发）也照撤——用户已
+	// 表态接管，经理在当前轮剩余时间里不再代决。
+	a.revokeManagerTurn(m.ID)
 	if !a.IsRunning(m.ID) && !a.queuePausedOf(m.ID) {
 		a.kickQueue(m) // 本轮已经结束：排队消息自己开一轮，不依赖用户再点一次（暂停时只排队不拉起）
 	}
@@ -3868,22 +3874,27 @@ func (a *App) handleSessionOpenOrReveal(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, 200, map[string]string{"ok": "1"})
 }
 
-// handleClipboardRead 读系统剪贴板（桌面壳右键「粘贴」的兜底：WebView2 里
-// navigator.clipboard.readText 会永久挂起，权限态停在 prompt 且没有授权 UI，
-// 见 clipboard_windows.go 头注）。返回 {text} 与可选 {png}（截图，base64）。
+// handleClipboardRead 读系统剪贴板（桌面壳右键「粘贴」的实现底座：WebView2 里
+// navigator.clipboard.readText 会永久挂起、execCommand('paste') 一律被拒，见
+// clipboard_windows.go 头注）。返回 {text} 与可选 {png}（图片 PNG 字节，base64）、
+// {files}（资源管理器复制的文件真实路径列表）。三样可能同在，前端按 Ctrl+V 的
+// 口径分流（文件>图片>文本，app-ctxmenu.js 的 pasteIntoTarget）。
 // 剪贴板属敏感数据：仅回环可达（loopbackOnly，与设备桥同闸），LAN/远程一律 403。
 func (a *App) handleClipboardRead(w http.ResponseWriter, r *http.Request) {
 	if !loopbackOnly(w, r) {
 		return
 	}
-	text, png, err := readClipboardWindows()
+	text, png, files, err := readClipboardWindows()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	resp := map[string]string{"text": text}
+	resp := map[string]any{"text": text}
 	if len(png) > 0 {
 		resp["png"] = base64.StdEncoding.EncodeToString(png)
+	}
+	if len(files) > 0 {
+		resp["files"] = files
 	}
 	writeJSON(w, 200, resp)
 }
@@ -3966,8 +3977,14 @@ func (a *App) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	// 经理代理（mgrnotify.go）：经理自己经 call_api 代批的请求带调用者会话头，
-	// 先标注来源再登记决定——等待方醒来读到的就是已标注的值。
+	// 先标注来源再登记决定——等待方醒来读到的就是已标注的值。代批是轮次级
+	// 授权：卡片所属会话的经理那一轮已收口（或从不是经理轮）就拒绝——绝不
+	// 代决不属自己那一轮的卡片（通知侧窗口外本就不投，这里挡主动翻清单的）。
 	if managerResolveCaller(a, r) {
+		if !a.managerResolveAllowed(true, r.PathValue("id")) {
+			writeErr(w, 403, "这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
+			return
+		}
 		a.markApprovalByManager(r.PathValue("id"))
 	}
 	if err := a.resolveApproval(r.PathValue("id"), body.Approved, body.Always); err != nil {
@@ -3997,8 +4014,12 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 经理代理（mgrnotify.go）：经理自己经 call_api 代答的请求带调用者会话头，
-	// 先标注来源再登记决定（口径同审批）。
+	// 先标注来源再登记决定（口径同审批；代批窗口判定也同审批——轮次级授权）。
 	if managerResolveCaller(a, r) {
+		if !a.managerResolveAllowed(false, r.PathValue("id")) {
+			writeErr(w, 403, "这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
+			return
+		}
 		a.markQuestionByManager(r.PathValue("id"))
 	}
 	if err := a.resolveQuestion(r.PathValue("id"), body.Answer); err != nil {
@@ -4274,6 +4295,9 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "该会话正在执行中，请稍候再发")
 		return
 	}
+	// 用户亲发消息＝接管：经理代批资格撤销（mgrnotify.go，轮次级授权——用户
+	// 发起的这一轮不属于经理，即使它由经理轮排队/插话衔接而来）
+	a.revokeManagerTurn(m.ID)
 	um := TextMessage("user", body.Content)
 	sm := a.appendMessage(m, um)
 	opening := []Event{{Type: "message", Message: &sm.Message, Seq: sm.Seq, Kind: kindChat}}
@@ -4354,6 +4378,7 @@ func (a *App) handleRetry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"started": false, "reason": "该会话正在执行中"})
 		return
 	}
+	a.revokeManagerTurn(m.ID) // 用户点重试＝接管：经理代批资格撤销（轮次级授权）
 	a.clearRunError(m.ID)
 	a.serveRun(w, r, m, run, []Event{{Type: "retry"}})
 }

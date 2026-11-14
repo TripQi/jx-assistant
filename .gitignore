@@ -47,6 +47,9 @@ android/app/debug.keystore
 android/runtime/*.tgz
 工作区/
 默认工作区/
+# 开发版（编译并启动开发版.bat）的隔离数据目录：开发配置/会话库/工作区/浏览器
+# profile 全在里面，含 API Key 等敏感字段，绝不入库
+开发环境/
 ppt合并/
 # 发布 APK 不入库（仓库惯例），android-poc 为早期 PoC（137MB 大头是 app/build，正式安卓工程在 android/）
 *.apk
@@ -110,3 +113,6 @@ voicetype.json
 组件/voice/voicetype/webview2-profile/
 组件/voice/voicetype/__pycache__/
 组件/voice/voicetype/models/
+
+# 组件开发实测产物（端到端手册与截图，一次性输出不入库）
+/输出/

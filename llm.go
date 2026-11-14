@@ -293,16 +293,17 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 	if altFirst {
 		first, second = alt, primary
 	}
-	err = streamProtoOnce(ctx, first, target.APIKey, body, proto, cb)
+	attemptsLeft := connRetryMaxAttempts
+	err = streamProtoOnceBudget(ctx, first, target.APIKey, body, proto, cb, &attemptsLeft)
 	if err == nil {
 		markAltPreferred(target, first == alt && alt != "")
 		return nil
 	}
-	if second == "" || !isConnFailure(err) || ctx.Err() != nil {
+	if second == "" || !isConnFailure(err) || ctx.Err() != nil || attemptsLeft == 0 {
 		return err
 	}
 	log.Printf("[模型] %s 连接失败，改走备用地址 %s", safeConnURL(first), safeConnURL(second))
-	err2 := streamProtoOnce(ctx, second, target.APIKey, body, proto, cb)
+	err2 := streamProtoOnceBudget(ctx, second, target.APIKey, body, proto, cb, &attemptsLeft)
 	if err2 == nil {
 		markAltPreferred(target, second == alt && alt != "")
 		return nil
@@ -429,7 +430,15 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 这里；域名解析/证书也不重试（同一地址立刻重试结果一样）。
 // ctx 取消（用户点停止/插话）导致的失败压根不包成 connFailure（见 streamProtoTry），
 // 且每一步等待都走 sleepCtx：取消立即放弃，不睡满。
+// connRetryMaxAttempts 封顶一次 StreamChat 的主备合计尝试，不随故障类型切换重置。
+const connRetryMaxAttempts = 16
+
 func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
+	attemptsLeft := connRetryMaxAttempts
+	return streamProtoOnceBudget(ctx, baseURL, apiKey, body, proto, cb, &attemptsLeft)
+}
+
+func streamProtoOnceBudget(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks, attemptsLeft *int) error {
 	url := baseURL + proto.path
 	// 拨号目标：端点地址的 host:port（也就是 target.BaseURL 的 host:port）。
 	// 只用于报错细节，不参与请求构造——不为此改任何签名。
@@ -441,14 +450,21 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 	// 多少时间」算（见 connRetryTimeoutBudget），而不只是待等退避时长。
 	attemptStart := time.Now()
 	var err error
-	for i := 0; ; i++ {
+	var transientRetries, timeoutRetries int
+	for {
+		*attemptsLeft--
 		err = streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
 		var cf *connFailure
 		if !errors.As(err, &cf) || ctx.Err() != nil {
 			return err
 		}
 		delays := cf.retryDelays()
-		if len(delays) == 0 || i >= len(delays) { // 不重试 / 阶梯跑完：交给 StreamChat 定要不要切备用地址
+		retries := &transientRetries
+		if cf.timeout {
+			retries = &timeoutRetries
+		}
+		i := *retries
+		if len(delays) == 0 || i >= len(delays) || *attemptsLeft == 0 { // 分类型阶梯与全调用上限均不重置
 			return err
 		}
 		delay := delays[i]
@@ -461,6 +477,7 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 		}
 		log.Printf("[模型] %s 拨号失败（%s），%s 后重试同一地址（第 %d/%d 次重试）",
 			target, cf.kind, delay, i+1, len(delays))
+		*retries++
 		if !sleepCtx(ctx, delay) {
 			return err // ctx 取消：立即退出（不睡满），也不再多试
 		}

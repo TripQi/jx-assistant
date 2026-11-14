@@ -30,7 +30,7 @@ type StoredMessage struct {
 	SessionID  string `json:"sessionId"`
 	Seq        int64  `json:"seq"`
 	Kind       string `json:"kind"`
-	Origin     string `json:"origin,omitempty"` // summary 来源：auto | manual
+	Origin     string `json:"origin,omitempty"`  // summary 来源：auto | manual
 	Compact    string `json:"compact,omitempty"` // 规则压缩标记：非空=已折叠（"omit"=整行丢弃）；前端据此显示「已折叠」行，原文照常完整展示
 	CoversUpTo int64  `json:"coversUpTo,omitempty"`
 	CoversFrom int64  `json:"coversFrom,omitempty"` // 摘要覆盖起点 seq（与 coversUpTo 成对；auto 合并存累计起点，manual 存本次区间起点）
@@ -856,7 +856,7 @@ func permOf(m *SessionMeta) string {
 }
 
 // TouchRunMeta 只回写运行期会变化的列（用量计数与 updated_at）。列所有权约定
-//（同 SaveMeta 之于 status 的先例）：配置列（权限/能力/模型/思考档位等）只归
+// （同 SaveMeta 之于 status 的先例）：配置列（权限/能力/模型/思考档位等）只归
 // 配置写入口（PATCH / 权限升级函数）全量写；运行体热路径（appendMessage 系列、
 // 流尾用量回调）只碰运行列——否则拿着陈旧内存对象的全列回写会把用户刚在面板上
 // 改好的权限静默覆盖回旧值（运行中改权限丢失的根因）。
@@ -1148,8 +1148,16 @@ func (sm *StoredMessage) touchesActivity() bool {
 }
 
 func (s *Store) appendRowLocked(id string, sm *StoredMessage) error {
+	return appendMessageRow(s.db, id, sm)
+}
+
+// 同一写入实现可用于事务，避免摘要替换绕过消息序号与字段规则。
+func appendMessageRow(db interface {
+	QueryRow(string, ...any) *sql.Row
+	Exec(string, ...any) (sql.Result, error)
+}, id string, sm *StoredMessage) error {
 	if sm.Seq == 0 {
-		if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?`, id).Scan(&sm.Seq); err != nil {
+		if err := db.QueryRow(`SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?`, id).Scan(&sm.Seq); err != nil {
 			return err
 		}
 	}
@@ -1169,7 +1177,7 @@ func (s *Store) appendRowLocked(id string, sm *StoredMessage) error {
 	if sm.Compact != "" {
 		compact = sm.Compact
 	}
-	_, err := s.db.Exec(`INSERT INTO messages
+	_, err := db.Exec(`INSERT INTO messages
 		(session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, covers_from, superseded, created_at, thinking)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, sm.Seq, sm.Role, content, toolCalls, sm.ToolCallID, sm.Kind, sm.Origin,
@@ -1179,7 +1187,7 @@ func (s *Store) appendRowLocked(id string, sm *StoredMessage) error {
 	}
 	// 只有用户输入与模型最终输出刷新「最近更新」时间（口径见 touchesActivity）
 	if sm.touchesActivity() {
-		_, _ = s.db.Exec(`UPDATE sessions SET updated_at=? WHERE id=?`, now(), id)
+		_, _ = db.Exec(`UPDATE sessions SET updated_at=? WHERE id=?`, now(), id)
 	}
 	return nil
 }
@@ -1262,9 +1270,9 @@ func (s *Store) MessagesWithSeq(id string) ([]*StoredMessage, error) {
 // SummariesOf 取会话全部压缩摘要行（kind=summary，按 seq 升序）。会话详情接口
 // 用它把摘要行并入 UI 下发副本——前端要在压缩真实发生的位置显示常显的压缩
 // 卡片（覆盖到哪一条 + 展开看完整摘要）。MessagesWithSeq 的过滤口径不动
-//（历史读取工具等仍拿不到摘要行），只给界面这一份补齐。
+// （历史读取工具等仍拿不到摘要行），只给界面这一份补齐。
 func (s *Store) SummariesOf(id string) ([]*StoredMessage, error) {
-	rows, err := s.db.Query(`SELECT ` + messageCols + ` FROM messages WHERE session_id=? AND kind='summary' ORDER BY seq`, id)
+	rows, err := s.db.Query(`SELECT `+messageCols+` FROM messages WHERE session_id=? AND kind='summary' ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1277,6 +1285,7 @@ func (s *Store) SummariesOf(id string) ([]*StoredMessage, error) {
 	}
 	return out, rows.Err()
 }
+
 // RawMessages 分页读取原生历史（含摘要行，未做任何折叠），供历史查询工具与压缩使用。
 func (s *Store) RawMessages(id string, offset, limit int) ([]*StoredMessage, int, error) {
 	var total int
@@ -1377,6 +1386,29 @@ func (s *Store) EditUserMessage(sessionID string, seq int64, content string) (in
 		return 0, err
 	}
 	return removed, tx.Commit()
+}
+
+// AppendSummary 原子替换自动摘要；手动摘要只叠加。事务只做本地 SQL。
+func (s *Store) AppendSummary(id string, sm *StoredMessage) error {
+	if sm.Kind != kindSummary {
+		return fmt.Errorf("摘要持久化要求 summary 行")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if sm.Origin == "auto" {
+		if _, err := tx.Exec(`UPDATE messages SET superseded=1 WHERE session_id=? AND kind='summary' AND origin='auto' AND superseded=0`, id); err != nil {
+			return err
+		}
+	}
+	if err := appendMessageRow(tx, id, sm); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SupersedeAutoSummaries 把会话内所有未过期的自动摘要标记为已过期（新自动摘要合并旧摘要时用）。

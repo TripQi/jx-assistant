@@ -124,18 +124,20 @@ func TestMarshalAnthropicThinking(t *testing.T) {
 		level      string
 		wantThink  string // "" = 不带 thinking
 		wantEffort string // "" = 不带 output_config
-		maxTok     int    // 期望 max_tokens（未声明 MaxOutput 时默认 8192）
+		maxTok     int    // 期望 max_tokens（未声明 MaxOutput 时默认 32768）
 		maxOut     int    // LLMTarget.MaxOutput（0 = 未声明）
 	}{
-		{"", "", "", 8192, 0},
-		{"enabled", "", "", 8192, 0}, // 老值：跟随服务端默认
-		{"none", "disabled", "", 8192, 0},
-		{"disabled", "disabled", "", 8192, 0}, // 老值兼容
-		{"low", "adaptive", "low", 8192, 0},
-		{"medium", "adaptive", "medium", 8192, 0},
-		{"high", "adaptive", "high", 8192, 0},
-		{"xhigh", "adaptive", "xhigh", 8192, 0},
+		{"", "", "", 32768, 0},
+		{"enabled", "", "", 32768, 0}, // 老值：跟随服务端默认
+		{"none", "disabled", "", 32768, 0},
+		{"disabled", "disabled", "", 32768, 0}, // 老值兼容
+		{"low", "adaptive", "low", 32768, 0},
+		{"medium", "adaptive", "medium", 32768, 0},
+		{"high", "adaptive", "high", 32768, 0},
+		{"xhigh", "adaptive", "xhigh", 32768, 0},
 		{"max", "adaptive", "max", 32768, 32768}, // 档位再大也不抬 max_tokens
+		{"max", "adaptive", "max", 32768, 0},     // 未声明最大输出时仍保留 max 档映射
+		{"max", "adaptive", "max", 64000, 64000}, // 已声明最大输出优先于兜底
 	}
 	for _, c := range cases {
 		req := ChatRequest{Messages: []Message{TextMessage("user", "hi")}}
@@ -182,6 +184,39 @@ func TestMarshalAnthropicThinking(t *testing.T) {
 		if c.wantThink == "adaptive" && raw.Temperature != nil {
 			t.Errorf("档位 %q 思考开着时不应携带 temperature: %s", c.level, body)
 		}
+	}
+}
+
+// 显式请求与模型目录的最大输出优先于兜底，不按思考档位静默改小。
+func TestAnthropicMaxTokensPriority(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		requested int
+		maxOutput int
+		want      int
+	}{
+		{"fallback", 0, 0, 32768},
+		{"catalog", 0, 64000, 64000},
+		{"explicit", 4096, 64000, 4096},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req := ChatRequest{Messages: []Message{TextMessage("user", "hi")}, MaxTokens: c.requested}
+			req.ApplyThinking("max")
+			body, err := marshalAnthropic(LLMTarget{Model: "claude-sonnet-4-5", MaxOutput: c.maxOutput}, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw anthropicRequest
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if raw.MaxTokens != c.want {
+				t.Errorf("max_tokens=%d，期望 %d", raw.MaxTokens, c.want)
+			}
+			if raw.Thinking == nil || raw.Thinking.Type != "adaptive" || raw.OutputConfig == nil || raw.OutputConfig.Effort != "max" {
+				t.Errorf("max 档映射被改变: %s", body)
+			}
+		})
 	}
 }
 

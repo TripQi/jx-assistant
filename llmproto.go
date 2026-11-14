@@ -23,6 +23,9 @@ import (
 // anthropicVersionHeader Anthropic 要求的协议版本头（鉴权三件套之一）。
 const anthropicVersionHeader = "2023-06-01"
 
+// defaultMaxOutput 是模型目录未声明最大输出时的兜底；过小会让思考吃掉全部输出预算。
+const defaultMaxOutput = 32768
+
 // ---------- llmProtocol：协议实现的统一形状 ----------
 
 // llmProtocol 是一种渠道协议的全部差异点。StreamChat 持有一个实现跑完整个
@@ -220,13 +223,13 @@ func marshalAnthropic(target LLMTarget, req ChatRequest) ([]byte, error) {
 		Temperature: req.Temperature,
 		Stream:      true,
 	}
-	// max_tokens：请求显式值 > 模型目录的最大输出 > 保守默认 8192
+	// max_tokens：请求显式值 > 模型目录的最大输出 > defaultMaxOutput
 	out.MaxTokens = req.MaxTokens
 	if out.MaxTokens <= 0 {
 		out.MaxTokens = target.MaxOutput
 	}
 	if out.MaxTokens <= 0 {
-		out.MaxTokens = 8192
+		out.MaxTokens = defaultMaxOutput
 	}
 	// 思考档位：none → thinking{type:disabled}；其余五档 → adaptive +
 	// output_config.effort 原样发（官方推荐口径，不再折成 budget_tokens）。

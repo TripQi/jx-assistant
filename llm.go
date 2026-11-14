@@ -299,7 +299,7 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 	if second == "" || !isConnFailure(err) || ctx.Err() != nil {
 		return err
 	}
-	log.Printf("[模型] %s 连接失败，改走备用地址 %s", first, second)
+	log.Printf("[模型] %s 连接失败，改走备用地址 %s", safeConnURL(first), safeConnURL(second))
 	err2 := streamProtoOnce(ctx, second, target.APIKey, body, proto, cb)
 	if err2 == nil {
 		markAltPreferred(target, second == alt && alt != "")
@@ -549,7 +549,9 @@ func upstreamErrText(status int, body []byte) string {
 // 「耗时」挤出去了，而这两项恰恰是排障时最要紧的。
 const (
 	connErrDetailMax = 260
-	connErrRawMax    = 200
+	connErrRawMax    = 130
+	connErrTargetMax = 50
+	connErrProxyMax  = 45
 )
 
 // connErrText 把一次连接失败整理成一行文案：一句人话在前，括号里挂底层细节
@@ -567,10 +569,10 @@ func connErrText(e *connFailure) string {
 	}
 	var parts []string
 	if e.target != "" {
-		parts = append(parts, "拨号 "+e.target+" 失败")
+		parts = append(parts, "拨号 "+truncateRunes(e.target, connErrTargetMax)+" 失败")
 	}
 	if e.err != nil {
-		if raw := strings.Join(strings.Fields(e.err.Error()), " "); raw != "" {
+		if raw := strings.Join(strings.Fields(connUnderlyingError(e.err).Error()), " "); raw != "" {
 			parts = append(parts, truncateRunes(raw, connErrRawMax))
 		}
 	}
@@ -581,12 +583,32 @@ func connErrText(e *connFailure) string {
 		parts = append(parts, fmt.Sprintf("耗时 %dms", ms))
 	}
 	if e.proxy != "" {
-		parts = append(parts, e.proxy)
+		parts = append(parts, truncateRunes(e.proxy, connErrProxyMax))
 	}
 	if len(parts) == 0 {
 		return kind
 	}
 	return kind + "（" + truncateRunes(strings.Join(parts, "；"), connErrDetailMax) + "）"
+}
+
+// connUnderlyingError 不把 url.Error 自带的完整请求 URL 带入公开诊断。
+func connUnderlyingError(err error) error {
+	for {
+		var ue *neturl.Error
+		if !errors.As(err, &ue) || ue.Err == nil {
+			return err
+		}
+		err = ue.Err
+	}
+}
+
+// safeConnURL 只保留地址的公开来源，userinfo、路径、查询与 fragment 均不展示。
+func safeConnURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[地址已隐藏]"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // newConnFailure 记一次连接失败的全部现场。诊断本机 TUN + fake-ip 代理栈瞬断
@@ -679,7 +701,7 @@ var proxyFromEnv = http.ProxyFromEnvironment
 func proxyDesc(req *http.Request) string {
 	pu, err := proxyFromEnv(req)
 	if err != nil {
-		return "代理配置有误：" + truncateRunes(strings.Join(strings.Fields(err.Error()), " "), 80)
+		return "代理配置有误（地址已隐藏）"
 	}
 	if pu == nil {
 		return "未经代理"

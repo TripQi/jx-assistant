@@ -60,6 +60,7 @@ type toolContext struct {
 	seq      int64
 	callID   string
 	toolName string
+	batchItems []batchItemStatus // 仅本次调用；桥消费结构化状态，不解析正文
 	// planApproved 只在 RunAgent 主循环构造的 toolContext 里非 nil：exit_plan_mode
 	// 获批时置 true，主循环据此把步数预算从头计（计划阶段的探索不挤占执行阶段）。
 	planApproved *bool
@@ -529,7 +530,15 @@ func readFileTool() Tool {
 	}
 }
 
+type batchItemStatus struct {
+	Index int `json:"index"` // 1 基输入序号
+	Path string `json:"path"`
+	Status string `json:"status"` // success / failed / incomplete / not_returned
+	Error string `json:"error,omitempty"`
+}
+
 func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
+	t.batchItems = nil
 	var p readRequest
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -568,7 +577,20 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 	// 正文预算 = 统一上限 - 末尾提示的预留：提示必须完整落到模型眼里
 	budget := readOutputMaxBytes - readTailNoticeReserve
 	for i, it := range items {
-		written, whole := appendReadSeg(&b, t.readSection(it), budget)
+		t.batchItems = append(t.batchItems, batchItemStatus{Index: i+1, Path: it.Path, Status: "not_returned"})
+	}
+	for i, it := range items {
+		seg := t.readSection(it)
+		written, whole := appendReadSeg(&b, seg, budget)
+		status := &t.batchItems[i]
+		if written {
+			status.Status = "success"
+			if seg.errText != "" {
+				status.Status, status.Error = "failed", seg.errText
+			} else if !whole {
+				status.Status = "incomplete"
+			}
+		}
 		if !written {
 			notReturned = i + 1
 			break
@@ -908,6 +930,7 @@ type editItemResult struct {
 }
 
 func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
+	t.batchItems = nil
 	var p editRequest
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -1072,6 +1095,16 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	out := strings.TrimRight(b.String(), "\n")
 	if len(items) > 1 {
 		out += fmt.Sprintf("\n（共 %d 条：%d 条已生效、%d 条未生效）", len(items), okSum, failSum)
+	}
+	for i, res := range results {
+		reason := res.fail
+		if st := itemState[i]; st != nil {
+			if st.loadErr != "" { reason = st.loadErr }
+			if st.writeErr != "" { reason = st.writeErr }
+		}
+		status := batchItemStatus{Index: i+1, Path: items[i].Path, Status: "success"}
+		if reason != "" { status.Status, status.Error = "failed", reason }
+		t.batchItems = append(t.batchItems, status)
 	}
 	return out, nil
 }

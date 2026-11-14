@@ -106,6 +106,12 @@ def call(tool, args=None, timeout=600):
     call("edit", {"edits": [{"path": "a.go", "old_string": "x", "new_string": "y"}]})；
     旧的单条写法 call("read", {"path": "a.go"}) 仍然可用。返回 dict：
     {"ok": true, "result": "<工具输出文本>"} 或 {"ok": false, "error": "<原因>"}。
+    read/edit 完成后额外返回 items（输入顺序）：
+    [{"index":1,"path":"a.go","status":"success"},
+     {"index":2,"path":"b.go","status":"failed","error":"<原因>"}]。
+    read 还可能是 incomplete（本条输出不完整）/not_returned（预算用尽未返回）。
+    部分成功仍 ok:true；仅全部条目 failed 时 ok:false，且保留 result 并新增 error。
+    参数/调用级错误仍沿用原来的 ok:false/error 结构。
     需要用户审批的操作（如沙箱升级）会被拒绝——把这类动作留给模型前台执行。"""
     body = _json.dumps({"token": _TOKEN, "tool": tool, "args": args or {}}).encode("utf-8")
     req = _rq.Request(_URL, data=body, headers={"Content-Type": "application/json"})
@@ -394,7 +400,19 @@ func (a *App) bridgeRunTool(r *http.Request, m *SessionMeta, tok *bridgeToken, t
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	log.Printf("[桥] 会话 %s 调 %s 完成（%s）", m.ID, tool, dur)
-	return map[string]any{"ok": true, "result": out}
+	outcome := map[string]any{"ok": true, "result": out}
+	if len(tc.batchItems) > 0 {
+		outcome["items"] = tc.batchItems
+		allFailed := true
+		for _, item := range tc.batchItems {
+			if item.Status != "failed" { allFailed = false; break }
+		}
+		if allFailed {
+			outcome["ok"] = false
+			outcome["error"] = "全部条目失败，详见 items 与 result"
+		}
+	}
+	return outcome
 }
 
 // bridgeDispatch 派发子任务：复用 dispatch_task 的会话创建与投递管线，差别只在

@@ -405,7 +405,10 @@ func (a *App) bridgeRunTool(r *http.Request, m *SessionMeta, tok *bridgeToken, t
 		outcome["items"] = tc.batchItems
 		allFailed := true
 		for _, item := range tc.batchItems {
-			if item.Status != "failed" { allFailed = false; break }
+			if item.Status != "failed" {
+				allFailed = false
+				break
+			}
 		}
 		if allFailed {
 			outcome["ok"] = false

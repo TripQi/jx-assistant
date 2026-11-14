@@ -53,13 +53,13 @@ type Tool struct {
 // 当前会话（决定工作区范围与权限模式）与事件上报函数。seq/callID/toolName
 // 标出本次调用所在的助手步骤，文件快照据此锚定回退位置。
 type toolContext struct {
-	ctx      context.Context
-	app      *App
-	sess     *SessionMeta
-	emit     func(Event)
-	seq      int64
-	callID   string
-	toolName string
+	ctx        context.Context
+	app        *App
+	sess       *SessionMeta
+	emit       func(Event)
+	seq        int64
+	callID     string
+	toolName   string
 	batchItems []batchItemStatus // 仅本次调用；桥消费结构化状态，不解析正文
 	// planApproved 只在 RunAgent 主循环构造的 toolContext 里非 nil：exit_plan_mode
 	// 获批时置 true，主循环据此把步数预算从头计（计划阶段的探索不挤占执行阶段）。
@@ -491,10 +491,10 @@ const readTailNoticeReserve = 200
 // Limit 用指针是为了区分「没传」和「传了 0」：没传按默认 2000 行，传了 0/负数
 // 必须报错——静默当成默认值会把整份大文件灌进上下文（模型算错一个数就踩）。
 type readItem struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  *int   `json:"limit"`
-	ByteOffset int `json:"byte_offset,omitempty"` // 首行内已返回的 UTF-8 字节数，0 基
+	Path       string `json:"path"`
+	Offset     int    `json:"offset"`
+	Limit      *int   `json:"limit"`
+	ByteOffset int    `json:"byte_offset,omitempty"` // 首行内已返回的 UTF-8 字节数，0 基
 }
 
 // readRequest 是 read 的完整入参。files 数组是**唯一公开形态**；path/offset/limit
@@ -520,9 +520,9 @@ func readFileTool() Tool {
 				"多个文件、或多段区间一律一次调用，禁止逐条调用。",
 			objSchema(map[string]any{
 				"files": arrayProp("要读取的文件列表（1-5 条）", objSchema(map[string]any{
-					"path":   strProp("文件路径（相对或绝对）"),
-					"offset": intProp("起始行号，从 1 开始，可选"),
-					"limit":  intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
+					"path":        strProp("文件路径（相对或绝对）"),
+					"offset":      intProp("起始行号，从 1 开始，可选"),
+					"limit":       intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
 					"byte_offset": intProp("巨行续读：跳过 offset 行内已返回的 UTF-8 字节数（0 基，按截断提示传入）；后续行不受影响"),
 				}, "path")),
 			}, "files")),
@@ -531,10 +531,10 @@ func readFileTool() Tool {
 }
 
 type batchItemStatus struct {
-	Index int `json:"index"` // 1 基输入序号
-	Path string `json:"path"`
+	Index  int    `json:"index"` // 1 基输入序号
+	Path   string `json:"path"`
 	Status string `json:"status"` // success / failed / incomplete / not_returned
-	Error string `json:"error,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
@@ -577,7 +577,7 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 	// 正文预算 = 统一上限 - 末尾提示的预留：提示必须完整落到模型眼里
 	budget := readOutputMaxBytes - readTailNoticeReserve
 	for i, it := range items {
-		t.batchItems = append(t.batchItems, batchItemStatus{Index: i+1, Path: it.Path, Status: "not_returned"})
+		t.batchItems = append(t.batchItems, batchItemStatus{Index: i + 1, Path: it.Path, Status: "not_returned"})
 	}
 	for i, it := range items {
 		seg := t.readSection(it)
@@ -614,12 +614,12 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 // readSeg 是批量 read 里的一段：段头 + 内容行 + 尾注；errText 非空表示该条
 // 读取失败（失败原因照常占一个段，其余条不受影响）。
 type readSeg struct {
-	disp      string
-	header    string
-	lines     []string
-	notes     string
-	errText   string
-	startLine int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
+	disp       string
+	header     string
+	lines      []string
+	notes      string
+	errText    string
+	startLine  int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
 	byteOffset int // 首行已跳过的 UTF-8 字节数
 }
 
@@ -1099,11 +1099,17 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	for i, res := range results {
 		reason := res.fail
 		if st := itemState[i]; st != nil {
-			if st.loadErr != "" { reason = st.loadErr }
-			if st.writeErr != "" { reason = st.writeErr }
+			if st.loadErr != "" {
+				reason = st.loadErr
+			}
+			if st.writeErr != "" {
+				reason = st.writeErr
+			}
 		}
-		status := batchItemStatus{Index: i+1, Path: items[i].Path, Status: "success"}
-		if reason != "" { status.Status, status.Error = "failed", reason }
+		status := batchItemStatus{Index: i + 1, Path: items[i].Path, Status: "success"}
+		if reason != "" {
+			status.Status, status.Error = "failed", reason
+		}
 		t.batchItems = append(t.batchItems, status)
 	}
 	return out, nil

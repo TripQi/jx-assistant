@@ -282,7 +282,9 @@ func probeTextFile(path string) TextEncoding {
 	}
 	for cut := 1; extra > 0 && cut <= 3 && cut < len(b); cut++ {
 		enc := detectTextEncoding(b[:len(b)-cut])
-		if enc == EncUnknown { continue }
+		if enc == EncUnknown {
+			continue
+		}
 		for take := 1; take <= extra; take++ {
 			tail := append(append([]byte{}, b[len(b)-cut:]...), continuation[:take]...)
 			if detectTextEncoding(tail) == enc {

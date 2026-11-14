@@ -213,6 +213,7 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 	for hop := 0; ; hop++ {
 		var sb, reasoning strings.Builder
 		var usage *Usage
+		var completion StreamCompletion
 		var calls []ToolCall
 		var responsesItems, anthropicThinking []json.RawMessage
 		start := time.Now()
@@ -227,6 +228,7 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 				usage = &uu
 			},
 		})
+		meterCb.OnCompletion = func(c StreamCompletion) { completion = c }
 		meterCb.OnOutputItem = func(protocol string, item json.RawMessage) {
 			if protocol == "responses" {
 				responsesItems = append(responsesItems, item)
@@ -235,6 +237,20 @@ func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools 
 			}
 		}
 		err := StreamChat(context.Background(), target, req, meterCb)
+		if err == nil {
+			complete := completion.Ended
+			switch target.Protocol {
+			case "responses":
+				complete = complete && completion.Reason == "completed"
+			case "anthropic":
+				complete = complete && (completion.Reason == "end_turn" || (len(calls) > 0 && completion.Reason == "tool_use"))
+			default:
+				complete = complete && (completion.Reason == "stop" || (len(calls) > 0 && completion.Reason == "tool_calls"))
+			}
+			if !complete {
+				err = fmt.Errorf("摘要未完整结束（reason=%q, ended=%t），已放弃落库，保留原文", completion.Reason, completion.Ended)
+			}
+		}
 		finishUsage(err) // 失败也落一行（ok=false + 错误摘要），压缩调用不留空账
 		p := map[string]any{"type": "call", "scope": "summarize", "model": target.AuditModel(),
 			"msgs": len(req.Messages), "est": estimateTokens(req.Messages),

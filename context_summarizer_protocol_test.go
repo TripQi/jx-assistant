@@ -50,6 +50,11 @@ func TestSummarizerProtocolNativeReasoningHop(t *testing.T) {
 					} else {
 						send(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": strings.Repeat("完整摘要。", 20)}})
 					}
+					reason := "end_turn"
+					if len(bodies) == 1 {
+						reason = "tool_use"
+					}
+					send(map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": reason}})
 					send(map[string]any{"type": "message_stop"})
 				}
 			}))

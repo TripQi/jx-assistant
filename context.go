@@ -1730,9 +1730,6 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	if err != nil {
 		return "", err
 	}
-	if origin == "auto" {
-		_ = a.Store.SupersedeAutoSummaries(sess.ID)
-	}
 	label := "手动"
 	if origin == "auto" {
 		label = "自动"
@@ -1760,10 +1757,12 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	// 原文继续，防止压缩后模型复述/确认摘要浪费一整个回合
 	content := fmt.Sprintf("【%s历史摘要（%s，原文可用历史查询工具按区间读取）——以下是既定背景，直接基于后续原文继续工作，不要复述或确认本摘要】\n%s",
 		label, rangeNote, summary)
-	_ = a.Store.AppendRow(sess.ID, &StoredMessage{
+	if err := a.Store.AppendSummary(sess.ID, &StoredMessage{
 		Message: TextMessage("system", content), Kind: kindSummary, // 上下文材料，非用户发言；发送时现场构造 user 视图
 		Origin: origin, CoversUpTo: segEnd, CoversFrom: coversFrom, CreatedAt: now(),
-	})
+	}); err != nil {
+		return "", fmt.Errorf("摘要落库失败: %w", err)
+	}
 	// 通知前端：摘要行已落库，对话区在覆盖边界处翻新压缩卡片（reason=compact
 	// 同时作废前缀缓存——摘要行 append 在会话末尾、不改末条 seq，前缀复用
 	// 判定感知不到，卡片会一直不出现在正打开的会话里直到全量重建）

@@ -19,7 +19,7 @@ import (
 
 const compactOmit = "omit" // 规则压缩的特殊标记：组装时整行跳过
 
-// argKeepLimit 是模型摘要（doSummarize）拼装待压素材时工具参数的截断上限。
+// argKeepLimit 是历史查询工具渲染工具调用时参数（arguments）的截断上限。
 const argKeepLimit = 500
 
 // ---------- 规则折叠 v2（间隔制，2026-11 规格：动作行 + 诚实裁剪标注 + seq 锚点） ----------
@@ -141,10 +141,34 @@ func activeSummaries(msgs []*StoredMessage) []*StoredMessage {
 // 或同 key 换值渲染为【移除】/【新增】变更清单，差分连续数达到阈值后完整
 // 重发一次校准（见 envUpdateMessage / envRowRender）——变化永远以新消息
 // 出现在尾部，系统提示词与历史前缀逐字节稳定，前缀缓存命中最大化。
-func (a *App) buildContext(sess *SessionMeta, sys string) []Message {
+// buildContextUpTo 与 buildContext 同一管线，唯一差别：upTo>0 时行循环在
+// upTo 处截止（Seq 超过的行整段跳过——消息与环境差分同步截止，组装出的
+// 消息序列与主循环请求逐字节同源）。doSummarize 的摘要请求用它取「压缩
+// 终点为止」的消息序列：前缀缓存直接命中整段压缩区间，摘要调用只有尾部
+// 压缩指令是新内容（DSH 社区同思路实测命中可到 99%+）。
+func (a *App) buildContextUpTo(sess *SessionMeta, sys string, upTo int64) []Message {
+	return a.buildContext(sess, sys, upTo)
+}
+
+func (a *App) buildContext(sess *SessionMeta, sys string, upTo int64) []Message {
 	raw, err := a.Store.RawMessagesAll(sess.ID)
 	if err != nil {
 		return []Message{TextMessage("system", sys)}
+	}
+	if upTo > 0 {
+		// 截止到 upTo（摘要请求的压缩终点）：对话行与环境差分行照裁——它们
+		// 在「upTo 时刻的主循环请求」里本来就只到 upTo 为止，裁完的序列与
+		// 那次请求逐字节同源，前缀缓存命中的正是那一段。摘要行豁免：它只是
+		// 落库位置靠后的元数据（covers_up_to 才是它的逻辑位置），主循环请求
+		// 里始终整段在前缀头部，裁掉反而与主循环分叉。
+		kept := make([]*StoredMessage, 0, len(raw))
+		for _, m := range raw {
+			if m.Seq > upTo && m.Kind != "summary" {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		raw = kept
 	}
 	summaries := activeSummaries(raw)
 	boundary := int64(0)
@@ -1549,11 +1573,26 @@ func (a *App) resendEnvAfterCompact(sess *SessionMeta) {
 
 // ---------- 模型摘要压缩 ----------
 
-const summarizeInstruction = `请把下面这段对话历史压缩成一份结构化中文摘要，供同一对话的后续轮次作为上下文使用。
-要求：
-1. 输出以下小节（没有内容的写「无」）：主要请求与意图 / 关键概念与决定 / 涉及的文件与改动 / 错误与修复 / 未完成事项 / 当前进行中的工作 / 下一步。
-2. 保留精确的路径、命令、错误信息、数字与名称，不得改写。
-3. 只输出摘要本身，不要评论、不要提及压缩这件事。`
+// summarizeSections 通用会话的摘要小节要求（压缩指令的中段，2026-11-11 按
+// 六节拍板）。设计取舍：
+//   - 不设「下一步」节——保留窗口内的最近对话原文随请求原样保留，「接下来
+//     做什么」就活在原文里，摘要里再写一份只会过时（用户明确要求去掉）；
+//   - 「用户指令与约束摘录」独立成节且安全条款逐字保留（Claude Code 实践）：
+//     「不许做 XX」类禁令被压缩掉后模型可能再犯，原话引用保真；
+//   - 「关键决定」跨压缩保留（Codex/Cortex 实践）：合并旧摘要时仍成立的
+//     决定必须原样带入，防多代压缩后早期决策漂移；
+//   - 踩坑与成功经验单独点名：压缩最有长期价值的部分（用户口径：错误与
+//     教训 = 踩过的坑 + 验证过的成功做法）。
+const summarizeSections = `要求：
+1. 输出以下小节（没有内容的写「无」，不得删节）：已完成的任务与意图 / 关键决定 / 文件与改动 / 错误与教训 / 用户指令与约束摘录 / 进行中与未完成。
+2. 「已完成的任务与意图」写用户原始与演进的目标里已经落地的部分，关键表述逐字引用。
+3. 「关键决定」写方案与架构取舍及其理由——这些是跨压缩保留的核心：如果上面附有先前的自动摘要，仍成立的决定必须原样带入新摘要。
+4. 「文件与改动」写精确路径、为何重要、关键改动，代码片段只在必要时引用。
+5. 「错误与教训」重点写踩过的坑（失败的尝试及其原因、正确做法）与验证过的成功经验（哪个方案有效、关键参数与命令）。
+6. 「用户指令与约束摘录」逐条摘录用户的关键原话，含纠正与变更的意图；「不许做 XX」类约束与安全要求（敏感文件、禁做操作、凭据规则）必须逐字保留。
+7. 「进行中与未完成」写正在做什么与明确待办。摘要区间之后的最近对话原文会原样保留，不要在摘要中预告或规划下一步。
+8. 保留精确的路径、命令、错误信息、数字与名称，不得改写。
+9. 只输出摘要本身，不要评论、不要提及压缩这件事。`
 
 // doSummarize 把 [最后摘要边界, 压缩终点] 的区间压成一条摘要。
 // origin=auto 时合并旧自动摘要（DSH 式单一检查点）；origin=manual 时独立叠加、永不重压。
@@ -1648,27 +1687,23 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	if origin == "auto" && prevAuto != nil {
-		b.WriteString("【先前的自动摘要（请合并进新摘要，保留仍成立的事实、丢弃过时的）】\n" + prevAuto.Text() + "\n\n")
+	// 摘要请求 = 与主循环同源的消息序列（截止到压缩终点）+ 尾部一条压缩指令。
+	// 系统提示词、工具目录、历史（含差分环境快照、时间提示词、折叠视图）与
+	// 主循环请求逐字节同源，前缀缓存直接命中整段已有内容——首次压缩命中
+	// 整个压缩区间，模型只需要为尾部的指令付增量 token。旧做法把区间渲染成
+	// 一段「用户：…/助手：…」转述文本另起炉火全量重发：零命中、慢、且模型
+	// 读的是二手转写而非原生对话格式。
+	sys, _, tools := a.ctxEngine().materials(sess)
+	msgs := a.buildContextUpTo(sess, sys, segEnd)
+	// 图片内联与 Assemble 同口径（跟随会话模型能力）；模型解析不出来时不内联
+	inlineTarget := LLMTarget{}
+	if t, terr := a.resolveTarget(sess); terr == nil {
+		inlineTarget = t
 	}
-	b.WriteString("【待压缩的对话历史】\n")
-	for _, m := range raw {
-		if m.Seq <= boundary || m.Seq > segEnd || !summarizable(m) {
-			continue
-		}
-		role := map[string]string{"user": "用户", "assistant": "助手", "tool": "工具结果"}[m.Role]
-		if role == "" {
-			role = m.Role
-		}
-		text := m.Text()
-		for _, tc := range m.ToolCalls {
-			text += "\n[调用 " + tc.Function.Name + " " + clipText(tc.Function.Arguments, argKeepLimit) + "]"
-		}
-		b.WriteString(fmt.Sprintf("%s：%s\n", role, clipText(strings.TrimSpace(text), 4000)))
-	}
+	msgs = inlineImagesForRequest(a, msgs, inlineTarget)
+	msgs = append(msgs, TextMessage("user", a.summarizeDirective(sess, origin, boundary, segEnd, prevAuto)))
 
-	summary, err := a.ctxEngine().CallSummarizer(sess, summarizeInstructionFor(sess)+"\n\n"+b.String())
+	summary, err := a.ctxEngine().CallSummarizer(sess, msgs, toolDefsOf(tools))
 	if err != nil {
 		return "", err
 	}
@@ -1679,10 +1714,32 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	if origin == "auto" {
 		label = "自动"
 	}
-	content := fmt.Sprintf("【%s历史摘要（覆盖至第 %d 条，原文可用历史查询工具读取）】\n%s", label, segEnd, summary)
+	// 覆盖区间（增量式标注，2026-11-11 用户要求）：本次压的是 (boundary, segEnd]
+	// 这一段——seq 即数据库行号，写进摘要文本头与结构化字段，未来按区间检索
+	// 原文直接可用。auto 合并存**累计起点**（合并链头部：首压时 boundary+1，
+	// 之后继承 prevAuto 的累计起点；旧数据无起点字段时按 1=对话开始兜底）；
+	// manual 叠加天然增量，本次区间即全部覆盖。
+	coversFrom := boundary + 1
+	if origin == "auto" {
+		switch {
+		case prevAuto != nil && prevAuto.CoversFrom > 0:
+			coversFrom = prevAuto.CoversFrom
+		case prevAuto != nil:
+			coversFrom = 1
+		}
+	}
+	rangeNote := fmt.Sprintf("本次压缩第 %d 至 %d 条", boundary+1, segEnd)
+	if origin == "auto" && coversFrom != boundary+1 {
+		rangeNote += fmt.Sprintf("，合并先前摘要后累计覆盖第 %d 至 %d 条", coversFrom, segEnd)
+	}
+	// 落库正文头（DSH checkpoint preamble 同款作用）：既标记这是压缩检查点
+	//（含可检索的覆盖区间），也给模型行为指令——当作既定背景、直接从后续
+	// 原文继续，防止压缩后模型复述/确认摘要浪费一整个回合
+	content := fmt.Sprintf("【%s历史摘要（%s，原文可用历史查询工具按区间读取）——以下是既定背景，直接基于后续原文继续工作，不要复述或确认本摘要】\n%s",
+		label, rangeNote, summary)
 	_ = a.Store.AppendRow(sess.ID, &StoredMessage{
 		Message: TextMessage("system", content), Kind: kindSummary, // 上下文材料，非用户发言；发送时现场构造 user 视图
-		Origin: origin, CoversUpTo: segEnd, CreatedAt: now(),
+		Origin: origin, CoversUpTo: segEnd, CoversFrom: coversFrom, CreatedAt: now(),
 	})
 	// 通知前端：摘要行已落库，对话区在覆盖边界处翻新压缩卡片（reason=compact
 	// 同时作废前缀缓存——摘要行 append 在会话末尾、不改末条 seq，前缀复用
@@ -1693,30 +1750,55 @@ func (a *App) doSummarize(sess *SessionMeta, origin string, keepTail int, upTo i
 	return summary, nil
 }
 
-// summarizeInstructionAssistant 是数字助理主对话（mode=assistant）专属的摘要
-// 指令。设计意图（为什么要有这一份）：其他会话是一次任务一个对话，压掉过程
-// 细节无妨，按模型自己的压缩习惯就好；数字助理主对话不同——它是用户与常驻
-// 助理的长期对话，跨任务、跨天数，历史里沉淀着用户的偏好、习惯与定下的约定，
-// 这些一旦被摘要压掉，助理就「不认识这个用户」了。所以它的摘要侧重点要
-// 先记人再记事：小节里专门加了「用户偏好与习惯」「长期有效的约定」两栏，
-// 其余小节与其他会话一致。
-const summarizeInstructionAssistant = `请把「数字助理主对话」的这段历史压缩成一份结构化中文摘要，供同一对话的后续轮次作为上下文使用。这是用户与常驻数字助理的长期对话，跨任务、跨天数——摘要首先要让助理"还认识这个用户、还记得这些事"。
-要求：
-1. 输出以下小节（没有内容的写「无」）：用户偏好与习惯 / 长期有效的约定 / 任务与结果 / 关键事实与决定 / 涉及的文件与改动 / 错误与教训 / 进行中与未完成 / 下一步。
+// summarizeSectionsAssistant 是数字助理主对话（mode=assistant）专属的摘要
+// 小节要求。设计意图（为什么要有这一份）：其他会话是一次任务一个对话，压掉
+// 过程细节无妨，按模型自己的压缩习惯就好；数字助理主对话不同——它是用户
+// 与常驻助理的长期对话，跨任务、跨天数，历史里沉淀着用户的偏好、习惯与
+// 定下的约定，这些一旦被摘要压掉，助理就「不认识这个用户」了。所以它的
+// 摘要侧重点要先记人再记事：「用户偏好与习惯」「长期有效的约定」两节置顶
+// （后者即通用版「用户指令与约束摘录」的长期形态，不再重复设节），其余
+// 小节与通用版 summarizeSections 同构（含关键决定跳压缩保留、踩坑与成功
+// 经验点名、无「下一步」节——保留窗口原文盖住最近动向）。
+const summarizeSectionsAssistant = `要求：
+1. 输出以下小节（没有内容的写「无」，不得删节）：用户偏好与习惯 / 长期有效的约定 / 已完成的任务与结果 / 关键决定 / 涉及的文件与改动 / 错误与教训 / 进行中与未完成。
 2. 「用户偏好与习惯」写：称呼与身份、沟通偏好（详略/语言/格式）、常用工具与工作流、常用路径/设备/软件线索、明确表达过的喜欢与不喜欢。
 3. 「长期有效的约定」逐条保留用户定下的做事方式、禁忌与必须遵守的口径，保留原意、不概括掉。
-4. 只输出摘要本身，不要评论、不要提及压缩这件事。`
+4. 「已完成的任务与结果」写跳任务已完成的事与结果，关键表述逐字引用。
+5. 「关键决定」写方案取舍及其理由——跳压缩保留：上面附有先前的自动摘要时，仍成立的决定必须原样带入新摘要。
+6. 「涉及过的文件与改动」写精确路径、为何重要、关键改动。
+7. 「错误与教训」重点写踩过的坑（失败的尝试及其原因、正确做法）与验证过的成功经验（哪个方案有效、关键参数与命令）。
+8. 「进行中与未完成」写正在做什么与明确待办。摘要区间之后的最近对话原文会原样保留，不要在摘要中预告或规划下一步。
+9. 保留精确的路径、命令、错误信息、数字与名称，不得改写。
+10. 只输出摘要本身，不要评论、不要提及压缩这件事。
+这是用户与常驻数字助理的长期对话，跳任务、跳天数——摘要首先要让助理"还认识这个用户、还记得这些事"。`
 
-// summarizeInstructionFor 按会话模式选摘要指令——只是选「发给模型的提示词
-// 文字」，不改变压缩方式/路径/保留窗口（设置里的压缩模式照旧）：数字助理主
-// 对话用上面的专属指令，其余会话用通用指令 summarizeInstruction。自动摘要
-// （llm 模式）与手动压缩（消息级「压缩」按钮、设置页「压缩数字助理主对话」）
-// 的摘要调用都从这里取指令。
-func summarizeInstructionFor(sess *SessionMeta) string {
+// summarizeSectionsFor 按会话模式选摘要小节要求（指令中段）：数字助理主
+// 对话用上面的专属版，其余会话用通用版 summarizeSections。只选「发给模型
+// 的提示词文字」，不改变压缩方式/路径/保留窗口（设置里的压缩模式照旧）。
+func summarizeSectionsFor(sess *SessionMeta) string {
 	if sess != nil && sess.Mode == "assistant" {
-		return summarizeInstructionAssistant
+		return summarizeSectionsAssistant
 	}
-	return summarizeInstruction
+	return summarizeSections
+}
+
+// summarizeDirective 生成摘要请求尾部的压缩指令——整个请求里唯一的新内容
+// （前缀与主循环请求逐字节同源，见 doSummarize），所以任务说明、格式要求、
+// 禁工具令全部集中在这条消息里。任务说明用 seq 明确圈定压缩区间：模型看到
+// 的消息序列截止在 segEnd，「以上内容」就是待压缩区间，不存在转述歧义。
+func (a *App) summarizeDirective(sess *SessionMeta, origin string, boundary, segEnd int64, prevAuto *StoredMessage) string {
+	var b strings.Builder
+	if boundary > 0 {
+		fmt.Fprintf(&b, "【压缩任务】这是一次增量压缩：只总结第 %d 至 %d 条这段消息——即上一份压缩摘要（覆盖到第 %d 条）之后、到本条指令之前的全部内容。先前的摘要已涵盖更早的历史，不要重新总结它，只按「关键决定」的要求把仍成立的决定带入；本条指令之后没有别的消息。\n", boundary+1, segEnd, boundary)
+	} else {
+		fmt.Fprintf(&b, "【压缩任务】这是一次增量压缩：只总结第 1 至 %d 条这段消息——即从对话最开始、到本条指令之前的全部内容；本条指令之后没有别的消息。\n", segEnd)
+	}
+	if origin == "auto" && prevAuto != nil {
+		b.WriteString("\n【先前的自动摘要（请合并进新摘要，保留仍成立的事实、丢弃过时的）】\n" + prevAuto.Text() + "\n")
+	}
+	b.WriteString("\n" + summarizeSectionsFor(sess))
+	b.WriteString("\n\n这是一次性压缩任务：不允许调用任何工具。思考后直接输出摘要正文，不要输出其他任何内容。")
+	return b.String()
 }
 
 // callSummarizer 已并入上下文引擎（ContextEngine.CallSummarizer）：摘要调用

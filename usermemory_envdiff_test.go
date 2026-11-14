@@ -21,7 +21,7 @@ import (
 func envDiffsOnNextAssemble(a *App, sess *SessionMeta) []string {
 	a.maybeAppendEnvSnapshot(sess, a.envPrompt(sess), nil)
 	out := []string{}
-	for _, m := range a.buildContext(sess, a.systemPrompt(sess)) {
+	for _, m := range a.buildContext(sess, a.systemPrompt(sess), 0) {
 		if strings.HasPrefix(m.Text(), "# 环境更新") {
 			out = append(out, m.Text())
 		}

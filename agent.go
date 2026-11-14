@@ -1604,7 +1604,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// prompt 留痕行）；压缩只改写历史视图，下一轮开始会重新组装。
 			roundEndCompacted := false
 			for pass := 0; pass < 2; pass++ {
-				cp, cerr := a.maybeAutoCompact(sess, a.buildContext(sess, ""), target.ContextWindow, true)
+				cp, cerr := a.maybeAutoCompact(sess, a.buildContext(sess, "", 0), target.ContextWindow, true)
 				if cerr != nil {
 					emit(Event{Type: "error", Error: "自动压缩失败: " + cerr.Error()})
 					a.auditWrite(sess, map[string]any{"type": "error", "error": "自动压缩失败: " + cerr.Error()})

@@ -163,7 +163,7 @@ func TestCreateSubInheritsUpToLastClosedStep(t *testing.T) {
 	assertPrefixLegal(t, body)
 
 	// 模型真正看到的序列（buildContext 输出）也必须合法：不能有裸 tool_calls
-	msgs := a.buildContext(sub, "系统提示词")
+	msgs := a.buildContext(sub, "系统提示词", 0)
 	seen := map[string]bool{}
 	for _, m := range msgs {
 		if m.Role == "assistant" {

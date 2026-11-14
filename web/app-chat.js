@@ -7093,7 +7093,15 @@ function setupInputMarks(view) {
     });
   } catch (e) { /* 老内核：靠 input 事件兜底 */ }
 
-  ta.addEventListener('input', schedule);
+  // 只在用户编辑后反向同步；程序化恢复另一会话的草稿不能清掉跨会话暂存附件。
+  // 按 owner 一对一认领：同名两份只删失去标记的那份，未插过标记的附件不参与。
+  function syncRemovedAttachments(e) {
+    if (composing || (e && e.isComposing)) return;
+    const owners = new Set(markList().map((r) => r.owner));
+    const removed = attachmentsOf(view).filter((a) => a.mark && !owners.has(a));
+    for (const a of removed) removeAttachment(view, a.id);
+  }
+  ta.addEventListener('input', (e) => { syncRemovedAttachments(e); schedule(); });
   // 内容超高时输入框自己滚：背衬层用 scrollTop 镜像跟着滚——裁剪窗（盒子本身
   // 的 overflow:hidden，钉在输入框位置）不动、只滚内容，胶囊与文字同步进出
   // 可视区。绝不能平移盒子本身（曾用 translateY：裁剪窗跟着上移逃出输入卡，
@@ -7107,7 +7115,7 @@ function setupInputMarks(view) {
   // —— 光标原子策略（markList 见上） ——
   let composing = false;
   ta.addEventListener('compositionstart', () => { composing = true; });
-  ta.addEventListener('compositionend', () => { composing = false; schedule(); });
+  ta.addEventListener('compositionend', () => { composing = false; syncRemovedAttachments(); schedule(); });
 
   // 整颗删除（保撤销栈：选中范围后插入空串；引擎不接则回落 setRangeText）
   function deleteRange(st, en) {

@@ -54,6 +54,9 @@ func TestManualCompactAsyncBackground(t *testing.T) {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 本仓库的 resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默
+	// 回落），不设就报「还没有设置全局默认模型」——与压缩行为无关的配置项
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	seedAutoSession(t, a, "masync")
 	_, _, _, final2 := seedRound(t, a, "masync", "第二轮b", true)
 
@@ -104,6 +107,9 @@ func TestManualCompactPreflightAndBusy(t *testing.T) {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 本仓库的 resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默
+	// 回落），不设就报「还没有设置全局默认模型」——与压缩行为无关的配置项
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	seedAutoSession(t, a, "mbusy")
 
 	// upTo 指向不存在的行（比末条还大）：预检直接 400，历史不动
@@ -141,4 +147,79 @@ func TestManualCompactRuleStaysSync(t *testing.T) {
 	if got := foldedUpto(t, a, "mrule"); got != starts[2]-1 {
 		t.Fatalf("折叠边界应在第三轮起始(%d)之前一行, got %d", starts[2], got)
 	}
+}
+
+// 摘要行的增量区间标注（2026-11-11 用户要求）：文本头写明「本次压缩第 X 至
+// Y 条」，结构化字段 covers_from/covers_up_to 成对可检索；auto 二次压缩合并
+// 旧摘要时累计起点保持（首压起点一路继承），manual 叠加存本次区间起点。
+func TestSummaryCoversRangeAnnotation(t *testing.T) {
+	a := newCompactTestApp(t)
+	a.initRuntime()
+	a.Cfg.Providers = []ProviderCfg{{
+		ID: "mock", Name: "离线演示", BaseURL: "mock",
+		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
+	}}
+	// 本仓库的 resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默
+	// 回落），不设就报「还没有设置全局默认模型」——与压缩行为无关的配置项
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
+	// 本仓库：resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默回落）
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
+	sess := &SessionMeta{ID: "range1", Title: "区间标注", Mode: "task", Workspace: ".",
+		CreatedAt: now(), UpdatedAt: now()}
+	if err := a.Store.Create(sess); err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg.KeepChars = 1000 // 保留窗口只装下最后一轮，前面轮次构成可压区间
+	seedAutoSession(t, a, "range1")
+	seedRound(t, a, "range1", "第四轮", true)
+
+	// 第一次 auto：压 (0, segEnd]，起点 1
+	if _, err := a.doSummarize(sess, "auto", -1, 0); err != nil {
+		t.Fatalf("第一次 auto 压缩: %v", err)
+	}
+	first := activeSummaryOf(t, a, "range1", "auto")
+	if first.CoversFrom != 1 {
+		t.Fatalf("首压 covers_from 应为 1, got %d", first.CoversFrom)
+	}
+	if !strings.Contains(first.Text(), "本次压缩第 1 至") {
+		t.Fatalf("首压文本头应含「本次压缩第 1 至 …」: %s", first.Text())
+	}
+
+	// 第二次 auto：窗口推进后新区间从 boundary+1 起，累计起点继承首压的 1
+	_, _, _, final5 := seedRound(t, a, "range1", "第五轮", true)
+	if _, err := a.doSummarize(sess, "auto", -1, 0); err != nil {
+		t.Fatalf("第二次 auto 压缩: %v", err)
+	}
+	second := activeSummaryOf(t, a, "range1", "auto")
+	if second.CoversFrom != 1 {
+		t.Fatalf("合并后累计 covers_from 应保持 1, got %d", second.CoversFrom)
+	}
+	if !strings.Contains(second.Text(), "合并先前摘要后累计覆盖第 1 至") {
+		t.Fatalf("合并摘要文本头应含累计区间: %s", second.Text())
+	}
+
+	// manual 叠加：本次区间起点 = 当前边界+1（不继承 auto 的累计起点）
+	if _, err := a.doSummarize(sess, "manual", -1, final5); err != nil {
+		t.Fatalf("manual 压缩: %v", err)
+	}
+	m := activeSummaryOf(t, a, "range1", "manual")
+	if m.CoversFrom <= second.CoversUpTo || m.CoversFrom > final5 {
+		t.Fatalf("manual covers_from 应为本次区间起点(%d, %d], got %d", second.CoversUpTo, final5, m.CoversFrom)
+	}
+}
+
+// activeSummaryOf 取当前活跃（未被取代）的指定 origin 摘要行；没有则 Fail。
+func activeSummaryOf(t *testing.T, a *App, sid, origin string) *StoredMessage {
+	t.Helper()
+	all, err := a.Store.RawMessagesAll(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all {
+		if m.Kind == kindSummary && m.Origin == origin && !m.Superseded {
+			return m
+		}
+	}
+	t.Fatalf("没有活跃的 %s 摘要行", origin)
+	return nil
 }

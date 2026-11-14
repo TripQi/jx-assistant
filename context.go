@@ -22,7 +22,6 @@ const compactOmit = "omit" // 规则压缩的特殊标记：组装时整行跳�
 // argKeepLimit 是历史查询工具渲染工具调用时参数（arguments）的截断上限。
 const argKeepLimit = 500
 
-
 // ---------- 规则折叠 v2（间隔制，2026-11 规格：动作行 + 诚实裁剪标注 + seq 锚点） ----------
 //
 // 调用行折叠为「动作行」：[seq] 工具 目标 —— 意图。seq 是数据库主键，

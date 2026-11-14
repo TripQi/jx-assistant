@@ -543,6 +543,9 @@ func TestMaybeAutoCompactIntervalThenSummary(t *testing.T) {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 本仓库的 resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默
+	// 回落），不设就报「还没有设置全局默认模型」——与压缩行为无关的配置项
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	a.Cfg.KeepChars = 1000 // 保留窗口收紧，压掉一轮之外的早期轮
 	s1 := &SessionMeta{ID: "s1", Mode: "task"}
 	if err := a.Store.Create(s1); err != nil {
@@ -1079,8 +1082,10 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 // 时重发行与保留区可见快照同文，差分为空不重复占上下文。
 func TestCompactResendsFullEnvSnapshot(t *testing.T) {
 	a := newCompactTestApp(t)
-	a.Cfg.Providers = nil
-	a.Cfg.BaseURL = "mock" // 摘要走 mock 目标，不发真请求
+	// 摘要走 mock 目标（离线演示渠道），不发真请求
+	a.Cfg.Providers = []ProviderCfg{{ID: "mock", Name: "离线演示", BaseURL: "mock",
+		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}}}}
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	sess := &SessionMeta{ID: "s1", Mode: "task"}
 	if err := a.Store.Create(sess); err != nil {
 		t.Fatal(err)

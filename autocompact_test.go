@@ -123,6 +123,9 @@ func TestAutoCompactLlmChannelAutoOrigin(t *testing.T) {
 		ID: "mock", Name: "离线演示", BaseURL: "mock",
 		Models: []ModelCfg{{ID: "mock-1", Name: "演示模型"}},
 	}}
+	// 本仓库的 resolveTarget 只认「渠道+模型」的全局默认（裸模型名不再静默
+	// 回落），不设就报「还没有设置全局默认模型」——与压缩行为无关的配置项
+	a.Cfg.DefaultModel = ModelRef{Provider: "mock", Model: "mock-1"}
 	a.Cfg.CompactInterval = 0
 	a.Cfg.CompactLlmPct = 80
 	a.Cfg.KeepChars = 10

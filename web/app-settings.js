@@ -910,7 +910,7 @@ function defaultModelOptions() {
   return html;
 }
 
-// 行右侧的生效值：可用＝灰字「当前生效：…」；未设置/不可用＝红字。
+// 行右侧的生效值：模型、完整档位与继承来源由服务端 text 提供，不在前端重复拼接。
 function dmSetEff(el, view, suffix) {
   if (!el) return;
   const v = view || {};
@@ -940,6 +940,13 @@ function dmSelectRef(el, ref) {
   el.value = value;
 }
 
+function dmSelectThinking(el, level) {
+  el.innerHTML = '<option value="">不指定（默认）</option>' + THINK_LEVELS.map((value) =>
+    '<option value="' + value + '">' + esc(THINK_LABELS[value]) + '</option>').join('');
+  el.value = normThinkLevel(level);
+  el.disabled = !dmReady;
+}
+
 function renderDefaultModels() {
   const selG = $('set-default-model');
   const modeSel = $('set-dispatch-mode');
@@ -954,24 +961,36 @@ function renderDefaultModels() {
   selD.innerHTML = opts;
   const eff = d.ref || {};
   dmSelectRef(selD, eff);
+  // 配置值与生效值分开：派发 ref.thinking 可能已继承，不能拿来回填下拉。
+  dmSelectThinking($('set-default-thinking'), g.thinking);
+  dmSelectThinking($('set-dispatch-thinking'), d.thinking);
   selG.disabled = modeSel.disabled = selD.disabled = !dmReady;
   selD.style.display = modeSel.value === 'custom' ? '' : 'none';
   dmSetEff($('set-default-model-eff'), dmReady ? g : { error: '读取默认模型失败，请重新打开设置后再修改' }, '');
   dmSetEff($('set-dispatch-model-eff'), eff, modeSel.value === 'custom' ? '' : '跟随主会话');
 }
 
-async function saveDefaultModels(field) {
+async function saveDefaultModels(field, thinkingOnly = false) {
   if (!dmReady || (field !== 'global' && field !== 'dispatch')) return;
   const toRef = (v) => {
     const p = v ? v.split('|') : [];
     return { provider: p[0] || '', providerKey: p[1] || '', model: p[2] || '' };
   };
   if (field === 'global') {
-    dmPending.global = toRef($('set-default-model').value || '');
+    dmPending.global = { ...toRef($('set-default-model').value || ''), thinking: $('set-default-thinking').value };
   } else {
     const custom = $('set-dispatch-mode').value === 'custom';
-    if (custom && !$('set-dispatch-model').value) return;
-    dmPending.dispatch = custom ? toRef($('set-dispatch-model').value) : null;
+    const model = $('set-dispatch-model').value;
+    if (custom && !model && !thinkingOnly) return;
+    // 尚未选全自定义模型时，改档位仍可独立保存，但不提交这个未完成的模型选择。
+    const saved = (dmCache && dmCache.dispatch) || {};
+    const ref = custom && !model
+      ? (dmPending.dispatch || (saved.mode === 'custom' ? saved.ref : {}) || {})
+      : (custom ? toRef(model) : {});
+    dmPending.dispatch = {
+      ...(ref.provider ? toRef(modelKeyOf(ref.provider, ref.providerKey, ref.model)) : {}),
+      thinking: $('set-dispatch-thinking').value,
+    };
   }
   ++dmLoadVersion;
   if (dmSaving) return;
@@ -1001,7 +1020,9 @@ async function saveDefaultModels(field) {
 
 if ($('set-default-model')) {
   $('set-default-model').onchange = () => { void saveDefaultModels('global'); };
+  $('set-default-thinking').onchange = () => { void saveDefaultModels('global', true); };
   $('set-dispatch-model').onchange = () => { void saveDefaultModels('dispatch'); };
+  $('set-dispatch-thinking').onchange = () => { void saveDefaultModels('dispatch', true); };
   // 切到「指定渠道 + 模型」但还没选模型时不存（服务端会拒「没选全」），等选完再存
   $('set-dispatch-mode').onchange = () => {
     const custom = $('set-dispatch-mode').value === 'custom';

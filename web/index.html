@@ -719,14 +719,17 @@
           <div id="prov-list"></div>
           <button id="prov-add-card" class="pf-add">＋ 添加提供方</button>
           <!-- 默认模型（defaultmodels.go）：两个显式默认——手动新建会话用全局默认模型，
-               dispatch_task 用派发任务默认模型（空＝跟随主会话，也是改动前的现状）。
+               dispatch_task 用派发任务默认模型（空渠道/模型＝跟随主会话）。
+               两行推理强度独立选择，不随模型或跟随模式清除。
                每行右侧灰字是服务端算好的当前实际生效值，不可用时红字。 -->
           <div class="gen-section" id="default-model-block">
             <h4>默认模型</h4>
             <div class="set-field">
               <div class="sf-label">全局默认模型</div>
               <div class="dm-row">
-                <select id="set-default-model" class="pf-input"></select>
+                <select id="set-default-model" class="pf-input" aria-label="全局默认模型"></select>
+                <label for="set-default-thinking">推理强度</label>
+                <select id="set-default-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型选择；不指定时使用默认推理强度"></select>
                 <span class="dm-eff" id="set-default-model-eff"></span>
               </div>
             </div>
@@ -737,7 +740,9 @@
                   <option value="follow">跟随主会话</option>
                   <option value="custom">指定渠道 + 模型</option>
                 </select>
-                <select id="set-dispatch-model" class="pf-input"></select>
+                <select id="set-dispatch-model" class="pf-input" aria-label="派发任务默认模型"></select>
+                <label for="set-dispatch-thinking">推理强度</label>
+                <select id="set-dispatch-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型和跟随模式；不指定时继承默认推理强度"></select>
                 <span class="dm-eff" id="set-dispatch-model-eff"></span>
               </div>
             </div>

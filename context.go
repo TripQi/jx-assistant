@@ -531,6 +531,24 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 		return out
 	}
 
+	// 下界向上取整；上界仍用 remap 向下取整，二者不能混用。
+	// 只在覆盖范围内找起点，避免把摘要自身误当可回查的原文。
+	remapFrom := func(oldFrom, oldUpTo int64) (int64, bool) {
+		var lastCovered int64
+		for _, x := range rows {
+			if x.Seq > oldUpTo {
+				break
+			}
+			n := newOfOld[x.Seq]
+			lastCovered = n
+			if oldFrom <= 0 || x.Seq >= oldFrom {
+				return n, oldFrom <= 0
+			}
+		}
+		// 异常起点或被剥离尾部：取最近合法点；没有可复制覆盖行则保留空区间。
+		return lastCovered, true
+	}
+
 	mark, _ := json.Marshal(inheritMark{Parent: parentID, Count: len(rows)})
 	if err := a.Store.AppendRow(childID, &StoredMessage{
 		Message: TextMessage("user", string(mark)), Kind: inheritKind, CreatedAt: now(),
@@ -550,6 +568,11 @@ func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
 		}
 		if x.Kind == "summary" {
 			cp.CoversUpTo = remap(x.CoversUpTo)
+			var fallback bool
+			cp.CoversFrom, fallback = remapFrom(x.CoversFrom, x.CoversUpTo)
+			if fallback {
+				log.Printf("[继承] %s → %s 摘要覆盖起点回退：父区间[%d,%d]，子区间[%d,%d]（无可复制覆盖行时保留空区间）", parentID, childID, x.CoversFrom, x.CoversUpTo, cp.CoversFrom, cp.CoversUpTo)
+			}
 		}
 		if err := a.Store.AppendRow(childID, cp); err != nil {
 			return 0, err
@@ -1922,7 +1945,7 @@ func (a *App) intervalReached(sess *SessionMeta) bool {
 // 走（真超限时能用的都用），不再按 CompactMode 二选一——规则的先折（零模型
 // 调用、立即见效）：折到只留最近 1 轮，压不动（最近一轮自身超预算，前面又都
 // 已折叠）就全部折叠，否则百万级单轮永远压不下去；仍压不动且模型阈值启用时
-// 生成摘要（先摘要到只留 1 轮，再摘要全部历史）。
+// 生成独立有界摘要（覆盖全部可摘要历史），不重发已知超限的正常前缀。
 func (a *App) overflowCompact(sess *SessionMeta) error {
 	if a.Cfg.CompactInterval > 0 {
 		if a.ruleCompactAuto(sess, 1) > 0 || a.ruleCompactAuto(sess, 0) > 0 {
@@ -1930,10 +1953,8 @@ func (a *App) overflowCompact(sess *SessionMeta) error {
 		}
 	}
 	if a.Cfg.CompactLlmPct > 0 {
-		if _, err := a.doSummarize(sess, "manual", 1, 0); err == nil {
-			return nil
-		}
-		_, err := a.doSummarize(sess, "manual", 0, 0)
+		// 超限后不再复用正常摘要的同源前缀；独立有界救援只尝试一次。
+		_, err := a.doRescueSummarize(sess)
 		return err
 	}
 	if a.Cfg.CompactInterval > 0 {

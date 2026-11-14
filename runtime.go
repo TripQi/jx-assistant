@@ -36,6 +36,8 @@ type sessionRun struct {
 	cleanEnd bool   // 本轮是否正常收尾（没出错、没被停止）：收口时据此决定要不要兜底续发队列
 
 	modelAbort *modelAbortEntry // 模型调用进行中的步级打断句柄（插话立即打断用）。只在主循环调模型的窗口内非 nil——工具执行段为 nil，插话此刻到达就不打断、照旧等下一步调用模型前注入
+
+	mgrTurnGen int64 // 开轮时的撤销代数快照；由 runMu 保护着登记，之后不变，晚到的经理授权不能跨用户接管生效
 }
 
 // PendingMsg 是执行中的一条待生效用户消息：插话（下一步调用模型前注入）
@@ -94,7 +96,7 @@ func (a *App) beginRun(id string) (*sessionRun, bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &sessionRun{ctx: ctx, cancel: cancel, startedAt: time.Now(), done: make(chan struct{}),
-		subs: map[int]chan Event{}}
+		subs: map[int]chan Event{}, mgrTurnGen: a.mgrTurnGen[id]}
 	a.runners[id] = r
 	a.clearRunError(id)             // 新一轮开始：上一次的报错条自动消失
 	_ = a.Store.SetLastStop(id, "") // 侧栏「⚠ 已中断」随之收掉（这一轮正在跑）

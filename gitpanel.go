@@ -1176,14 +1176,20 @@ func (a *App) gitSummarize(ctx context.Context, session, repo string) (string, e
 	if len(diffText) > gitSummaryMaxChars {
 		diffText = diffText[:gitSummaryMaxChars]
 	}
-	// 调用目标跟随会话（会话选了哪个模型就用哪个），没有会话用全局默认
-	target, terr := a.DefaultTarget()
-	if session != "" {
-		if m, gerr := a.Store.Get(session); gerr == nil && m != nil {
-			if t, rerr := a.resolveTarget(m); rerr == nil {
-				target, terr = t, nil
-			}
+	// 指定会话的解析失败必须原样阻断，不能把暂存源码改发到全局渠道。
+	var target LLMTarget
+	var terr error
+	if session == "" {
+		target, terr = a.DefaultTarget()
+	} else {
+		m, err := a.Store.Get(session)
+		if err != nil {
+			return "", fmt.Errorf("读取摘要会话失败：%w", err)
 		}
+		if m == nil {
+			return "", errors.New("摘要会话不存在，请重新选择会话")
+		}
+		target, terr = a.resolveTarget(m)
 	}
 	if terr != nil {
 		return "", terr

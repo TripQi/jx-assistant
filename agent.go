@@ -1537,6 +1537,9 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 					a.auditWrite(sess, map[string]any{"type": "overflow", "error": err.Error()})
 					overflowRetried = true
 					continue
+				} else {
+					// 救援失败不能丢掉其预算原因和用户可行动作，也不进入模型兜底换渠道。
+					return fmt.Errorf("上下文超限，救援未完成：%w", cerr)
 				}
 			}
 			// 专家预设模型不可用兜底：会话带着专家预设的模型（Expert 非空）而

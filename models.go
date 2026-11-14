@@ -317,10 +317,14 @@ func (a *App) DefaultTarget() (LLMTarget, error) {
 //
 // 会话的模型名允许是渠道清单里没有的手填值（ep- 接入点、刚上线的新模型这类）：
 // 那份「在不在清单里」的判定只在建会话之前做一次（checkModelRef），运行时不拿
-// 清单裁决，免得老会话/手填模型被新加的校验卡死。
+// 清单裁决，免得老会话/手填模型被新加的校验卡死。显式 Key 归属仍须存在，
+// 已删除的 Key 不得按无归属老会话的规则换用其他 Key。
 func (a *App) resolveTarget(sess *SessionMeta) (LLMTarget, error) {
 	pid := strings.TrimSpace(sess.Provider)
 	model := strings.TrimSpace(sess.Model)
+	if pid == "" && strings.TrimSpace(sess.ProviderKey) != "" {
+		return LLMTarget{}, fmt.Errorf("会话指定了 Key 但缺少所属渠道。请到%s重新选择模型，不会自动猜测其他渠道或 Key", whereSessionModel)
+	}
 	if pid == "" && model == "" {
 		ref := a.globalDefaultRef()
 		if ref.Empty() {
@@ -345,6 +349,13 @@ func (a *App) resolveTarget(sess *SessionMeta) (LLMTarget, error) {
 		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）已被手动停用，不再有可用模型。请到「设置 → 模型」重新启用它，或到%s换一个模型", name, pid, whereSessionModel)
 	case p.AutoDisabled:
 		return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）因连不上公司服务端被自动停用。请到「设置 → 模型」手动开启它，或到%s换一个模型", name, pid, whereSessionModel)
+	}
+	// 显式归属失效就停：不能把已删除的 Key 当成无归属老会话去猜另一把。
+	// Key 仍存在时继续尊重它，目录刷新不应卡住存量会话的手填模型。
+	if keyID := strings.TrimSpace(sess.ProviderKey); keyID != "" {
+		if _, found := p.keyByID(keyID); !found {
+			return LLMTarget{}, fmt.Errorf("会话的渠道「%s」（%s）中指定的 Key「%s」已不存在（可能已被删除）。请到%s重新选择模型，不会自动换用其他 Key", name, pid, keyID, whereSessionModel)
+		}
 	}
 	t := a.targetOf(p, sess.ProviderKey, model)
 	if strings.TrimSpace(t.Model) == "" {

@@ -273,9 +273,21 @@ func probeTextFile(path string) TextEncoding {
 	if enc := detectTextEncoding(b); enc != EncUnknown {
 		return enc
 	}
-	for cut := 1; cut <= 3 && cut < len(b); cut++ {
-		if enc := detectTextEncoding(b[:len(b)-cut]); enc != EncUnknown {
-			return enc
+	// 只有窗口外确有后续字节、且尾部和后续字节能组成同编码字符，才允许退尾。
+	// 全文已读完或真正非法的尾字节（如 0xff）不能通过删除字节伪装为文本。
+	var continuation [3]byte
+	extra := 0
+	if n == len(buf) {
+		extra, _ = f.Read(continuation[:])
+	}
+	for cut := 1; extra > 0 && cut <= 3 && cut < len(b); cut++ {
+		enc := detectTextEncoding(b[:len(b)-cut])
+		if enc == EncUnknown { continue }
+		for take := 1; take <= extra; take++ {
+			tail := append(append([]byte{}, b[len(b)-cut:]...), continuation[:take]...)
+			if detectTextEncoding(tail) == enc {
+				return enc
+			}
 		}
 	}
 	return EncUnknown

@@ -597,8 +597,6 @@ func responsesProtocol() llmProtocol {
 
 // responsesRequest /v1/responses 请求体。
 type responsesRequest struct {
-	Include         []string             `json:"include"`
-	Store           bool                 `json:"store"`
 	Model           string               `json:"model"`
 	Instructions    string               `json:"instructions,omitempty"`
 	Input           []responsesInputItem `json:"input"`
@@ -623,9 +621,28 @@ type responsesInputItem struct {
 	Output    string          `json:"output,omitempty"`
 }
 
-// MarshalJSON 保留 output item 的完整字段与 item 级配对信息。
+// MarshalJSON 对 reasoning 仅发送 summary 文本，其它 output item 保留配对字段。
 func (i responsesInputItem) MarshalJSON() ([]byte, error) {
 	if i.Raw != nil {
+		var item struct {
+			Type    string `json:"type"`
+			Summary []struct {
+				Text string `json:"text"`
+			} `json:"summary"`
+		}
+		if err := json.Unmarshal(i.Raw, &item); err != nil {
+			return nil, err
+		}
+		if item.Type == "reasoning" {
+			summary := make([]map[string]string, 0, len(item.Summary))
+			for _, part := range item.Summary {
+				summary = append(summary, map[string]string{"type": "summary_text", "text": part.Text})
+			}
+			return json.Marshal(struct {
+				Type    string              `json:"type"`
+				Summary []map[string]string `json:"summary"`
+			}{"reasoning", summary})
+		}
 		return i.Raw, nil
 	}
 	type plain responsesInputItem
@@ -660,9 +677,8 @@ func marshalResponses(target LLMTarget, req ChatRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 本地管理历史，不依赖服务端存储；显式索取可回传的加密推理载荷。
+	// 兼容渠道使用 summary-only 回传，不请求加密推理或依赖服务端存储。
 	out := responsesRequest{
-		Include:      []string{"reasoning.encrypted_content"},
 		Model:        target.Model,
 		Instructions: instructions,
 		Input:        items,
@@ -799,6 +815,18 @@ type responsesStreamEvent struct {
 	} `json:"error"`
 }
 
+// responsesReplayError 保留上游错误，不自动切换 summary-only 策略。
+func responsesReplayError(err error) error {
+	if err == nil {
+		return nil
+	}
+	text := strings.ToLower(err.Error())
+	if strings.Contains(text, "encrypted_content") || strings.Contains(text, "encrypted reasoning") {
+		return fmt.Errorf("%w（该渠道要求加密推理回传；当前 Responses 使用 summary-only 策略，不自动改为 encrypted_content，请检查渠道协议要求）", err)
+	}
+	return err
+}
+
 // parseResponsesSSE 聚合 /v1/responses 的事件体系：response.output_text.delta →
 // OnText；response.reasoning_summary_text.delta（及 reasoning_text.delta）→
 // OnReasoning；response.output_item.added(function_call) +
@@ -822,10 +850,10 @@ func parseResponsesSSE(r io.Reader, cb StreamCallbacks) error {
 		return agg.event(ev)
 	})
 	if err != nil {
-		return err
+		return responsesReplayError(err)
 	}
 	agg.finish()
-	return agg.err
+	return responsesReplayError(agg.err)
 }
 
 type responsesStreamAgg struct {

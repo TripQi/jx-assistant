@@ -496,7 +496,11 @@ func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return errors.New(upstreamErrText(resp.StatusCode, snippet))
+		upstreamErr := errors.New(upstreamErrText(resp.StatusCode, snippet))
+		if proto.path == "/responses" {
+			return responsesReplayError(upstreamErr)
+		}
+		return upstreamErr
 	}
 	return proto.parse(resp.Body, cb)
 }

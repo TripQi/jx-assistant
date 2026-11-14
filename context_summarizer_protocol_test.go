@@ -71,14 +71,24 @@ func TestSummarizerProtocolNativeReasoningHop(t *testing.T) {
 			}
 			if protocol == "responses" {
 				items := bodies[1]["input"].([]any)
-				if !reflect.DeepEqual(items[1], reasoning) || !reflect.DeepEqual(items[2], call) {
+				expectedReasoning := map[string]any{"type": "reasoning", "summary": reasoning["summary"]}
+				if !reflect.DeepEqual(items[1], expectedReasoning) || !reflect.DeepEqual(items[2], call) {
 					t.Fatalf("native items lost: %v", items)
 				}
 				if items[3].(map[string]any)["call_id"] != "call_1" {
 					t.Fatal("unpaired tool result")
 				}
-				if bodies[0]["store"] != false || !reflect.DeepEqual(bodies[0]["include"], []any{"reasoning.encrypted_content"}) {
-					t.Fatal("stateless encrypted content not requested")
+				for _, body := range bodies {
+					if _, ok := body["store"]; ok {
+						t.Fatal("store must be omitted")
+					}
+					if _, ok := body["include"]; ok {
+						t.Fatal("include must be omitted")
+					}
+					wire, _ := json.Marshal(body)
+					if strings.Contains(string(wire), "encrypted_content") {
+						t.Fatal("encrypted_content must not be sent")
+					}
 				}
 				b, _ := json.Marshal(items[1:4])
 				t.Logf("second-hop wire: %s", b)

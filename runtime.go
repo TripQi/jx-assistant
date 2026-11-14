@@ -60,6 +60,8 @@ type PendingState struct {
 
 func (a *App) initRuntime() {
 	a.runners = map[string]*sessionRun{}
+	a.mgrTurns = map[string]mgrTurnGrant{}
+	a.mgrTurnGen = map[string]int64{}
 	a.subscribers = map[chan Event]bool{}
 	a.grants = map[string]*Grant{}
 	a.approvals = map[string]*Approval{}
@@ -141,6 +143,7 @@ func (a *App) finishRunOf(id string, r *sessionRun) {
 // 关闭订阅者与 done、取消残余 ctx、置空闲、清归属与停止待收标志、触发交付与
 // 兜底续发。
 func (a *App) closeRun(id string, r *sessionRun) {
+	a.dropManagerTurnOf(id, r) // 经理代批授权随轮撤销（mgrnotify.go）：收口即失去代决窗口
 	r.mu.Lock()
 	for i, ch := range r.subs {
 		close(ch)

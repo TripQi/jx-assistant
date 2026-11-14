@@ -195,8 +195,15 @@ func (t *toolContext) explicitDispatchModel(m string) (provider, providerKey, md
 
 // inheritSessionModel 跟随主会话：派发者手选的渠道/模型/Key 原样继承——多 Key
 // 供应商连「哪把 Key」一起继承，重名模型才不会换到另一把 Key 上。派发者自己没
-// 手选时跟全局默认模型（回空值，让新会话跟随）。
+// 手选时跟全局默认模型（回空值，让新会话跟随）。老裸名也属于手选，按父会话实际目标继承。
 func (t *toolContext) inheritSessionModel() (provider, providerKey, mdl string, err error) {
+	if strings.TrimSpace(t.sess.Provider) == "" && strings.TrimSpace(t.sess.Model) != "" {
+		tgt, rerr := t.app.resolveTarget(t.sess)
+		if rerr != nil {
+			return "", "", "", fmt.Errorf("派发设置为「跟随主会话」，但本会话的模型不可用：%w", rerr)
+		}
+		return tgt.ProviderID, tgt.KeyID, tgt.Model, nil
+	}
 	if pid := strings.TrimSpace(t.sess.Provider); pid != "" {
 		ref := ModelRef{Provider: pid, ProviderKey: t.sess.ProviderKey, Model: t.sess.Model}
 		if strings.TrimSpace(ref.Model) == "" {

@@ -391,6 +391,7 @@
 
   function modelMetaHTML(t) {
     const mv = t.modelView || {};
+    if (t.target !== 'task') return '<span class="td-model' + (mv.available ? '' : ' bad') + '">由长期助理当前模型执行（实际：' + esc(mv.text || mv.error || '暂不可用') + '）</span>';
     const mode = t.modelMode === 'global' || t.modelMode === 'custom' ? t.modelMode : 'dispatch';
     let line = '模型：' + MODEL_MODE_LABEL[mode];
     if (mv.text) line += '（' + (mv.available ? '当前生效：' + mv.text : '不可用：' + (mv.error || '')) + '）';
@@ -538,7 +539,7 @@
     else if (f.kind === 'interval') schedule = { kind: 'interval', everyMinutes: Number(f.everyMinutes) };
     else if (f.kind === 'weekly') schedule = { kind: 'weekly', time: f.time, days: f.days.map((on, d) => (on ? d : -1)).filter((d) => d >= 0) };
     else schedule = { kind: f.kind, time: f.time };
-    const custom = f.executor === 'assistant' && f.modelMode === 'custom';
+    const custom = f.executor === 'assistant' && f.target === 'task' && f.modelMode === 'custom';
     const parts = custom && f.modelValue ? f.modelValue.split('|') : [];
     return {
       id: f.editingId, title: f.title.trim(), description: f.description.trim(),
@@ -547,16 +548,16 @@
       command: f.executor === 'command' ? f.command.trim() : '',
       shell: f.shell, permission: f.permission, enabled: f.enabled,
       // 任务模型：dispatch/global/custom；只有 custom 带具体指向（含 Key 归属）
-      modelMode: f.executor === 'assistant' ? f.modelMode : '',
-      thinking: f.executor === 'assistant' ? f.thinking : '',
-      model: custom ? { provider: parts[0] || '', providerKey: parts[1] || '', model: parts[2] || '' } : null,
+      modelMode: f.executor === 'assistant' && f.target === 'task' ? f.modelMode : undefined,
+      thinking: f.executor === 'assistant' && f.target === 'task' ? f.thinking : undefined,
+      model: f.executor === 'assistant' && f.target !== 'task' ? undefined : custom ? { provider: parts[0] || '', providerKey: parts[1] || '', model: parts[2] || '' } : null,
     };
   }
 
   function formError(f) {
     if (!f.title.trim()) return '请填写标题';
     if (!f.description.trim()) return '请填写详细描述 / 要求';
-    if (f.executor === 'assistant' && f.modelMode === 'custom' && !f.modelValue) return '「指定模型」需要选一个渠道 + 模型';
+    if (f.executor === 'assistant' && f.target === 'task' && f.modelMode === 'custom' && !f.modelValue) return '「指定模型」需要选一个渠道 + 模型';
     if (f.executor === 'command') {
       if (!f.command.trim()) return '程序任务需要填写要运行的命令';
       if (!f.dir) return '程序任务必须选择工作目录';
@@ -603,6 +604,11 @@
 
   function formEffectiveModel(f) {
     const d = st.defaults || {};
+    if (f.target !== 'task') {
+      const mv = d.manager || {};
+      return '<p class="td-hint td-effective' + (mv.available ? '' : ' bad') + '">由长期助理当前模型执行（实际：' + esc(mv.text || mv.error || '暂不可用') + '）</p>' +
+        '<p class="td-hint">待办的模型与推理强度配置在此目标下不生效；不会修改长期助理的模型或档位。实际值以执行时为准。</p>';
+    }
     const dispatch = d.dispatch || {};
     const global = d.global || {};
     let mv = global;
@@ -656,7 +662,7 @@
                 ? '到点自动创建一个新的工作任务会话，任务描述直接发给它执行；长期助理不被打扰，结果在工作任务会话和这里的执行记录里看。'
                 : '到点把任务描述转交给长期助理（数字助理主对话），由它安排执行并在完成后汇报结果。') + '</p>', true)
           : '') +
-        (!cmd ? field('任务模型',
+        (!cmd && f.target === 'task' ? field('任务模型',
           '<div class="td-seg">' +
             '<button type="button" class="' + (f.modelMode === 'dispatch' ? 'primary' : '') + '" data-f="modelmode" data-v="dispatch">跟随派发设置</button>' +
             '<button type="button" class="' + (f.modelMode === 'global' ? 'primary' : '') + '" data-f="modelmode" data-v="global">全局默认模型</button>' +
@@ -668,10 +674,11 @@
               ? '用「设置 → 模型 → 默认模型」里的全局默认模型。'
               : '按派发设置为准；派发设置是「跟随主会话」时（待办没有主会话可跟）落到全局默认模型。') + '</p>'), true)
           : '') +
-        (!cmd ? field('推理强度（独立于模型模式）',
+        (!cmd && f.target === 'task' ? field('推理强度（独立于模型模式）',
           '<select id="td-f-thinking">' + thinkingOptions(f.thinking) + '</select>' +
           '<p class="td-hint">不指定：跟随派发档位 → 全局档位 → 会话默认；切换模型模式不会改动此项。</p>' +
           formEffectiveModel(f), true) : '') +
+        (!cmd && f.target !== 'task' ? field('执行模型与档位（只读）', formEffectiveModel(f), true) : '') +
         field('标题',
           '<input id="td-f-title" type="text" placeholder="例如：每周整理一次周报" value="' + esc(f.title) + '">', true) +
         field('详细描述 / 要求',

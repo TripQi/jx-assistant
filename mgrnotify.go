@@ -26,6 +26,7 @@ package main
 // 「已处理」白跑一轮模型）。
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -90,6 +91,11 @@ func (a *App) dropManagerTurnOf(sid string, r *sessionRun) {
 func (a *App) managerTurnActive(sid string) bool {
 	a.runMu.Lock()
 	defer a.runMu.Unlock()
+	return a.managerTurnActiveLocked(sid)
+}
+
+// managerTurnActiveLocked 由持有 runMu 的调用方使用。
+func (a *App) managerTurnActiveLocked(sid string) bool {
 	g, ok := a.mgrTurns[sid]
 	if !ok || g.gen != a.mgrTurnGen[sid] {
 		return false
@@ -98,29 +104,51 @@ func (a *App) managerTurnActive(sid string) bool {
 	return running && cur == g.run
 }
 
-// cardSession 取一张等待中的卡所属的会话 id（审批/提问共用；卡片不在等待
-// 清单返回空串——已收卡，代决无从谈起）。
-func (a *App) cardSession(isApproval bool, id string) string {
-	a.permMu.Lock()
-	defer a.permMu.Unlock()
-	if isApproval {
-		if ap, ok := a.approvals[id]; ok {
-			return ap.SessionID
-		}
-		return ""
+// errManagerDecisionForbidden 保持经理窗口外的 HTTP 403 语义。
+var errManagerDecisionForbidden = errors.New("这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
+
+// commitManagerDecisionLocked 把授权检查和决定提交放在同一撤销边界内。
+// 调用者先持有 permMu，再取 runMu；反向嵌套禁止。commit 只改卡片状态并投递
+// 容量为 1 的等待通道，不做通知、持久化或其他 IO。revoke 先拿到 runMu 则拒绝；
+// 本提交先拿到则决定已生效，之后的 revoke 不追溯它。
+func (a *App) commitManagerDecisionLocked(sid string, commit func()) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	if sid == "" || !a.managerTurnActiveLocked(sid) {
+		return errManagerDecisionForbidden
 	}
-	if q, ok := a.questions[id]; ok {
-		return q.SessionID
-	}
-	return ""
+	commit()
+	return nil
 }
 
-// managerResolveAllowed 经理此刻是否有权代决这张卡：卡片所属会话的经理轮授权
-// 仍有效（同一轮还在执行）。窗口外的代决请求在决议入口拒绝——通知已按降噪
-// 口径不投，经理经 call_api 翻到清单主动代决也不能放行。
-func (a *App) managerResolveAllowed(isApproval bool, id string) bool {
-	sid := a.cardSession(isApproval, id)
-	return sid != "" && a.managerTurnActive(sid)
+func (a *App) resolveManagerApproval(id string, approved, always bool) error {
+	a.permMu.Lock()
+	defer a.permMu.Unlock()
+	ap, ok := a.approvals[id]
+	if !ok {
+		return errManagerDecisionForbidden
+	}
+	return a.commitManagerDecisionLocked(ap.SessionID, func() {
+		if !ap.decided {
+			ap.byManager, ap.decided = true, true
+			ap.ch <- approvalResult{approved: approved, always: always}
+		}
+	})
+}
+
+func (a *App) resolveManagerQuestion(id, answer string) error {
+	a.permMu.Lock()
+	defer a.permMu.Unlock()
+	q, ok := a.questions[id]
+	if !ok {
+		return errManagerDecisionForbidden // 不接续已无在跑执行体的持久化计划
+	}
+	return a.commitManagerDecisionLocked(q.SessionID, func() {
+		if !q.decided {
+			q.byManager, q.decided = true, true
+			q.ch <- answer
+		}
+	})
 }
 
 // mgrNotifyDelay 通知触发延时（设置的 mgrNotifyAfterSec，默认 30 秒）。包级
@@ -211,17 +239,8 @@ func managerResolveCaller(a *App, r *http.Request) bool {
 	return cur != nil && cur.ID == sid
 }
 
-// markApprovalByManager / markQuestionByManager 把一张卡标注为「经理代选」：
-// 决议 handler（server.go）在登记决定之前调用，等待方醒来读到的就是已标注
-// 的值（登记决定本身在 permMu 之外投 ch，标注先于它完成）。
-func (a *App) markApprovalByManager(id string) {
-	a.permMu.Lock()
-	if ap, ok := a.approvals[id]; ok && !ap.decided {
-		ap.byManager = true
-	}
-	a.permMu.Unlock()
-}
-
+// markQuestionByManager 供回告链路的独立测试标注来源；实际 HTTP 代决必须走
+// resolveManagerQuestion，把来源与决定提交放在同一授权边界内。
 func (a *App) markQuestionByManager(id string) {
 	a.permMu.Lock()
 	if q, ok := a.questions[id]; ok && !q.decided {

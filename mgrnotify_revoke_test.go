@@ -31,7 +31,7 @@ func TestManagerTurnLateGrantHTTP(t *testing.T) {
 			}
 			a.grantManagerTurn(task.ID, run) // 同一个旧 run 的迟到授权
 			if a.managerTurnActive(task.ID) {
-				t.Fatal("用户接管后迟到 grant 恢复了经理权限")
+				t.Error("用户接管后迟到 grant 恢复了经理权限")
 			}
 
 			q := &UserQuestion{ID: "late-q", SessionID: task.ID, ch: make(chan string, 1)}
@@ -48,6 +48,7 @@ func TestManagerTurnLateGrantHTTP(t *testing.T) {
 				r := httptest.NewRequest(http.MethodPost, path+id, strings.NewReader(body))
 				r.SetPathValue("id", id)
 				r.Header.Set("X-JX-Caller-Session", mgr.ID)
+				t.Logf("REQUEST POST %s%s X-JX-Caller-Session: %s body=%s", path, id, mgr.ID, body)
 				w := httptest.NewRecorder()
 				if kind == "approval" {
 					a.handleResolveApproval(w, r)

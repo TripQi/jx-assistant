@@ -3976,19 +3976,19 @@ func (a *App) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 		Always   bool `json:"always"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	// 经理代理（mgrnotify.go）：经理自己经 call_api 代批的请求带调用者会话头，
-	// 先标注来源再登记决定——等待方醒来读到的就是已标注的值。代批是轮次级
-	// 授权：卡片所属会话的经理那一轮已收口（或从不是经理轮）就拒绝——绝不
-	// 代决不属自己那一轮的卡片（通知侧窗口外本就不投，这里挡主动翻清单的）。
+	// 经理的授权检查、来源标记与决定提交必须与用户撤销共享原子边界。
+	var err error
 	if managerResolveCaller(a, r) {
-		if !a.managerResolveAllowed(true, r.PathValue("id")) {
-			writeErr(w, 403, "这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
-			return
-		}
-		a.markApprovalByManager(r.PathValue("id"))
+		err = a.resolveManagerApproval(r.PathValue("id"), body.Approved, body.Always)
+	} else {
+		err = a.resolveApproval(r.PathValue("id"), body.Approved, body.Always)
 	}
-	if err := a.resolveApproval(r.PathValue("id"), body.Approved, body.Always); err != nil {
-		writeErr(w, 404, err.Error())
+	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, errManagerDecisionForbidden) {
+			status = http.StatusForbidden
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]string{"ok": "1"})
@@ -4013,17 +4013,18 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"ok": "1"})
 		return
 	}
-	// 经理代理（mgrnotify.go）：经理自己经 call_api 代答的请求带调用者会话头，
-	// 先标注来源再登记决定（口径同审批；代批窗口判定也同审批——轮次级授权）。
+	var err error
 	if managerResolveCaller(a, r) {
-		if !a.managerResolveAllowed(false, r.PathValue("id")) {
-			writeErr(w, 403, "这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
-			return
-		}
-		a.markQuestionByManager(r.PathValue("id"))
+		err = a.resolveManagerQuestion(r.PathValue("id"), body.Answer)
+	} else {
+		err = a.resolveQuestion(r.PathValue("id"), body.Answer)
 	}
-	if err := a.resolveQuestion(r.PathValue("id"), body.Answer); err != nil {
-		writeErr(w, 404, err.Error())
+	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, errManagerDecisionForbidden) {
+			status = http.StatusForbidden
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]string{"ok": "1"})

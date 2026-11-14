@@ -53,13 +53,14 @@ type Tool struct {
 // 当前会话（决定工作区范围与权限模式）与事件上报函数。seq/callID/toolName
 // 标出本次调用所在的助手步骤，文件快照据此锚定回退位置。
 type toolContext struct {
-	ctx      context.Context
-	app      *App
-	sess     *SessionMeta
-	emit     func(Event)
-	seq      int64
-	callID   string
-	toolName string
+	ctx        context.Context
+	app        *App
+	sess       *SessionMeta
+	emit       func(Event)
+	seq        int64
+	callID     string
+	toolName   string
+	batchItems []batchItemStatus // 仅本次调用；桥消费结构化状态，不解析正文
 	// planApproved 只在 RunAgent 主循环构造的 toolContext 里非 nil：exit_plan_mode
 	// 获批时置 true，主循环据此把步数预算从头计（计划阶段的探索不挤占执行阶段）。
 	planApproved *bool
@@ -490,9 +491,10 @@ const readTailNoticeReserve = 200
 // Limit 用指针是为了区分「没传」和「传了 0」：没传按默认 2000 行，传了 0/负数
 // 必须报错——静默当成默认值会把整份大文件灌进上下文（模型算错一个数就踩）。
 type readItem struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  *int   `json:"limit"`
+	Path       string `json:"path"`
+	Offset     int    `json:"offset"`
+	Limit      *int   `json:"limit"`
+	ByteOffset int    `json:"byte_offset,omitempty"` // 首行内已返回的 UTF-8 字节数，0 基
 }
 
 // readRequest 是 read 的完整入参。files 数组是**唯一公开形态**；path/offset/limit
@@ -518,16 +520,25 @@ func readFileTool() Tool {
 				"多个文件、或多段区间一律一次调用，禁止逐条调用。",
 			objSchema(map[string]any{
 				"files": arrayProp("要读取的文件列表（1-5 条）", objSchema(map[string]any{
-					"path":   strProp("文件路径（相对或绝对）"),
-					"offset": intProp("起始行号，从 1 开始，可选"),
-					"limit":  intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
+					"path":        strProp("文件路径（相对或绝对）"),
+					"offset":      intProp("起始行号，从 1 开始，可选"),
+					"limit":       intProp("最多读取行数，可选，默认 2000；显式给出时必须 ≥ 1"),
+					"byte_offset": intProp("巨行续读：跳过 offset 行内已返回的 UTF-8 字节数（0 基，按截断提示传入）；后续行不受影响"),
 				}, "path")),
 			}, "files")),
 		Run: runReadFile,
 	}
 }
 
+type batchItemStatus struct {
+	Index  int    `json:"index"` // 1 基输入序号
+	Path   string `json:"path"`
+	Status string `json:"status"` // success / failed / incomplete / not_returned
+	Error  string `json:"error,omitempty"`
+}
+
 func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
+	t.batchItems = nil
 	var p readRequest
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -566,7 +577,20 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 	// 正文预算 = 统一上限 - 末尾提示的预留：提示必须完整落到模型眼里
 	budget := readOutputMaxBytes - readTailNoticeReserve
 	for i, it := range items {
-		written, whole := appendReadSeg(&b, t.readSection(it), budget)
+		t.batchItems = append(t.batchItems, batchItemStatus{Index: i + 1, Path: it.Path, Status: "not_returned"})
+	}
+	for i, it := range items {
+		seg := t.readSection(it)
+		written, whole := appendReadSeg(&b, seg, budget)
+		status := &t.batchItems[i]
+		if written {
+			status.Status = "success"
+			if seg.errText != "" {
+				status.Status, status.Error = "failed", seg.errText
+			} else if !whole {
+				status.Status = "incomplete"
+			}
+		}
 		if !written {
 			notReturned = i + 1
 			break
@@ -590,12 +614,13 @@ func runReadFile(t *toolContext, args json.RawMessage) (string, error) {
 // readSeg 是批量 read 里的一段：段头 + 内容行 + 尾注；errText 非空表示该条
 // 读取失败（失败原因照常占一个段，其余条不受影响）。
 type readSeg struct {
-	disp      string
-	header    string
-	lines     []string
-	notes     string
-	errText   string
-	startLine int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
+	disp       string
+	header     string
+	lines      []string
+	notes      string
+	errText    string
+	startLine  int // 本段首个内容行的绝对行号（1 基），截断时算续读 offset
+	byteOffset int // 首行已跳过的 UTF-8 字节数
 }
 
 // textLines 把文本切成行，行数与编辑器的口径一致：文件末尾那个换行只是「最后一行
@@ -665,13 +690,19 @@ func (t *toolContext) readSection(it readItem) readSeg {
 	}
 	// end 是**含**的行号：limit 就是"最多读几行"（旧实现写成了 start+limit，
 	// 实际每次多返回一行，与工具描述不符；段头显示区间后这个偏差会直接露馅）。
-	end := start + limit - 1
-	if end > len(lines) {
-		end = len(lines)
+	end := len(lines)
+	if limit <= len(lines)-start {
+		end = start + limit - 1
 	}
 	seg.header = fmt.Sprintf("===== %s（第 %d-%d 行，共 %d 行）=====", seg.disp, start, end, len(lines))
 	seg.startLine = start
 	seg.lines = lines[start-1 : end]
+	if it.ByteOffset < 0 || it.ByteOffset > len(seg.lines[0]) || !utf8.ValidString(seg.lines[0][:it.ByteOffset]) {
+		seg.errText = "byte_offset 必须在首行 UTF-8 字符边界内"
+		return seg
+	}
+	seg.byteOffset = it.ByteOffset
+	seg.lines[0] = seg.lines[0][it.ByteOffset:]
 	var notes []string
 	if end < len(lines) {
 		notes = append(notes, fmt.Sprintf("…（本段到第 %d 行为止，可调大 limit 或用 offset=%d 继续读）", end, end+1))
@@ -717,12 +748,7 @@ func appendReadSeg(b *strings.Builder, seg readSeg, limit int) (written, whole b
 		b.WriteString(head + body)
 		return true, true
 	}
-	linesOnly := strings.Join(seg.lines, "\n")
-	if b.Len()+len(head)+len(linesOnly) <= limit {
-		// 正文能全给、只是尾注（续读/编码提示）放不下：正文优先
-		b.WriteString(head + linesOnly)
-		return true, true
-	}
+	// 尾注也属于结果；放不下时同样预留不完整标记，不能静默丢弃。
 	b.WriteString(head)
 	room := limit - b.Len() - readCutNoteReserve
 	wrote, used := 0, 0
@@ -741,15 +767,16 @@ func appendReadSeg(b *strings.Builder, seg readSeg, limit int) (written, whole b
 		used += need
 	}
 	lastLine := seg.startLine + wrote - 1
-	if wrote == 0 {
-		// 首行就是巨行（minified 文件）：按 rune 边界硬裁一段，仍能给模型看到开头
-		lastLine = seg.startLine
-		if cut := runeHeadCut(seg.lines[0], room); cut > 0 {
-			b.WriteString(seg.lines[0][:cut])
-		}
+	if wrote == 0 && len(seg.lines) > 0 {
+		// 部分行不算完整行；用字节游标续读，避免重复同一前缀或跳过余部。
+		cut := runeHeadCut(seg.lines[0], room)
+		b.WriteString(seg.lines[0][:cut])
+		b.WriteString(fmt.Sprintf("\n…（不完整：第 %d 行未完整；用 offset=%d, byte_offset=%d 续读该行余部）",
+			seg.startLine, seg.startLine, seg.byteOffset+cut))
+		return true, false
 	}
-	b.WriteString(fmt.Sprintf("\n…（本段在第 %d 行处达到单次输出上限 %dKB 被截断：用 offset=%d 继续读本文件）",
-		lastLine, readOutputMaxBytes/1024, lastLine+1))
+	b.WriteString(fmt.Sprintf("\n…（不完整：正文/尾注达到输出上限被截断；已完整返回到第 %d 行，用 offset=%d 继续读本文件；编码信息可能未返回）",
+		lastLine, lastLine+1))
 	return true, false
 }
 
@@ -903,6 +930,7 @@ type editItemResult struct {
 }
 
 func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
+	t.batchItems = nil
 	var p editRequest
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -1067,6 +1095,22 @@ func runEditFile(t *toolContext, args json.RawMessage) (string, error) {
 	out := strings.TrimRight(b.String(), "\n")
 	if len(items) > 1 {
 		out += fmt.Sprintf("\n（共 %d 条：%d 条已生效、%d 条未生效）", len(items), okSum, failSum)
+	}
+	for i, res := range results {
+		reason := res.fail
+		if st := itemState[i]; st != nil {
+			if st.loadErr != "" {
+				reason = st.loadErr
+			}
+			if st.writeErr != "" {
+				reason = st.writeErr
+			}
+		}
+		status := batchItemStatus{Index: i + 1, Path: items[i].Path, Status: "success"}
+		if reason != "" {
+			status.Status, status.Error = "failed", reason
+		}
+		t.batchItems = append(t.batchItems, status)
 	}
 	return out, nil
 }

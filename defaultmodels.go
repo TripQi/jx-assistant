@@ -14,8 +14,9 @@ package main
 //
 // 取值链（每一环取到的值不可用就直接报错，不继续往下试）：
 //   - 手动新建任务会话 → 全局默认模型；
-//   - dispatch_task / dispatch_sub → 派发任务默认模型（未设置＝跟随主会话：
+//   - dispatch_task → 派发任务默认模型（未设置＝跟随主会话：
 //     派发者当前的 provider/model/key）→ 派发者也没手选时跟随全局默认模型；
+//   - dispatch_sub 不走派发默认，模型链不变；档位继承派发者当前 Thinking；
 //   - 待办 → 待办自选 → 派发任务默认模型 →（派发设置跟随主会话时，待办没有
 //     主会话可跟）→ 全局默认模型。
 
@@ -451,7 +452,7 @@ func (a *App) refView(r ModelRef, mode, source, where string) ModelRefView {
 func (a *App) globalSettingsView() ModelRefView {
 	ref := a.globalDefaultRef()
 	if ref.Empty() {
-		return ModelRefView{Source: "全局默认模型", Error: "未设置：请选一个渠道 + 模型"}
+		return ModelRefView{Source: "全局默认模型", Thinking: ref.Thinking, Error: "未设置：请选一个渠道 + 模型"}
 	}
 	return a.refView(ref, "", "全局默认模型", whereGlobalDefault)
 }

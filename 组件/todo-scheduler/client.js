@@ -615,7 +615,9 @@
     const level = f.thinking || inherited;
     const source = dispatch.thinking ? '跟随派发设置' : global.thinking ? '跟随全局默认' : '跟随会话默认';
     // 后端 text 已带生效档位；编辑中的覆盖另算，先去掉原展示后缀。
-    const modelText = (mv.text || '未设置').replace(/ · (None|Low|Medium|High|Xhigh|Max)$|（跟随(?:全局默认|派发设置|会话默认) · (?:None|Low|Medium|High|Xhigh|Max|不指定)）$/, '');
+    const suffix = mv.thinkingText || '';
+    const rawText = mv.text || '未设置';
+    const modelText = suffix && rawText.endsWith(suffix) ? rawText.slice(0, -suffix.length) : rawText;
     return '<p class="td-hint td-effective' + (mv.available ? '' : ' bad') + '">当前生效：' +
       esc(mv.available ? modelText + (f.thinking ? ' · ' + thinkingLabel(level) : '（' + source + ' · ' + thinkingLabel(level) + '）') : mv.error || '模型不可用') + '</p>';
   }

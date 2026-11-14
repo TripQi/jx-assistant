@@ -33,6 +33,7 @@ type StoredMessage struct {
 	Origin     string `json:"origin,omitempty"` // summary 来源：auto | manual
 	Compact    string `json:"compact,omitempty"` // 规则压缩标记：非空=已折叠（"omit"=整行丢弃）；前端据此显示「已折叠」行，原文照常完整展示
 	CoversUpTo int64  `json:"coversUpTo,omitempty"`
+	CoversFrom int64  `json:"coversFrom,omitempty"` // 摘要覆盖起点 seq（与 coversUpTo 成对；auto 合并存累计起点，manual 存本次区间起点）
 	Superseded bool   `json:"superseded,omitempty"`
 	CreatedAt  string `json:"createdAt,omitempty"`
 	Thinking   string `json:"thinking,omitempty"` // assistant 该步的思考过程原文
@@ -330,6 +331,18 @@ var storeMigrations = []migration{
 		tolerant: true,
 		sql: []string{
 			`ALTER TABLE sessions ADD COLUMN voice_used INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	{
+		// 摘要行的覆盖起点（与 covers_up_to 成对）：本次/累计压缩区间的下界
+		// seq。auto 合并存累计起点（合并链头部），manual 叠加存本次区间起点
+		//——增量式压缩的可检索标注（2026-11-11 用户要求），摘要文本头同写。
+		// 注意迁移号：本条的 0016 与下方 0016_thinking_six_levels 同号不同串，
+		// 账本按全串 id 记账，两条都必须留着（删任一条，老库就会少一列）。
+		id:       "0016_message_covers_from",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE messages ADD COLUMN covers_from INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
 	{
@@ -1153,10 +1166,10 @@ func (s *Store) appendRowLocked(id string, sm *StoredMessage) error {
 		compact = sm.Compact
 	}
 	_, err := s.db.Exec(`INSERT INTO messages
-		(session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, superseded, created_at, thinking)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, covers_from, superseded, created_at, thinking)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, sm.Seq, sm.Role, content, toolCalls, sm.ToolCallID, sm.Kind, sm.Origin,
-		compact, sm.CoversUpTo, boolInt(sm.Superseded), sm.CreatedAt, sm.Thinking)
+		compact, sm.CoversUpTo, sm.CoversFrom, boolInt(sm.Superseded), sm.CreatedAt, sm.Thinking)
 	if err != nil {
 		return err
 	}
@@ -1174,14 +1187,14 @@ func boolInt(b bool) int {
 	return 0
 }
 
-const messageCols = `id, session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, superseded, created_at, thinking`
+const messageCols = `id, session_id, seq, role, content, tool_calls, tool_call_id, kind, origin, compact, covers_up_to, covers_from, superseded, created_at, thinking`
 
 func scanMessage(sc interface{ Scan(dest ...any) error }) (*StoredMessage, error) {
 	sm := &StoredMessage{}
 	var content, toolCalls, compact, thinking sql.NullString
 	var sup int
 	err := sc.Scan(&sm.ID, &sm.SessionID, &sm.Seq, &sm.Role, &content, &toolCalls,
-		&sm.ToolCallID, &sm.Kind, &sm.Origin, &compact, &sm.CoversUpTo, &sup, &sm.CreatedAt, &thinking)
+		&sm.ToolCallID, &sm.Kind, &sm.Origin, &compact, &sm.CoversUpTo, &sm.CoversFrom, &sup, &sm.CreatedAt, &thinking)
 	if err != nil {
 		return nil, err
 	}

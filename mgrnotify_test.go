@@ -193,22 +193,27 @@ func TestManagerTurnGrantLifecycle(t *testing.T) {
 		t.Fatal("经理再次投递开出的新一轮应重新授权")
 	}
 
-	// 竞态兜底：用户撤销（代数递增）之后才落盘的旧代数授权自动作废
-	//（模拟「投递已开出新轮、授权尚未写、用户恰好在此刻插话」的迟到写入）
-	a.runMu.Lock()
-	a.mgrTurns[task.ID] = mgrTurnGrant{run: run2, gen: a.mgrTurnGen[task.ID] - 1}
-	a.runMu.Unlock()
+	// 真实投递窗口：经理已开轮，用户先接管，之后迟到的 grant 不能恢复授权。
+	a.revokeManagerTurn(task.ID)
+	a.grantManagerTurn(task.ID, run2)
 	if a.managerTurnActive(task.ID) {
 		t.Fatal("撤销后迟到的旧授权应作废")
 	}
 
+	// 用户接管之后真正新开的经理轮仍能授权。
+	a.finishRunOf(task.ID, run2)
+	run3, ok := a.beginRun(task.ID)
+	if !ok {
+		t.Fatal("第三轮开轮失败")
+	}
+	t.Cleanup(func() { a.finishRunOf(task.ID, run3) })
+	a.grantManagerTurn(task.ID, run3)
 	// 收口按轮身份清授权：无关轮的收口不能误删本轮授权，本轮收口才清
-	a.grantManagerTurn(task.ID, run2)
-	a.dropManagerTurnOf(task.ID, &sessionRun{}) // 别的轮收口
+	a.dropManagerTurnOf(task.ID, run2) // 旧轮迟到收口
 	if !a.managerTurnActive(task.ID) {
 		t.Fatal("无关轮的收口不该清掉本轮授权")
 	}
-	a.dropManagerTurnOf(task.ID, run2) // 本轮收口
+	a.dropManagerTurnOf(task.ID, run3) // 本轮收口
 	if a.managerTurnActive(task.ID) {
 		t.Fatal("本轮收口应清掉授权")
 	}

@@ -39,7 +39,7 @@ const mgrNotifyOrigin = "mgrcard"
 
 // mgrTurnGrant 经理代批的轮次级授权（App.mgrTurns，runMu 保护）：run 是授权
 // 针对的那一轮执行体——指针即轮次身份（与 finishRunOf 按身份收口同一哲学），
-// 该轮收口、换了新一轮，授权自然失效；gen 是授予时刻的撤销代数——用户亲发
+// 该轮收口、换了新一轮，授权自然失效；gen 是开轮时的撤销代数快照——用户亲发
 // 消息会递增代数并清授权，「投递已开出新轮、授权还没写、用户恰好在此刻插话」
 // 竞态窗口里晚到的旧授权因 gen 落后自动作废。
 type mgrTurnGrant struct {
@@ -56,8 +56,11 @@ func (a *App) grantManagerTurn(sid string, r *sessionRun) {
 		return
 	}
 	a.runMu.Lock()
-	a.mgrTurns[sid] = mgrTurnGrant{run: r, gen: a.mgrTurnGen[sid]}
-	a.runMu.Unlock()
+	defer a.runMu.Unlock()
+	if a.runners[sid] != r || r.mgrTurnGen != a.mgrTurnGen[sid] {
+		return // 只授权仍在执行且开轮后未被用户接管的原轮，不能用当前代数补发旧授权
+	}
+	a.mgrTurns[sid] = mgrTurnGrant{run: r, gen: r.mgrTurnGen}
 }
 
 // revokeManagerTurn 撤销经理代批资格（用户亲发消息=用户接管：handleChat /

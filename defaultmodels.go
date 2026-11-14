@@ -43,7 +43,7 @@ func (r ModelRef) norm() ModelRef {
 		Provider:    strings.TrimSpace(r.Provider),
 		ProviderKey: strings.TrimSpace(r.ProviderKey),
 		Model:       strings.TrimSpace(r.Model),
-		Thinking:    strings.TrimSpace(r.Thinking),
+		Thinking:    r.Thinking,
 	}
 }
 

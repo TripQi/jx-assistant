@@ -124,6 +124,8 @@
 /* 卡片「模型：…」那一行：跟 .td-meta 其他项同字号，不抢眼；不可用红字 */
 .td-model { font-size: 12px; }
 .td-model.bad { color: #c22f2f; }
+.td-effective { overflow-wrap: anywhere; }
+.td-effective.bad { color: #c22f2f; }
 
 .td-records {
   border-top: 1px solid var(--border-2); padding-top: 9px;

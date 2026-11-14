@@ -156,6 +156,12 @@ func taskDetail(v TaskView, records []*RunRecord) string {
 		"状态：" + status,
 		"下次执行：" + formatMillis(v.NextRunAt),
 	}
+	if v.Executor == execAssistant {
+		lines = append(lines, "思考档位（待办覆盖）："+firstNonEmpty(v.Thinking, "不指定"))
+		if v.ModelView != nil {
+			lines = append(lines, "模型（当前生效）："+v.ModelView.Text, "思考（当前生效）："+v.ModelView.ThinkingText)
+		}
+	}
 	if v.LastError != "" {
 		lines = append(lines, "上次错误："+v.LastError)
 	}
@@ -283,6 +289,21 @@ func runTodoTaskGet(t *toolContext, args json.RawMessage) (string, error) {
 	return taskDetail(v, records), nil
 }
 
+// todoThinkingParam 与保存校验共用系统档位，不为待办维护第二套清单。
+func todoThinkingParam() map[string]any {
+	return map[string]any{"type": "string", "enum": append([]string{""}, thinkingLevels()...), "description": "仅 AI 任务：独立思考档位；空串=不指定（更新时清除覆盖），省略=保留。"}
+}
+
+func todoModelModeParam() map[string]any {
+	return map[string]any{"type": "string", "enum": []string{"dispatch", "global", "custom"}, "description": "仅 AI 任务：dispatch 跟随派发设置、global 全局默认、custom 指定 model。"}
+}
+
+func todoModelParam() map[string]any {
+	return objSchema(map[string]any{
+		"provider": strProp("渠道 id。"), "providerKey": strProp("模型归属 Key id（可省略）。"), "model": strProp("模型 id。"),
+	}, "provider", "model")
+}
+
 func todoTaskCreateTool() Tool {
 	return Tool{
 		Spec: toolSpec("todo_task_create",
@@ -301,6 +322,9 @@ func todoTaskCreateTool() Tool {
 					"enum":        []string{targetManager, targetTask},
 					"description": "仅 AI 任务：执行目标——manager=长期助理（默认，转交数字助理主对话处理）；task=新的工作任务（到点自动创建工作任务会话直接执行，不打扰长期助理）。与界面「执行目标」选框同一取值。",
 				},
+				"thinking":   todoThinkingParam(),
+				"model_mode": todoModelModeParam(),
+				"model":      todoModelParam(),
 				"command":    strProp("仅程序任务：要运行的命令行（如 “git pull”）。"),
 				"dir":        strProp("仅程序任务：工作目录的绝对路径（先用 todo_workspace_list 查可选目录）。"),
 				"shell":      strProp("仅程序任务：powershell（默认）或 cmd。"),
@@ -318,6 +342,9 @@ func runTodoTaskCreate(t *toolContext, args json.RawMessage) (string, error) {
 		Schedule    scheduleArgs `json:"schedule"`
 		Executor    string       `json:"executor"`
 		Target      string       `json:"target"`
+		ModelMode   string       `json:"model_mode"`
+		Model       *ModelRef    `json:"model"`
+		Thinking    *string      `json:"thinking"`
 		Command     string       `json:"command"`
 		Dir         string       `json:"dir"`
 		Shell       string       `json:"shell"`
@@ -338,6 +365,7 @@ func runTodoTaskCreate(t *toolContext, args json.RawMessage) (string, error) {
 		Title: p.Title, Description: p.Description, Schedule: &sched,
 		Executor: p.Executor, Target: p.Target, Command: p.Command, Dir: p.Dir, Shell: p.Shell,
 		Permission: p.Permission, Enabled: p.Enabled,
+		ModelMode: p.ModelMode, Model: p.Model, Thinking: p.Thinking,
 	})
 	if err != nil {
 		return "新建失败：" + err.Error(), nil
@@ -365,6 +393,9 @@ func todoTaskUpdateTool() Tool {
 					"enum":        []string{targetManager, targetTask},
 					"description": "仅 AI 任务：新的执行目标——manager=长期助理；task=新的工作任务。",
 				},
+				"thinking":   todoThinkingParam(),
+				"model_mode": todoModelModeParam(),
+				"model":      todoModelParam(),
 				"command":    strProp("仅程序任务：新的命令行。"),
 				"dir":        strProp("仅程序任务：新的工作目录绝对路径。"),
 				"shell":      strProp("仅程序任务：powershell 或 cmd。"),
@@ -384,6 +415,9 @@ func runTodoTaskUpdate(t *toolContext, args json.RawMessage) (string, error) {
 		Schedule    *scheduleArgs `json:"schedule"`
 		Executor    string        `json:"executor"`
 		Target      string        `json:"target"`
+		ModelMode   string        `json:"model_mode"`
+		Model       *ModelRef     `json:"model"`
+		Thinking    *string       `json:"thinking"`
 		Command     string        `json:"command"`
 		Dir         string        `json:"dir"`
 		Shell       string        `json:"shell"`
@@ -411,6 +445,7 @@ func runTodoTaskUpdate(t *toolContext, args json.RawMessage) (string, error) {
 	req := todoRequest{
 		ID: id, Title: p.Title, Description: p.Description, Executor: p.Executor, Target: p.Target,
 		Command: p.Command, Dir: p.Dir, Shell: p.Shell, Permission: p.Permission, Enabled: p.Enabled, Done: p.Done,
+		ModelMode: p.ModelMode, Model: p.Model, Thinking: p.Thinking,
 	}
 	if p.Schedule != nil {
 		sched, serr := p.Schedule.toSchedule()

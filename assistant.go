@@ -524,7 +524,8 @@ func runDispatchSub(t *toolContext, args json.RawMessage) (string, error) {
 		title = truncateRunes(p.Task, 20)
 	}
 	params := createSessionParams{
-		Mode: "task", Title: title, Workspace: ws,
+		Thinking: t.sess.Thinking, // 子对话仅继承派发者当前档位，不读取默认体系
+		Mode:     "task", Title: title, Workspace: ws,
 		ParentID:   t.sess.ID, // 子对话挂在当前会话下；回报链走 parent_id
 		Permission: perm,      // 只能同等或降权，绝不允许增权（dispatchPermission）
 		Expert:     strings.TrimSpace(ex.Name),
@@ -631,9 +632,14 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if title == "" {
 		title = truncateRunes(p.Task, 20)
 	}
+	thinking, _, err := t.app.defaultThinking("dispatch", "")
+	if err != nil {
+		return "", err
+	}
 	params := createSessionParams{
-		Mode:  mode, // 与人工新建会话同一份模式清单（resolveDispatchMode）
-		Title: title, Workspace: ws,
+		Thinking: thinking,
+		Mode:     mode, // 与人工新建会话同一份模式清单（resolveDispatchMode）
+		Title:    title, Workspace: ws,
 		Permission:   perm,       // 只能同等或降权，绝不允许增权（dispatchPermission）
 		PlanMode:     p.PlanMode, // 与人工建会话勾选「计划模式」一致
 		DispatchedBy: t.sess.ID,  // 派发的是顶层工作任务（左侧列表可见）；回报链走 dispatched_by，不走 parent_id

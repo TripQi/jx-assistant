@@ -2130,6 +2130,14 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	body.ProviderKey = strings.TrimSpace(body.ProviderKey)
 	body.Model = strings.TrimSpace(body.Model)
 	if !body.InheritContext {
+		if body.Thinking == "" {
+			level, _, err := a.defaultThinking("global", "")
+			if err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+			body.Thinking = level
+		}
 		p, k, m, merr := a.applySessionModelDefault(body.Provider, body.ProviderKey, body.Model)
 		if merr != nil {
 			writeErr(w, 400, merr.Error())

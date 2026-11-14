@@ -863,12 +863,27 @@ async function reloadProviders() {
    两个显式默认都由服务端算好「当前实际生效值」（跟随主会话时也算到具体模型，
    不让用户自己推）。保存是即时接口，不跟着卡片底部的「保存」。 */
 let dmCache = null;
+let dmReady = false;
+let dmLoadVersion = 0;
+let dmSaving = false;
+let dmPending = {};
 
 async function loadDefaultModels() {
+  if (dmSaving) return; // 保存队列持有最新用户意图，期间不读取中间态快照
+  const version = ++dmLoadVersion;
   if (!(state.models || []).length) {
-    try { await loadModels(); } catch (e) { /* 模型清单拿不到：按空清单渲染 */ }
+    try { await loadModels(); } catch (e) { /* 已存引用由占位选项保留 */ }
   }
-  try { dmCache = await api('/api/default-models'); } catch (e) { dmCache = null; }
+  try {
+    const data = await api('/api/default-models');
+    // 保存中的旧 GET 不得覆盖尚未落盘的用户选择。
+    if (version !== dmLoadVersion || dmSaving) return;
+    dmCache = data;
+    dmReady = true;
+  } catch (e) {
+    if (version !== dmLoadVersion || dmSaving) return;
+    dmReady = false;
+  }
   renderDefaultModels();
 }
 
@@ -914,6 +929,17 @@ function dmSetEff(el, view, suffix) {
   el.classList.toggle('bad', bad);
 }
 
+function dmSelectRef(el, ref) {
+  const value = ref && ref.provider ? modelKeyOf(ref.provider, ref.providerKey, ref.model) : '';
+  if (value && !Array.from(el.options).some((o) => o.value === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = '已存但不可用：' + ref.provider + '/' + ref.model;
+    el.appendChild(option);
+  }
+  el.value = value;
+}
+
 function renderDefaultModels() {
   const selG = $('set-default-model');
   const modeSel = $('set-dispatch-mode');
@@ -923,47 +949,65 @@ function renderDefaultModels() {
   const d = (dmCache && dmCache.dispatch) || {};
   const opts = defaultModelOptions();
   selG.innerHTML = opts;
-  selG.value = g.provider ? modelKeyOf(g.provider, g.providerKey, g.model) : '';
+  dmSelectRef(selG, g);
   modeSel.value = d.mode === 'custom' ? 'custom' : 'follow';
   selD.innerHTML = opts;
   const eff = d.ref || {};
-  selD.value = eff.provider ? modelKeyOf(eff.provider, eff.providerKey, eff.model) : '';
+  dmSelectRef(selD, eff);
+  selG.disabled = modeSel.disabled = selD.disabled = !dmReady;
   selD.style.display = modeSel.value === 'custom' ? '' : 'none';
-  dmSetEff($('set-default-model-eff'), g, '');
+  dmSetEff($('set-default-model-eff'), dmReady ? g : { error: '读取默认模型失败，请重新打开设置后再修改' }, '');
   dmSetEff($('set-dispatch-model-eff'), eff, modeSel.value === 'custom' ? '' : '跟随主会话');
 }
 
-async function saveDefaultModels() {
+async function saveDefaultModels(field) {
+  if (!dmReady || (field !== 'global' && field !== 'dispatch')) return;
   const toRef = (v) => {
     const p = v ? v.split('|') : [];
     return { provider: p[0] || '', providerKey: p[1] || '', model: p[2] || '' };
   };
-  const custom = $('set-dispatch-mode').value === 'custom';
+  if (field === 'global') {
+    dmPending.global = toRef($('set-default-model').value || '');
+  } else {
+    const custom = $('set-dispatch-mode').value === 'custom';
+    if (custom && !$('set-dispatch-model').value) return;
+    dmPending.dispatch = custom ? toRef($('set-dispatch-model').value) : null;
+  }
+  ++dmLoadVersion;
+  if (dmSaving) return;
+  dmSaving = true;
   try {
-    dmCache = await api('/api/default-models', {
-      method: 'POST',
-      body: JSON.stringify({
-        global: toRef($('set-default-model').value || ''),
-        dispatch: custom ? toRef($('set-dispatch-model').value || '') : null,
-      }),
-    });
-    renderDefaultModels();
-    loadModels(); // 首页输入框的「默认模型」名跟着刷新
+    while (Object.keys(dmPending).length) {
+      const patch = dmPending;
+      dmPending = {};
+      const data = await api('/api/default-models', {
+        method: 'POST', body: JSON.stringify(patch),
+      });
+      ++dmLoadVersion; // 每次落盘都使之前发起的 GET 失效
+      dmCache = data;
+      // 响应只在队列清空后渲染，不能把请求期间的新选择倒回旧值。
+      if (!Object.keys(dmPending).length) renderDefaultModels();
+    }
+    void loadModels();
   } catch (e) {
-    alert('保存默认模型失败：' + (e.message || e));
-    loadDefaultModels();
+    dmPending = {};
+    dmReady = false;
+    renderDefaultModels();
+    alert('保存默认模型失败，后续未保存的选择也未提交，请重新打开设置后重试：' + (e.message || e));
+  } finally {
+    dmSaving = false;
   }
 }
 
 if ($('set-default-model')) {
-  $('set-default-model').onchange = () => { void saveDefaultModels(); };
-  $('set-dispatch-model').onchange = () => { void saveDefaultModels(); };
+  $('set-default-model').onchange = () => { void saveDefaultModels('global'); };
+  $('set-dispatch-model').onchange = () => { void saveDefaultModels('dispatch'); };
   // 切到「指定渠道 + 模型」但还没选模型时不存（服务端会拒「没选全」），等选完再存
   $('set-dispatch-mode').onchange = () => {
     const custom = $('set-dispatch-mode').value === 'custom';
     $('set-dispatch-model').style.display = custom ? '' : 'none';
     if (custom && !$('set-dispatch-model').value) return;
-    void saveDefaultModels();
+    void saveDefaultModels('dispatch');
   };
 }
 

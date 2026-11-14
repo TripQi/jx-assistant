@@ -26,6 +26,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // ModelRef 是一次「渠道 + 模型 + Key 归属」的完整指向。
@@ -488,9 +489,15 @@ func (a *App) applySessionModelDefault(provider, providerKey, model string) (str
 
 // ---------- HTTP ----------
 
+// 默认设置端点串行合并、持久化后再发布，防止两个局部保存彼此覆盖。
+// 只协调此端点；其他供应商/通用配置写入口仍沿用既有保存边界。
+var defaultModelsSaveMu sync.Mutex
+
 // handleDefaultModelsGet 设置页「默认模型」两块的数据：全局默认模型的选中值，
 // 与派发任务默认模型的模式及当前实际生效值（跟随主会话时算到具体模型）。
 func (a *App) handleDefaultModelsGet(w http.ResponseWriter, r *http.Request) {
+	defaultModelsSaveMu.Lock()
+	defer defaultModelsSaveMu.Unlock()
 	writeJSON(w, 200, map[string]any{
 		"global":   a.globalSettingsView(),
 		"dispatch": a.dispatchSettingsView(),
@@ -500,32 +507,49 @@ func (a *App) handleDefaultModelsGet(w http.ResponseWriter, r *http.Request) {
 // handleDefaultModelsSet 保存这两块：只校验格式并补齐 Key 归属，不拦可用性
 // （用户可能先选好再启用渠道）——不可用由界面红字与派发时的「不回落」报错说明。
 func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Global   *ModelRef `json:"global"`
-		Dispatch *ModelRef `json:"dispatch"` // null 或空＝跟随主会话
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, 400, "请求体不是合法 JSON: "+err.Error())
+	// 省略字段＝保留；null 或 {}＝显式清空（dispatch 清空即跟随）。
+	// 旧客户端同时提交两项仍兼容，但空请求对象不再隐式删除两项。
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body == nil {
+		writeErr(w, 400, "请求体必须是 JSON 对象")
 		return
 	}
-	g := ModelRef{}
-	if body.Global != nil {
-		g = *body.Global
+	decodeRef := func(name string, old ModelRef) (ModelRef, error) {
+		raw, present := body[name]
+		if !present {
+			return old, nil
+		}
+		var ref ModelRef
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return ModelRef{}, fmt.Errorf("%s 不是合法模型引用: %w", name, err)
+		}
+		return ref, nil
 	}
-	d := ModelRef{}
-	follow := true
-	if body.Dispatch != nil && !body.Dispatch.Empty() {
-		d, follow = *body.Dispatch, false
-	}
-	if err := a.setDefaultModels(g, d, follow); err != nil {
+	defaultModelsSaveMu.Lock()
+	defer defaultModelsSaveMu.Unlock()
+	g, err := decodeRef("global", a.Cfg.DefaultModel)
+	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if err := a.Cfg.Save(a.CfgPath); err != nil {
+	d, err := decodeRef("dispatch", a.Cfg.DispatchModel)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	// 在副本上归一/校验。写盘失败不能改变运行中的默认值。
+	next := *a.Cfg
+	candidate := &App{Cfg: &next}
+	if err := candidate.setDefaultModels(g, d, d.Empty()); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := next.Save(a.CfgPath); err != nil {
 		writeErr(w, 500, "保存配置失败: "+err.Error())
 		return
 	}
-	a.broadcast(Event{Type: "providers"}) // 默认模型变了：前端模型菜单/状态栏跟着刷新
+	a.Cfg.DefaultModel, a.Cfg.DispatchModel = next.DefaultModel, next.DispatchModel
+	a.broadcast(Event{Type: "providers"})
 	writeJSON(w, 200, map[string]any{
 		"global":   a.globalSettingsView(),
 		"dispatch": a.dispatchSettingsView(),

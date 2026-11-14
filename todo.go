@@ -45,7 +45,7 @@ const (
 	todoMaxRecords    = 200              // 执行记录上限（超出裁掉最旧的）
 	todoCmdTimeout    = 10 * time.Minute // 程序任务单次超时
 	todoDataKey       = "todo_tasks"     // meta 表里的数据键
-	todoDataVersion   = 2                // 数据版本（2：任务加了「任务模型」三档字段）
+	todoDataVersion   = 3                // 数据版本（3：任务独立思考档位；旧任务为空）
 	todoComponentID   = "todo-scheduler" // 承载本功能的组件 id
 )
 
@@ -101,6 +101,7 @@ type TaskItem struct {
 	// 「不可用就报错」的判定见 defaultmodels.go。
 	ModelMode string    `json:"modelMode,omitempty"`
 	Model     *ModelRef `json:"model,omitempty"`
+	Thinking  string    `json:"thinking,omitempty"` // 独立于模型模式；空串沿用默认链
 	Schedule  Schedule  `json:"schedule"`
 	// 以下仅 command 类：工作目录、要在那里运行的命令、执行档位（沙箱 / 完全访问）。
 	Dir        string `json:"dir,omitempty"`
@@ -622,6 +623,7 @@ func (s *todoScheduler) load() *TodoData {
 // v1 → v2：任务多了「任务模型」三档字段。老单据读出来 ModelMode 为空——正好是
 // 默认档「跟随派发设置」，Model 为空，不需要逐条改写（只是把版本号推上去，并把
 // 「存了指向却没写档位」这种半残数据补成 custom）。
+// v2 → v3：独立 Thinking 字段，旧任务自然解码为空，不从模型引用推测。
 func (s *todoScheduler) migrateData(d *TodoData) {
 	if d.Version >= todoDataVersion {
 		return
@@ -824,7 +826,9 @@ func (s *todoScheduler) snapshot() map[string]any {
 func (s *todoScheduler) toView(t *TaskItem, now int64) TaskView {
 	v := TaskView{TaskItem: *t}
 	if t.Executor == execAssistant {
-		mv := s.app.todoModelView(t.ModelMode, derefModel(t.Model))
+		custom := derefModel(t.Model)
+		custom.Thinking = t.Thinking
+		mv := s.app.todoModelView(t.ModelMode, custom)
 		v.ModelView = &mv
 	}
 	if !t.Enabled || t.Done {
@@ -873,6 +877,7 @@ type todoRequest struct {
 	// 换档；custom 必须带 model。
 	ModelMode string    `json:"modelMode,omitempty"`
 	Model     *ModelRef `json:"model,omitempty"`
+	Thinking  *string   `json:"thinking"` // nil 保留，空串明确清除
 	Enabled   *bool     `json:"enabled"`
 	Done      *bool     `json:"done"` // 标记完成 / 重新打开（仅 update：完成是终态归档，调度随之停）
 }
@@ -932,8 +937,23 @@ func (r todoRequest) normalizeModel(executor string) (string, *ModelRef, error) 
 	return mode, &m, nil
 }
 
+// validateTodoThinking 严格接受空串或全系统六档，不接收旧会话别名或隐式归一。
+func validateTodoThinking(level string) error {
+	if level == "" || containsStr(thinkingLevels(), level) {
+		return nil
+	}
+	return fmt.Errorf("待办 thinking 档位 %q 非法：只接受空串（不指定）或 %s", level, strings.Join(thinkingLevels(), " / "))
+}
+
 // create 新建一条任务。
 func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
+	thinking := ""
+	if r.Thinking != nil {
+		thinking = *r.Thinking
+	}
+	if err := validateTodoThinking(thinking); err != nil {
+		return nil, err
+	}
 	title := strings.TrimSpace(r.Title)
 	if title == "" {
 		return nil, fmt.Errorf("任务标题不能为空")
@@ -962,8 +982,11 @@ func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 		Enabled:  r.Enabled == nil || *r.Enabled,
 		Executor: executor, Schedule: *r.Schedule,
 		Dir: dir, Command: command, Shell: shell, Permission: perm,
-		ModelMode: modelMode, Model: modelRef,
+		ModelMode: modelMode, Model: modelRef, Thinking: thinking,
 		CreatedAt: ts, UpdatedAt: ts,
+	}
+	if executor != execAssistant {
+		t.Thinking = ""
 	}
 	if executor == execAssistant {
 		t.Dir, t.Command, t.Shell, t.Permission = "", "", "", ""
@@ -989,6 +1012,12 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 		return nil, fmt.Errorf("找不到任务 %s", id)
 	}
 	next := *t
+	if r.Thinking != nil {
+		if err := validateTodoThinking(*r.Thinking); err != nil {
+			return nil, err
+		}
+		next.Thinking = *r.Thinking
+	}
 	if r.Title != "" {
 		title := strings.TrimSpace(r.Title)
 		if title == "" {
@@ -1063,6 +1092,9 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 			return nil, err
 		}
 		next.ModelMode, next.Model = mode, ref
+	}
+	if next.Executor != execAssistant {
+		next.ModelMode, next.Model, next.Thinking = "", nil, ""
 	}
 	next.UpdatedAt = time.Now().UnixMilli()
 	*t = next
@@ -1286,7 +1318,12 @@ func (s *todoScheduler) handToTaskSession(task *TaskItem, record *RunRecord) (st
 	if err != nil {
 		return "", err
 	}
+	thinking, _, err := s.app.defaultThinking("todo", task.Thinking)
+	if err != nil {
+		return "", err
+	}
 	sub, err := s.app.createSession(createSessionParams{
+		Thinking:   thinking,
 		Mode:       "task", // 按任务性质默认通用工作任务（与 dispatch_task 不传 mode 同一默认）
 		Title:      title,
 		Workspace:  s.app.Cfg.Workspace, // 定时任务没有「当前会话」，工作目录取默认工作区（与长期助理主对话同口径）

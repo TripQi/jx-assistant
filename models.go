@@ -471,7 +471,7 @@ func guessModelMeta(id string) (ctx int, images bool) {
 
 // thinkingLevels 是全系统唯一的思考档位清单。档位与模型、渠道协议彻底解绑：
 // 任何模型、任何渠道都显示同一套六档，由用户自己选——模型支不支持、服务端
-// 认不认都不在这里猜（能自动降级就降级，报错让用户自己换档）。
+// 认不认都不在这里猜（不探测、不自动降级，报错让用户自己换档）。
 // 内部值 → 显示名（前端 THINK_LABELS）：none/low/medium/high/xhigh/max →
 // None/Low/Medium/High/Xhigh/Max。
 func thinkingLevels() []string {

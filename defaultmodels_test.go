@@ -235,7 +235,7 @@ func TestTodoModelChain(t *testing.T) {
 		t.Fatalf("应落到全局默认: %+v %q %v", ref, source, err)
 	}
 	v := a.todoModelView(todoModelFollowDispatch, ModelRef{})
-	if v.Source != "全局默认模型" || v.Text != "智谱 · glm-5.3" || !v.Available {
+	if v.Source != "全局默认模型" || v.Text != "智谱 · glm-5.3（跟随会话默认 · 不指定）" || !v.Available {
 		t.Fatalf("卡片生效值不对: %+v", v)
 	}
 
@@ -279,7 +279,7 @@ func TestTodoModelFieldRoundTrip(t *testing.T) {
 	_, s, _ := newTodoDispatchApp(t)
 	view, err := s.create(todoRequest{
 		Title: "带模型的待办", Description: "x", Executor: execAssistant, Target: targetTask,
-		Schedule: &Schedule{Kind: schedManual},
+		Schedule:  &Schedule{Kind: schedManual},
 		ModelMode: todoModelCustom, Model: &ModelRef{Provider: "mock-prov", Model: "mock-model"},
 	})
 	if err != nil {
@@ -396,7 +396,7 @@ func TestTodoDispatchModelApplied(t *testing.T) {
 	a.Cfg.Providers[0].Enabled = boolPtr(false)
 	view3, err := s.create(todoRequest{
 		Title: "坏模型", Description: "z", Executor: execAssistant, Target: targetTask,
-		Schedule: &Schedule{Kind: schedManual},
+		Schedule:  &Schedule{Kind: schedManual},
 		ModelMode: todoModelCustom, Model: &ModelRef{Provider: "alt", Model: "alt-model"},
 	})
 	if err != nil {

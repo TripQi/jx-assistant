@@ -37,6 +37,7 @@
   const st = {
     tasks: [], records: [], missed: [], store: '',
     models: [],       // /api/models 的清单（表单里「指定模型」下拉的分组来源）
+    defaults: {}, thinkingLevels: [],
     tab: 'todo',      // 子页签：todo=待执行（默认，现在的页面） | done=已完成
     workspaces: [], busy: false, armedDelete: '', expanded: {}, open: {}, editing: null,
     page: false,      // 本页是否正占着主列
@@ -377,12 +378,24 @@
   /* 卡片「模型：跟随派发设置（生效：DC3 · deepseek-v4.1-flash-1017）」那一行。
      值全部来自服务端 modelView（三档取值链算出的当前实际生效值）；点一下打开编辑
      弹窗改档位。不可用时红字带原因（不静默）。 */
+  function thinkingLabel(level) {
+    // 组件脚本与宿主共享全局词法作用域，直接复用显示名；不另定义六档。
+    return level ? (typeof THINK_LABELS !== 'undefined' ? THINK_LABELS[level] || level : level) : '不指定';
+  }
+
+  function thinkingOptions(picked) {
+    const levels = typeof THINK_LEVELS !== 'undefined' ? THINK_LEVELS : st.thinkingLevels;
+    return [''].concat(levels || []).map((level) => '<option value="' + esc(level) + '"' +
+      (level === picked ? ' selected' : '') + '>' + esc(thinkingLabel(level)) + '</option>').join('');
+  }
+
   function modelMetaHTML(t) {
     const mv = t.modelView || {};
     const mode = t.modelMode === 'global' || t.modelMode === 'custom' ? t.modelMode : 'dispatch';
     let line = '模型：' + MODEL_MODE_LABEL[mode];
-    if (mv.text) line += '（' + (mv.available ? '生效：' + mv.text : '不可用：' + (mv.error || '')) + '）';
+    if (mv.text) line += '（' + (mv.available ? '当前生效：' + mv.text : '不可用：' + (mv.error || '')) + '）';
     else line += '（' + (mv.error || '未设置') + '）';
+    line += ' · 推理强度：' + thinkingLabel(t.thinking);
     return '<button type="button" class="td-link td-model' + (mv.available ? '' : ' bad') + '"' +
       ' data-act="edit" data-id="' + esc(t.id) + '" title="改任务模型">' + esc(line) + '</button>';
   }
@@ -489,7 +502,7 @@
       editingId: '', title: '', description: '', executor: 'assistant', target: 'manager', kind: 'manual',
       onceAt: '', time: '09:00', days: [false, true, true, true, true, true, false],
       everyMinutes: '30', dir: '', command: '', shell: 'powershell', permission: 'workspace-write',
-      enabled: true, modelMode: 'dispatch', modelValue: '',
+      enabled: true, modelMode: 'dispatch', modelValue: '', thinking: '',
     };
   }
 
@@ -510,6 +523,7 @@
     f.shell = t.shell || 'powershell';
     f.permission = t.permission || 'workspace-write';
     f.enabled = t.enabled;
+    f.thinking = t.thinking || '';
     // 任务模型三档（老数据没这字段＝跟随派发设置）；选定值存 provider|key|model
     f.modelMode = t.modelMode === 'global' || t.modelMode === 'custom' ? t.modelMode : 'dispatch';
     const mr = t.model || {};
@@ -534,6 +548,7 @@
       shell: f.shell, permission: f.permission, enabled: f.enabled,
       // 任务模型：dispatch/global/custom；只有 custom 带具体指向（含 Key 归属）
       modelMode: f.executor === 'assistant' ? f.modelMode : '',
+      thinking: f.executor === 'assistant' ? f.thinking : '',
       model: custom ? { provider: parts[0] || '', providerKey: parts[1] || '', model: parts[2] || '' } : null,
     };
   }
@@ -572,6 +587,10 @@
       const d = await api('/api/models');
       st.models = d.models || [];
     } catch (e) { st.models = []; }
+    try {
+      st.defaults = await api('/api/default-models');
+      st.thinkingLevels = st.defaults.thinkingLevels || [];
+    } catch (e) { st.defaults = {}; }
     if (!st.editing.dir && st.workspaces.length) st.editing.dir = st.workspaces[0].path;
     renderForm();
     formEl.classList.remove('hidden');
@@ -580,6 +599,27 @@
   function closeForm() {
     st.editing = null;
     if (formEl) formEl.classList.add('hidden');
+  }
+
+  function formEffectiveModel(f) {
+    const d = st.defaults || {};
+    const dispatch = d.dispatch || {};
+    const global = d.global || {};
+    let mv = global;
+    if (f.modelMode === 'custom') {
+      const parts = (f.modelValue || '').split('|');
+      const m = st.models.find((x) => x.providerId === parts[0] && (x.keyId || '') === parts[1] && x.modelId === parts[2]);
+      mv = m ? { text: (m.providerName || m.providerId) + ' · ' + (m.modelName || m.modelId), available: !m.providerOff } : { error: '请选择渠道 + 模型' };
+    } else if (f.modelMode === 'dispatch' && dispatch.mode === 'custom') mv = dispatch.ref || {};
+    const inherited = dispatch.thinking || global.thinking || '';
+    const level = f.thinking || inherited;
+    const source = dispatch.thinking ? '跟随派发设置' : global.thinking ? '跟随全局默认' : '跟随会话默认';
+    // 后端 text 已带生效档位；编辑中的覆盖另算，先去掉原展示后缀。
+    const suffix = mv.thinkingText || '';
+    const rawText = mv.text || '未设置';
+    const modelText = suffix && rawText.endsWith(suffix) ? rawText.slice(0, -suffix.length) : rawText;
+    return '<p class="td-hint td-effective' + (mv.available ? '' : ' bad') + '">当前生效：' +
+      esc(mv.available ? modelText + (f.thinking ? ' · ' + thinkingLabel(level) : '（' + source + ' · ' + thinkingLabel(level) + '）') : mv.error || '模型不可用') + '</p>';
   }
 
   function renderForm() {
@@ -628,6 +668,10 @@
               ? '用「设置 → 模型 → 默认模型」里的全局默认模型。'
               : '按派发设置为准；派发设置是「跟随主会话」时（待办没有主会话可跟）落到全局默认模型。') + '</p>'), true)
           : '') +
+        (!cmd ? field('推理强度（独立于模型模式）',
+          '<select id="td-f-thinking">' + thinkingOptions(f.thinking) + '</select>' +
+          '<p class="td-hint">不指定：跟随派发档位 → 全局档位 → 会话默认；切换模型模式不会改动此项。</p>' +
+          formEffectiveModel(f), true) : '') +
         field('标题',
           '<input id="td-f-title" type="text" placeholder="例如：每周整理一次周报" value="' + esc(f.title) + '">', true) +
         field('详细描述 / 要求',
@@ -723,6 +767,7 @@
     if (card.querySelector('#td-f-perm')) f.permission = val('td-f-perm');
     if (card.querySelector('#td-f-dir')) f.dir = val('td-f-dir').trim();
     if (card.querySelector('#td-f-model')) f.modelValue = val('td-f-model');
+    if (card.querySelector('#td-f-thinking')) f.thinking = val('td-f-thinking');
     const on = card.querySelector('#td-f-enabled');
     if (on) f.enabled = on.checked;
   }
@@ -744,6 +789,7 @@
   async function saveForm() {
     const f = st.editing;
     if (!f) return;
+    readForm();
     const problem = formError(f);
     if (problem) { showFormErr(problem); return; }
     const body = formRequest(f);

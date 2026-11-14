@@ -14,8 +14,9 @@ package main
 //
 // 取值链（每一环取到的值不可用就直接报错，不继续往下试）：
 //   - 手动新建任务会话 → 全局默认模型；
-//   - dispatch_task / dispatch_sub → 派发任务默认模型（未设置＝跟随主会话：
+//   - dispatch_task → 派发任务默认模型（未设置＝跟随主会话：
 //     派发者当前的 provider/model/key）→ 派发者也没手选时跟随全局默认模型；
+//   - dispatch_sub 不走派发默认，模型链不变；档位继承派发者当前 Thinking；
 //   - 待办 → 待办自选 → 派发任务默认模型 →（派发设置跟随主会话时，待办没有
 //     主会话可跟）→ 全局默认模型。
 
@@ -31,6 +32,7 @@ import (
 
 // ModelRef 是一次「渠道 + 模型 + Key 归属」的完整指向。
 type ModelRef struct {
+	Thinking    string `json:"thinking,omitempty"` // 空＝不指定，独立于模型选择
 	Provider    string `json:"provider,omitempty"`
 	ProviderKey string `json:"providerKey,omitempty"` // 模型归属的那把 Key（多 Key 渠道必须写准）
 	Model       string `json:"model,omitempty"`
@@ -42,6 +44,7 @@ func (r ModelRef) norm() ModelRef {
 		Provider:    strings.TrimSpace(r.Provider),
 		ProviderKey: strings.TrimSpace(r.ProviderKey),
 		Model:       strings.TrimSpace(r.Model),
+		Thinking:    r.Thinking,
 	}
 }
 
@@ -128,6 +131,9 @@ func (p *ProviderCfg) keyByID(id string) (ProviderKeyCfg, bool) {
 // 判定项（与需求逐条对应）：渠道未配置 / 渠道被手动停用 / 渠道被自动停用 /
 // 模型不在该渠道清单（含指定了 Key 归属但那把 Key 的分组里没有它）/ Key 缺失。
 func (a *App) checkModelRef(r ModelRef, where string) error {
+	if err := validateDefaultThinking(r.Thinking); err != nil {
+		return fmt.Errorf("%s：%w", where, err)
+	}
 	r = r.norm()
 	if r.Provider == "" && r.Model == "" {
 		return fmt.Errorf("没有选模型：请到%s选一个（渠道 + 模型）", where)
@@ -257,6 +263,55 @@ func (a *App) bareModelRef(model, preferProvider string) (ModelRef, error) {
 	return hits[0], nil
 }
 
+// validateDefaultThinking 默认配置只接受六档；旧会话 enabled/disabled 的兼容仍留在会话层。
+func validateDefaultThinking(s string) error {
+	if s != "" && !containsStr(thinkingLevels(), s) {
+		return fmt.Errorf("推理强度无效：%s（可选 none/low/medium/high/xhigh/max 或空＝不指定）", s)
+	}
+	return nil
+}
+
+// defaultThinking 只继承档位，绝不借此换渠道或模型。空串一路透传到原会话默认。
+func (a *App) defaultThinking(kind, own string) (string, string, error) {
+	if err := validateDefaultThinking(own); err != nil {
+		return "", "", err
+	}
+	if own != "" {
+		return own, "", nil
+	}
+	if kind != "global" {
+		d := a.Cfg.DispatchModel.Thinking
+		if err := validateDefaultThinking(d); err != nil {
+			return "", "", err
+		}
+		if d != "" {
+			return d, "跟随派发设置", nil
+		}
+	}
+	g := a.Cfg.DefaultModel.Thinking
+	if err := validateDefaultThinking(g); err != nil {
+		return "", "", err
+	}
+	if g != "" {
+		return g, "跟随全局默认", nil
+	}
+	return "", "跟随会话默认", nil
+}
+
+func thinkingLabel(s string) string {
+	if s == "" {
+		return "不指定"
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func thinkingViewText(level, source string) string {
+	if source != "" {
+		return "（" + source + " · " + thinkingLabel(level) + "）"
+	}
+	return " · " + thinkingLabel(level)
+}
+
 // ---------- 三类默认 ----------
 
 // globalDefaultRef 全局默认模型。未设置返回空引用（调用方按「未设置」报错）。
@@ -335,6 +390,9 @@ func (a *App) todoModelChain(mode string, custom ModelRef) (ModelRef, string, er
 // 新会话上的指向（都为空＝新会话跟随全局默认，已校验可用）与来源说明；不可用
 // 直接把「来自哪个设置」写进错误（运行记录里用户能一眼看出该去改哪儿）。
 func (a *App) todoDispatchModel(task *TaskItem) (provider, providerKey, model, source string, err error) {
+	if _, _, err := a.defaultThinking("todo", task.Thinking); err != nil {
+		return "", "", "", "待办推理强度", err
+	}
 	ref, source, err := a.todoModelChain(task.ModelMode, derefModel(task.Model))
 	if err != nil {
 		return "", "", "", source, fmt.Errorf("任务模型不可用（来自%s）：%w", source, err)
@@ -346,11 +404,13 @@ func (a *App) todoDispatchModel(task *TaskItem) (provider, providerKey, model, s
 
 // ModelRefView 是给界面看的「当前生效」：渠道显示名 · 模型 + 可用性 + 不可用原因。
 type ModelRefView struct {
-	Mode        string `json:"mode,omitempty"`   // 待办三档：dispatch/global/custom（其余场景空）
-	Source      string `json:"source,omitempty"` // 这个值从哪来（全局默认模型 / 派发任务默认模型 / 跟随主会话 / 待办自选模型）
-	Provider    string `json:"provider,omitempty"`
-	ProviderKey string `json:"providerKey,omitempty"`
-	Model       string `json:"model,omitempty"`
+	Thinking     string `json:"thinking,omitempty"` // 配置值；与展示的继承结果分开
+	ThinkingText string `json:"thinkingText,omitempty"`
+	Mode         string `json:"mode,omitempty"`   // 待办三档：dispatch/global/custom（其余场景空）
+	Source       string `json:"source,omitempty"` // 这个值从哪来（全局默认模型 / 派发任务默认模型 / 跟随主会话 / 待办自选模型）
+	Provider     string `json:"provider,omitempty"`
+	ProviderKey  string `json:"providerKey,omitempty"`
+	Model        string `json:"model,omitempty"`
 	// Text 是一眼看懂的生效值：「DC3 · deepseek-v4.1-flash-1017」；未设置时为空。
 	Text      string `json:"text,omitempty"`
 	Available bool   `json:"available"`
@@ -360,15 +420,27 @@ type ModelRefView struct {
 // refView 把一次模型指向渲染成界面展示值（判定不过不报错，原因进 Error）。
 func (a *App) refView(r ModelRef, mode, source, where string) ModelRefView {
 	r = r.norm()
-	v := ModelRefView{Mode: mode, Source: source, Provider: r.Provider, ProviderKey: r.ProviderKey, Model: r.Model}
+	v := ModelRefView{Mode: mode, Source: source, Provider: r.Provider, ProviderKey: r.ProviderKey, Model: r.Model, Thinking: r.Thinking}
+	kind := "global"
+	if where == whereDispatchDefault {
+		kind = "dispatch"
+	}
+	if where == whereTodoCard {
+		kind = "todo"
+	}
+	level, thinkingSource, thinkingErr := a.defaultThinking(kind, r.Thinking)
+	v.ThinkingText = thinkingViewText(level, thinkingSource)
 	if r.Empty() {
 		v.Error = "未设置"
 		return v
 	}
 	if a.providerByID(r.Provider) != nil && r.Model != "" {
-		v.Text = providerLabel(a, r.Provider) + " · " + r.Model
+		v.Text = providerLabel(a, r.Provider) + " · " + r.Model + v.ThinkingText
 	}
 	err := a.checkModelRef(r, where)
+	if thinkingErr != nil {
+		err = thinkingErr
+	}
 	v.Available = err == nil
 	if err != nil {
 		v.Error = err.Error()
@@ -380,7 +452,7 @@ func (a *App) refView(r ModelRef, mode, source, where string) ModelRefView {
 func (a *App) globalSettingsView() ModelRefView {
 	ref := a.globalDefaultRef()
 	if ref.Empty() {
-		return ModelRefView{Source: "全局默认模型", Error: "未设置：请选一个渠道 + 模型"}
+		return ModelRefView{Source: "全局默认模型", Thinking: ref.Thinking, Error: "未设置：请选一个渠道 + 模型"}
 	}
 	return a.refView(ref, "", "全局默认模型", whereGlobalDefault)
 }
@@ -390,7 +462,7 @@ func (a *App) globalSettingsView() ModelRefView {
 // 默认模型）——界面上直接把这个值写出来，用户不必自己推。
 func (a *App) dispatchSettingsView() map[string]any {
 	if ref, custom := a.dispatchDefaultRef(); custom {
-		return map[string]any{"mode": "custom", "ref": a.refView(ref, "", "派发任务默认模型", whereDispatchDefault)}
+		return map[string]any{"mode": "custom", "thinking": a.Cfg.DispatchModel.Thinking, "ref": a.refView(ref, "", "派发任务默认模型", whereDispatchDefault)}
 	}
 	follow := ModelRef{}
 	source := "跟随主会话"
@@ -401,11 +473,13 @@ func (a *App) dispatchSettingsView() map[string]any {
 		follow = a.globalDefaultRef()
 		source = "跟随主会话（主对话未手选 → 全局默认模型）"
 	}
-	v := a.refView(follow, "", source, whereGlobalDefault)
+	follow.Thinking = a.Cfg.DispatchModel.Thinking
+	v := a.refView(follow, "", source, whereDispatchDefault)
+	v.Thinking = a.Cfg.DispatchModel.Thinking
 	if follow.Empty() {
 		v.Error = "未设置：主对话未手选模型，全局默认模型也没设"
 	}
-	return map[string]any{"mode": "follow", "ref": v}
+	return map[string]any{"mode": "follow", "thinking": a.Cfg.DispatchModel.Thinking, "ref": v}
 }
 
 // todoModelView 待办卡片「模型：…（生效：…）」那行的数据：三档取值链算出来
@@ -428,6 +502,7 @@ func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
 	if ref.Empty() {
 		ref = a.globalDefaultRef() // 落到全局默认：卡片显示它此刻的值
 	}
+	ref.Thinking = custom.Thinking // 模型来源与档位来源独立
 	return a.refView(ref, m, source, whereTodoCard)
 }
 
@@ -437,6 +512,12 @@ func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
 // 只校验格式并补齐 Key 归属，不拦可用性——不可用的选择由界面红字说明，派发时
 // 按「不回落」报错。dispatchFollow=true 表示派发默认模型是「跟随主会话」（存空）。
 func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollow bool) error {
+	if err := validateDefaultThinking(global.Thinking); err != nil {
+		return err
+	}
+	if err := validateDefaultThinking(dispatch.Thinking); err != nil {
+		return err
+	}
 	g := a.withKey(global)
 	if g.Provider != "" && g.Model == "" {
 		return fmt.Errorf("全局默认模型只选了渠道、没选模型：请到%s选全", whereGlobalDefault)
@@ -444,7 +525,7 @@ func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollo
 	if g.Model != "" && g.Provider == "" {
 		return fmt.Errorf("全局默认模型只选了模型、没选渠道：请到%s选全", whereGlobalDefault)
 	}
-	var d ModelRef
+	d := ModelRef{Thinking: dispatch.Thinking}
 	if !dispatchFollow {
 		d = a.withKey(dispatch)
 		if !d.Complete() {
@@ -499,8 +580,9 @@ func (a *App) handleDefaultModelsGet(w http.ResponseWriter, r *http.Request) {
 	defaultModelsSaveMu.Lock()
 	defer defaultModelsSaveMu.Unlock()
 	writeJSON(w, 200, map[string]any{
-		"global":   a.globalSettingsView(),
-		"dispatch": a.dispatchSettingsView(),
+		"thinkingLevels": thinkingLevels(),
+		"global":         a.globalSettingsView(),
+		"dispatch":       a.dispatchSettingsView(),
 	})
 }
 
@@ -551,8 +633,9 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 	a.Cfg.DefaultModel, a.Cfg.DispatchModel = next.DefaultModel, next.DispatchModel
 	a.broadcast(Event{Type: "providers"})
 	writeJSON(w, 200, map[string]any{
-		"global":   a.globalSettingsView(),
-		"dispatch": a.dispatchSettingsView(),
+		"thinkingLevels": thinkingLevels(),
+		"global":         a.globalSettingsView(),
+		"dispatch":       a.dispatchSettingsView(),
 	})
 }
 

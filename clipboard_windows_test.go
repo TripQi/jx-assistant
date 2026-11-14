@@ -57,7 +57,7 @@ func TestDibToPNG24BppBottomUp(t *testing.T) {
 		{255, 0, 0, 255, 255, 255}, // y=1: (0,1)蓝 (1,1)白
 		{0, 0, 255, 0, 255, 0},     // y=0: (0,0)红 (1,0)绿
 	})
-	p := dibToPNG(dib)
+	p, _ := dibToPNG(dib)
 	if p == nil {
 		t.Fatal("24bpp DIB 转换返回 nil")
 	}
@@ -80,7 +80,7 @@ func TestDibToPNG32BppAlphaUnusedIsOpaque(t *testing.T) {
 	dib := buildDIB(40, 1, -1, 32, 0, nil, [][]byte{
 		{255, 0, 0, 0}, // 蓝，alpha 字节 0
 	})
-	p := dibToPNG(dib)
+	p, _ := dibToPNG(dib)
 	if p == nil {
 		t.Fatal("32bpp BI_RGB DIB 转换返回 nil")
 	}
@@ -98,7 +98,7 @@ func TestDibToPNGV5BitFieldsWithAlpha(t *testing.T) {
 	px := make([]byte, 4)
 	le.PutUint32(px, 0x80FF4020) // r=0x20 g=0x40 b=0xFF a=0x80
 	dib := buildDIB(124, 1, -1, 32, 3, &masks, [][]byte{px})
-	p := dibToPNG(dib)
+	p, _ := dibToPNG(dib)
 	if p == nil {
 		t.Fatal("V5 BI_BITFIELDS DIB 转换返回 nil")
 	}
@@ -109,17 +109,17 @@ func TestDibToPNGV5BitFieldsWithAlpha(t *testing.T) {
 }
 
 func TestDibToPNGUnsupported(t *testing.T) {
-	if got := dibToPNG([]byte{1, 2, 3}); got != nil {
+	if got, _ := dibToPNG([]byte{1, 2, 3}); got != nil {
 		t.Errorf("截断输入应返回 nil，得到 %d 字节", len(got))
 	}
 	// 8bpp 调色板形态：不支持，返回 nil（前端退回文本路径）
 	dib := buildDIB(40, 1, 1, 8, 0, nil, [][]byte{{0}})
-	if got := dibToPNG(dib); got != nil {
+	if got, _ := dibToPNG(dib); got != nil {
 		t.Errorf("8bpp DIB 应返回 nil，得到 %d 字节", len(got))
 	}
 	// 行数据不足：nil
 	dib = buildDIB(40, 4, 4, 24, 0, nil, [][]byte{{0, 0, 255}})
-	if got := dibToPNG(dib); got != nil {
+	if got, _ := dibToPNG(dib); got != nil {
 		t.Errorf("数据截断应返回 nil，得到 %d 字节", len(got))
 	}
 }

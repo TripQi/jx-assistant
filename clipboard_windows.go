@@ -142,13 +142,21 @@ func readClipboardWindows() (text string, png []byte, files []string, err error)
 		png = clipBytes(fid)
 	}
 	if len(png) == 0 {
+		var dibErr error
 		for _, cf := range []uintptr{cfDIBV5, cfDIB} { // V5 信息更全，优先
 			if b := clipBytes(cf); len(b) > 0 {
-				if p := dibToPNG(b); p != nil {
+				p, decodeErr := dibToPNG(b)
+				if decodeErr != nil {
+					dibErr = decodeErr
+				}
+				if p != nil {
 					png = p
 					break
 				}
 			}
+		}
+		if len(png) == 0 && dibErr != nil {
+			return text, nil, files, dibErr
 		}
 	}
 	return text, png, files, nil
@@ -170,35 +178,61 @@ func maskShift(m uint32) (int, bool) {
 	return s, m == 0
 }
 
-// dibToPNG 把 CF_DIB/CF_DIBV5 的设备无关位图转成 PNG。只处理 24/32bpp 无压缩
-// （BI_RGB）与 BI_BITFIELDS 掩码（GDI+/截图工具的常见形态）；32bpp 没有显式
+// dibChannel 把连续掩码位段归一到 PNG 的 8 位通道，避免宽通道直接截断。
+func dibChannel(v, mask uint32, shift int) uint8 {
+	return uint8((uint64((v&mask)>>shift)*255 + uint64(mask>>shift)/2) / uint64(mask>>shift))
+}
+
+// dibToPNG 把 CF_DIB/CF_DIBV5 的设备无关位图转成 PNG。只处理 24/32bpp BI_RGB
+// 与 32bpp BI_BITFIELDS/BI_ALPHABITFIELDS 掩码；32bpp 没有显式
 // alpha 掩码时按不透明处理——GDI DIB 的第四字节常是 0x00 未用，照搬会把整张
-// 图变全透明。其余形态（调色板、RLE 压缩等）返回 nil，让「粘贴」退回文本。
-func dibToPNG(dib []byte) []byte {
+// 图变全透明。其余形态（调色板、RLE 压缩等）返回 nil, nil，让「粘贴」退回文本。
+// 已支持形态的数据残缺、尺寸异常或超过预算时返回明确错误。
+var (
+	errDIBIncomplete = errors.New("剪贴板位图数据不完整")
+	errDIBDimensions = errors.New("剪贴板位图宽高无效")
+	errDIBBudget     = errors.New("剪贴板位图超过解码预算（最多 16777216 像素、67108864 字节）")
+)
+
+const (
+	maxDIBPixels = 16 * 1024 * 1024
+	maxDIBBytes  = 64 * 1024 * 1024
+)
+
+func dibToPNG(dib []byte) ([]byte, error) {
 	le := binary.LittleEndian
 	if len(dib) < 40 {
-		return nil
+		return nil, errDIBIncomplete
 	}
 	sz := le.Uint32(dib[0:4])
 	switch sz {
 	case 40, 52, 56, 108, 124: // BITMAPINFOHEADER 及其扩展、BITMAPV5HEADER
 	default:
-		return nil
+		return nil, nil
 	}
-	w := int(int32(le.Uint32(dib[4:8])))
-	hv := int(int32(le.Uint32(dib[8:12])))
+	if uint64(sz) > uint64(len(dib)) {
+		return nil, errDIBIncomplete
+	}
+	w := int64(int32(le.Uint32(dib[4:8])))
+	hv := int64(int32(le.Uint32(dib[8:12])))
 	topDown := hv < 0
 	if topDown {
 		hv = -hv
 	}
 	if w <= 0 || hv <= 0 || w > 20000 || hv > 20000 {
-		return nil
+		return nil, errDIBDimensions
 	}
 	bpp := int(le.Uint16(dib[14:16]))
 	comp := le.Uint32(dib[16:20])
 	if bpp != 24 && bpp != 32 {
-		return nil
+		return nil, nil
 	}
+	// 在检查数据长度和分配图像前，用 64 位算术限制输入像素与解码内存。
+	stride64 := (w*int64(bpp)/8 + 3) &^ 3
+	if w*hv > maxDIBPixels || stride64*hv > maxDIBBytes || w*hv*4 > maxDIBBytes || len(dib) > maxDIBBytes {
+		return nil, errDIBBudget
+	}
+	width, height, stride := int(w), int(hv), int(stride64)
 	// 像素区起点：头之后（BI_BITFIELDS 且是 40 字节老头时，掩码跟在头后面）
 	off := int(sz)
 	var rm, gm, bm, am uint32
@@ -206,58 +240,71 @@ func dibToPNG(dib []byte) []byte {
 	case 0: // BI_RGB：BGR(X) 固定排布；32bpp 的第四字节按未用处理（不透明）
 		rm, gm, bm = 0xFF0000, 0xFF00, 0xFF
 		am = 0
-	case 3: // BI_BITFIELDS：老头的 3/4 个掩码在头后，V5 头的掩码在头内
+	case 3, 6: // BI_BITFIELDS / BI_ALPHABITFIELDS（后者明确声明四个外置掩码）
+		if bpp != 32 {
+			return nil, nil
+		}
 		if sz == 40 {
-			if len(dib) < off+12 {
-				return nil
+			n := 12
+			if comp == 6 {
+				n = 16
+			}
+			if len(dib)-off < n {
+				return nil, errDIBIncomplete
 			}
 			rm, gm, bm = le.Uint32(dib[off:off+4]), le.Uint32(dib[off+4:off+8]), le.Uint32(dib[off+8:off+12])
-			if len(dib) >= off+16 {
+			if comp == 6 {
 				am = le.Uint32(dib[off+12 : off+16])
 			}
-			off += 12
+			off += n
 		} else {
-			rm, gm, bm, am = le.Uint32(dib[40:44]), le.Uint32(dib[44:48]), le.Uint32(dib[48:52]), le.Uint32(dib[52:56])
+			rm, gm, bm = le.Uint32(dib[40:44]), le.Uint32(dib[44:48]), le.Uint32(dib[48:52])
+			// 52 字节头到蓝掩码为止；不能把其后的首像素借作 alpha。
+			if sz >= 56 {
+				am = le.Uint32(dib[52:56])
+			}
+		}
+		if comp == 6 && am == 0 {
+			return nil, errors.New("剪贴板位图缺少 alpha 掩码")
 		}
 	default:
-		return nil
+		return nil, nil
 	}
 	rs, ok1 := maskShift(rm)
 	gs, ok2 := maskShift(gm)
 	bs, ok3 := maskShift(bm)
-	if !ok1 || !ok2 || !ok3 {
-		return nil
+	if !ok1 || !ok2 || !ok3 || rm&gm != 0 || rm&bm != 0 || gm&bm != 0 {
+		return nil, errors.New("剪贴板位图颜色掩码无效")
 	}
 	as, ok4 := maskShift(am)
 	if am == 0 {
 		ok4 = true // 没有 alpha 掩码：不透明
 	}
-	if !ok4 {
-		return nil
+	if !ok4 || am&(rm|gm|bm) != 0 {
+		return nil, errors.New("剪贴板位图 alpha 掩码无效")
 	}
-	stride := (w*bpp/8 + 3) &^ 3
-	if len(dib) < off+stride*hv {
-		return nil
+	if stride*height > len(dib)-off {
+		return nil, errDIBIncomplete
 	}
-	img := image.NewNRGBA(image.Rect(0, 0, w, hv))
-	for y := 0; y < hv; y++ {
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
 		src := y
 		if !topDown { // 默认存储自下而上，翻成自上而下
-			src = hv - 1 - y
+			src = height - 1 - y
 		}
 		row := dib[off+src*stride:]
-		for x := 0; x < w; x++ {
+		for x := 0; x < width; x++ {
 			var r, g, b, a uint8 = 0, 0, 0, 255
 			if bpp == 24 {
 				p := row[x*3:]
 				b, g, r = p[0], p[1], p[2]
 			} else {
 				v := le.Uint32(row[x*4:])
-				r = uint8((v & rm) >> rs)
-				g = uint8((v & gm) >> gs)
-				b = uint8((v & bm) >> bs)
+				r = dibChannel(v, rm, rs)
+				g = dibChannel(v, gm, gs)
+				b = dibChannel(v, bm, bs)
 				if am != 0 {
-					a = uint8((v & am) >> as)
+					a = dibChannel(v, am, as)
 				}
 			}
 			q := img.Pix[y*img.Stride+x*4:]
@@ -266,7 +313,7 @@ func dibToPNG(dib []byte) []byte {
 	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
-		return nil
+		return nil, err
 	}
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }

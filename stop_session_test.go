@@ -69,8 +69,10 @@ func mkSession(t *testing.T, a *App, id, title, mode, dispatchedBy string) *Sess
 func TestStopSessionStopsRunningSession(t *testing.T) {
 	a, main := newDispatchTestApp(t)
 	base, reached := hangChannel(t)
-	a.Cfg.Providers = []ProviderCfg{{ID: "hang", Name: "挂起渠道", BaseURL: base,
+	a.Cfg.Providers = []ProviderCfg{{ID: "hang", Name: "挂起渠道", BaseURL: base, APIKey: "test-key",
 		Models: []ModelCfg{{ID: "hang-1"}}}}
+	// 替换渠道时同步默认指向，保证任务实际请求本机假渠道，而非公共夹具的 mock 模型。
+	a.Cfg.DefaultModel = ModelRef{Provider: "hang", Model: "hang-1"}
 	sub := mkSession(t, a, "t-run", "在跑的任务", "task", main.ID)
 
 	// 与派发工具同一条投递路径把任务跑起来：deliverToSession 占住执行权 → runSubAgent

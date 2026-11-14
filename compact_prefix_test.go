@@ -88,7 +88,7 @@ func TestDoSummarizeRequestShape(t *testing.T) {
 		hops = append(hops, req.Messages)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer srv.Close()
 
@@ -158,8 +158,8 @@ func TestDoSummarizeRequestShape(t *testing.T) {
 // 第二跳正文返回。第二跳请求的前缀与第一跳逐字节一致（只 append 不改写——
 // 缓存依然全命中）。连续两跳都调工具则报错。
 func TestCallSummarizerToolCallRetry(t *testing.T) {
-	toolChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
-	textChunk := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\ndata: [DONE]\n\n"
+	toolChunk := "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+	textChunk := "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\ndata: [DONE]\n\n"
 	summaryText := strings.Repeat("摘", 60)
 
 	run := func(t *testing.T, replySeq []string) (summary string, err error, hops [][]map[string]any) {
@@ -263,9 +263,9 @@ func sseUsage(prompt, cached, completion int) string {
 // 每一跳都是一次真实模型调用，就各记一条 usage_events（purpose=compact）：
 // 两跳漏记一条，压缩开销就漏账。顺带看护审计行的 hop 标记。
 func TestSummarizerHopsMeterUsage(t *testing.T) {
-	toolChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+	toolChunk := "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n" +
 		sseUsage(1000, 900, 12)
-	textChunk := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\n" +
+	textChunk := "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"" + strings.Repeat("摘", 60) + "\"}}]}\n\n" +
 		sseUsage(1200, 1150, 80)
 	var mu sync.Mutex
 	n := 0
@@ -364,7 +364,7 @@ func TestSummarizerHopsMeterUsage(t *testing.T) {
 // 摘要过短 fail-closed（DSH 同款）：半截摘要比没有更危险，宁可报错不落库，
 // 会话上下文保持原样可重试。
 func TestSummarizeFailClosedShort(t *testing.T) {
-	shortChunk := "data: {\"choices\":[{\"delta\":{\"content\":\"记了几笔。\"}}]}\n\n" + sseUsage(800, 0, 5)
+	shortChunk := "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"记了几笔。\"}}]}\n\n" + sseUsage(800, 0, 5)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(shortChunk))

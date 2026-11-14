@@ -68,6 +68,11 @@ func TestSummarizerReasoningRoundTrip(t *testing.T) {
 				} else {
 					send(map[string]any{"content": strings.Repeat("完整摘要。", 20)})
 				}
+				reason := "stop"
+				if hop == 0 || tc.secondTool {
+					reason = "tool_calls"
+				}
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":%q}]}\n\n", reason)
 				fmt.Fprint(w, "data: [DONE]\n\n")
 			}))
 			defer srv.Close()

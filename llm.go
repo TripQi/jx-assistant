@@ -123,10 +123,18 @@ func (r *ChatRequest) ApplyThinking(level string) {
 	r.ReasoningEffort = lv
 }
 
+// StreamCompletion 只暴露结束状态，不改变通用调用的文本/思考/工具回传。
+// Ended 表示收到协议终止标记；Reason 为空或未知时调用方不得假定完整。
+type StreamCompletion struct {
+	Reason string
+	Ended  bool
+}
+
 // StreamCallbacks 把流式输出回调给调用方：思考增量、正文增量、完整的工具调用
 // 与流尾的用量统计（DeepSeek/GLM 等兼容网关在最后一个 chunk 附带 usage，
 // 含各形态的前缀缓存命中量，见 Usage.CacheHit）。
 type StreamCallbacks struct {
+	OnCompletion func(StreamCompletion)
 	// OnOutputItem 收集协议原生回传对象，不能由展示用推理文本重建。
 	OnOutputItem func(protocol string, item json.RawMessage)
 	OnText       func(string)
@@ -871,6 +879,7 @@ func parseSSE(r io.Reader, cb StreamCallbacks) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1024*1024), 8*1024*1024)
 	acc := map[int]*ToolCall{}
+	completion := StreamCompletion{}
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || !strings.HasPrefix(line, "data:") {
@@ -878,6 +887,7 @@ func parseSSE(r io.Reader, cb StreamCallbacks) error {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			completion.Ended = true
 			break
 		}
 		var chunk streamChunk
@@ -885,6 +895,9 @@ func parseSSE(r io.Reader, cb StreamCallbacks) error {
 			continue
 		}
 		for _, ch := range chunk.Choices {
+			if reason, ok := ch.FinishReason.(string); ok && reason != "" {
+				completion.Reason = reason
+			}
 			if ch.Delta.Content != "" && cb.OnText != nil {
 				cb.OnText(ch.Delta.Content)
 			}
@@ -916,6 +929,9 @@ func parseSSE(r io.Reader, cb StreamCallbacks) error {
 	}
 	if err := sc.Err(); err != nil {
 		return err
+	}
+	if cb.OnCompletion != nil {
+		cb.OnCompletion(completion)
 	}
 	indexes := make([]int, 0, len(acc))
 	for i := range acc {

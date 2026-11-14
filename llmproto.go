@@ -418,6 +418,7 @@ type anthropicStreamEvent struct {
 		Text        string `json:"text"`
 		Thinking    string `json:"thinking"`
 		Signature   string `json:"signature"`
+		StopReason  string `json:"stop_reason"`
 		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 	Usage *anthropicUsageEvent `json:"usage"` // message_delta 携带
@@ -445,6 +446,9 @@ func parseAnthropicSSE(r io.Reader, cb StreamCallbacks) error {
 		return err
 	}
 	agg.finish()
+	if cb.OnCompletion != nil {
+		cb.OnCompletion(agg.completion)
+	}
 	return agg.err
 }
 
@@ -457,6 +461,8 @@ type anthropicStreamAgg struct {
 	blocks   map[int]*anthropicToolAgg // content_block index → 聚合中的 tool_use
 	order    []int                     // 工具块出现的先后（回调按序）
 	err      error
+
+	completion StreamCompletion
 }
 
 type anthropicToolAgg struct {
@@ -518,6 +524,9 @@ func (a *anthropicStreamAgg) event(ev anthropicStreamEvent) error {
 		}
 		a.flushTool(ev.Index)
 	case "message_delta":
+		if ev.Delta.StopReason != "" {
+			a.completion.Reason = ev.Delta.StopReason
+		}
 		// 流尾 usage：output_tokens 为最终值；缓存字段 message_start 已带，取最大
 		if ev.Usage != nil {
 			a.hasUsage = true
@@ -535,6 +544,7 @@ func (a *anthropicStreamAgg) event(ev anthropicStreamEvent) error {
 			}
 		}
 	case "message_stop":
+		a.completion.Ended = true
 		// 收尾在 finish 统一做（流可能缺 message_stop，也能把工具块扫出来）
 	case "error":
 		if ev.Error != nil && ev.Error.Message != "" {
@@ -942,6 +952,9 @@ func (a *responsesStreamAgg) event(ev responsesStreamEvent) error {
 			a.flushTool(t)
 		}
 	case ev.Type == "response.completed":
+		if a.cb.OnCompletion != nil {
+			a.cb.OnCompletion(StreamCompletion{Reason: "completed", Ended: true})
+		}
 		if ev.Response != nil && ev.Response.Usage != nil {
 			u := *ev.Response.Usage
 			a.usage = &Usage{
@@ -952,6 +965,9 @@ func (a *responsesStreamAgg) event(ev responsesStreamEvent) error {
 			}
 		}
 	case ev.Type == "response.failed":
+		if a.cb.OnCompletion != nil {
+			a.cb.OnCompletion(StreamCompletion{Reason: "failed", Ended: true})
+		}
 		msg := "响应失败"
 		if ev.Response != nil && ev.Response.Error != nil && ev.Response.Error.Message != "" {
 			msg = ev.Response.Error.Message
@@ -968,6 +984,9 @@ func (a *responsesStreamAgg) event(ev responsesStreamEvent) error {
 			reason = ev.Response.IncompleteDetails.Reason
 		}
 		a.err = fmt.Errorf("模型输出不完整（%s），可重试或调大最大输出", reason)
+		if a.cb.OnCompletion != nil {
+			a.cb.OnCompletion(StreamCompletion{Reason: reason, Ended: true})
+		}
 		return a.err
 	case ev.Type == "error":
 		msg := "流中报错"

@@ -11,10 +11,12 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	neturl "net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -291,16 +293,17 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 	if altFirst {
 		first, second = alt, primary
 	}
-	err = streamProtoOnce(ctx, first, target.APIKey, body, proto, cb)
+	attemptsLeft := connRetryMaxAttempts
+	err = streamProtoOnceBudget(ctx, first, target.APIKey, body, proto, cb, &attemptsLeft)
 	if err == nil {
 		markAltPreferred(target, first == alt && alt != "")
 		return nil
 	}
-	if second == "" || !isConnFailure(err) || ctx.Err() != nil {
+	if second == "" || !isConnFailure(err) || ctx.Err() != nil || attemptsLeft == 0 {
 		return err
 	}
-	log.Printf("[模型] %s 连接失败，改走备用地址 %s", first, second)
-	err2 := streamProtoOnce(ctx, second, target.APIKey, body, proto, cb)
+	log.Printf("[模型] %s 连接失败，改走备用地址 %s", safeConnURL(first), safeConnURL(second))
+	err2 := streamProtoOnceBudget(ctx, second, target.APIKey, body, proto, cb, &attemptsLeft)
 	if err2 == nil {
 		markAltPreferred(target, second == alt && alt != "")
 		return nil
@@ -412,6 +415,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// connRetryMaxAttempts 封顶一次 StreamChat 的主备合计尝试，不随故障类型切换重置。
+const connRetryMaxAttempts = 16
+
 // streamProtoOnce 向单个地址发一轮流式请求（StreamChat 的主/备用共用体，
 // 三种协议共用：端点路径、鉴权头与流解析都来自 proto）。
 //
@@ -427,7 +433,13 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 这里；域名解析/证书也不重试（同一地址立刻重试结果一样）。
 // ctx 取消（用户点停止/插话）导致的失败压根不包成 connFailure（见 streamProtoTry），
 // 且每一步等待都走 sleepCtx：取消立即放弃，不睡满。
+// 两类阶梯分别累计，主备共享 connRetryMaxAttempts 上限。
 func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks) error {
+	attemptsLeft := connRetryMaxAttempts
+	return streamProtoOnceBudget(ctx, baseURL, apiKey, body, proto, cb, &attemptsLeft)
+}
+
+func streamProtoOnceBudget(ctx context.Context, baseURL, apiKey string, body []byte, proto llmProtocol, cb StreamCallbacks, attemptsLeft *int) error {
 	url := baseURL + proto.path
 	// 拨号目标：端点地址的 host:port（也就是 target.BaseURL 的 host:port）。
 	// 只用于报错细节，不参与请求构造——不为此改任何签名。
@@ -439,14 +451,21 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 	// 多少时间」算（见 connRetryTimeoutBudget），而不只是待等退避时长。
 	attemptStart := time.Now()
 	var err error
-	for i := 0; ; i++ {
+	var transientRetries, timeoutRetries int
+	for {
+		(*attemptsLeft)--
 		err = streamProtoTry(ctx, url, target, apiKey, body, proto, cb)
 		var cf *connFailure
 		if !errors.As(err, &cf) || ctx.Err() != nil {
 			return err
 		}
 		delays := cf.retryDelays()
-		if len(delays) == 0 || i >= len(delays) { // 不重试 / 阶梯跑完：交给 StreamChat 定要不要切备用地址
+		retries := &transientRetries
+		if cf.timeout {
+			retries = &timeoutRetries
+		}
+		i := *retries
+		if len(delays) == 0 || i >= len(delays) || *attemptsLeft == 0 { // 分类型阶梯与全调用上限均不重置
 			return err
 		}
 		delay := delays[i]
@@ -459,11 +478,20 @@ func streamProtoOnce(ctx context.Context, baseURL, apiKey string, body []byte, p
 		}
 		log.Printf("[模型] %s 拨号失败（%s），%s 后重试同一地址（第 %d/%d 次重试）",
 			target, cf.kind, delay, i+1, len(delays))
+		(*retries)++
 		if !sleepCtx(ctx, delay) {
 			return err // ctx 取消：立即退出（不睡满），也不再多试
 		}
 	}
 }
+
+// submittedRequestError 表示请求可能已被处理，禁止本地址、备用地址及整步重发。
+type submittedRequestError struct{ detail *connFailure }
+
+func (e *submittedRequestError) Error() string {
+	return "请求体已完整写出，等待响应头阶段失败；服务端可能已处理，未自动重发：" + connErrText(e.detail)
+}
+func (e *submittedRequestError) Unwrap() error { return e.detail.err }
 
 // streamProtoTry 向一个地址实发一次请求：构造请求 → 拨号/收响应头 → 状态码
 // 检查 → 解流。连接失败时把现场（拨号目标、原始错误、代理形态、耗时）一并
@@ -475,6 +503,14 @@ func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	proto.setAuth(apiKey, httpReq.Header)
+	var bodyWritten atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				bodyWritten.Store(true)
+			}
+		},
+	}))
 	started := time.Now()
 	resp, err := streamHTTP.Do(httpReq)
 	if err != nil {
@@ -484,7 +520,11 @@ func streamProtoTry(ctx context.Context, url, target, apiKey string, body []byte
 		if ctx.Err() != nil {
 			return err // 调用方取消：原样返回，不算连接故障，也不重试
 		}
-		return newConnFailure(httpReq, target, started, err)
+		cf := newConnFailure(httpReq, target, started, err)
+		if bodyWritten.Load() {
+			return &submittedRequestError{detail: cf}
+		}
+		return cf
 	}
 	// 登记强制断开器（停止看门狗用）：拿到响应体后交出一个可直接关闭它的
 	// abort；流结束（正常收尾/出错/ctx 取消）时回调 OnBody(nil) 注销，登记表
@@ -549,7 +589,9 @@ func upstreamErrText(status int, body []byte) string {
 // 「耗时」挤出去了，而这两项恰恰是排障时最要紧的。
 const (
 	connErrDetailMax = 260
-	connErrRawMax    = 200
+	connErrRawMax    = 130
+	connErrTargetMax = 50
+	connErrProxyMax  = 45
 )
 
 // connErrText 把一次连接失败整理成一行文案：一句人话在前，括号里挂底层细节
@@ -567,10 +609,10 @@ func connErrText(e *connFailure) string {
 	}
 	var parts []string
 	if e.target != "" {
-		parts = append(parts, "拨号 "+e.target+" 失败")
+		parts = append(parts, "拨号 "+truncateRunes(e.target, connErrTargetMax)+" 失败")
 	}
 	if e.err != nil {
-		if raw := strings.Join(strings.Fields(e.err.Error()), " "); raw != "" {
+		if raw := strings.Join(strings.Fields(connUnderlyingError(e.err).Error()), " "); raw != "" {
 			parts = append(parts, truncateRunes(raw, connErrRawMax))
 		}
 	}
@@ -581,12 +623,32 @@ func connErrText(e *connFailure) string {
 		parts = append(parts, fmt.Sprintf("耗时 %dms", ms))
 	}
 	if e.proxy != "" {
-		parts = append(parts, e.proxy)
+		parts = append(parts, truncateRunes(e.proxy, connErrProxyMax))
 	}
 	if len(parts) == 0 {
 		return kind
 	}
 	return kind + "（" + truncateRunes(strings.Join(parts, "；"), connErrDetailMax) + "）"
+}
+
+// connUnderlyingError 不把 url.Error 自带的完整请求 URL 带入公开诊断。
+func connUnderlyingError(err error) error {
+	for {
+		var ue *neturl.Error
+		if !errors.As(err, &ue) || ue.Err == nil {
+			return err
+		}
+		err = ue.Err
+	}
+}
+
+// safeConnURL 只保留地址的公开来源，userinfo、路径、查询与 fragment 均不展示。
+func safeConnURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[地址已隐藏]"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // newConnFailure 记一次连接失败的全部现场。诊断本机 TUN + fake-ip 代理栈瞬断
@@ -679,7 +741,7 @@ var proxyFromEnv = http.ProxyFromEnvironment
 func proxyDesc(req *http.Request) string {
 	pu, err := proxyFromEnv(req)
 	if err != nil {
-		return "代理配置有误：" + truncateRunes(strings.Join(strings.Fields(err.Error()), " "), 80)
+		return "代理配置有误（地址已隐藏）"
 	}
 	if pu == nil {
 		return "未经代理"
@@ -753,6 +815,10 @@ func isModelUnavailableErr(err error) bool {
 // 被取消的请求本来也不该重试（与原先一样不重试，既有语义不变）。
 func isRetryableModelErr(err error) bool {
 	if err == nil || isOverflowError(err) {
+		return false
+	}
+	var submitted *submittedRequestError
+	if errors.As(err, &submitted) {
 		return false
 	}
 	s := err.Error()

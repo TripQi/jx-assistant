@@ -417,19 +417,28 @@ func TestAssistantCompactWithinBudgetIsNoop(t *testing.T) {
 	}
 }
 
-// 摘要指令按会话模式二选一：数字助理主对话用专属指令（记住用户偏好与长期
-// 约定），其他会话沿用通用指令。
-func TestSummarizeInstructionForMode(t *testing.T) {
-	ast := summarizeInstructionFor(&SessionMeta{Mode: "assistant"})
+// 摘要小节按会话模式二选一：数字助理主对话用专属小节（记住用户偏好与长期
+// 约定），其他会话沿用通用六节小节（“下一步”节已拍板去掉）。
+func TestSummarizeSectionsForMode(t *testing.T) {
+	ast := summarizeSectionsFor(&SessionMeta{Mode: "assistant"})
 	if !strings.Contains(ast, "用户偏好与习惯") || !strings.Contains(ast, "长期有效的约定") {
-		t.Fatalf("数字助理主对话应用专属指令, got %q", ast)
+		t.Fatalf("数字助理主对话应用专属小节, got %q", ast)
 	}
 	for _, mode := range []string{"task", "coding", "office", "aux", ""} {
-		if got := summarizeInstructionFor(&SessionMeta{Mode: mode}); got != summarizeInstruction {
-			t.Fatalf("mode=%q 应回退通用指令", mode)
+		if got := summarizeSectionsFor(&SessionMeta{Mode: mode}); got != summarizeSections {
+			t.Fatalf("mode=%q 应回退通用小节", mode)
 		}
 	}
-	if summarizeInstructionFor(nil) != summarizeInstruction {
-		t.Fatalf("nil 会话应回退通用指令")
+	if summarizeSectionsFor(nil) != summarizeSections {
+		t.Fatalf("nil 会话应回退通用小节")
+	}
+	// 六节拍板：新增两节在、不再设「下一步」节
+	for _, want := range []string{"用户指令与约束摘录", "关键决定", "进行中与未完成"} {
+		if !strings.Contains(summarizeSections, want) {
+			t.Fatalf("通用小节缺 %q", want)
+		}
+	}
+	if strings.Contains(summarizeSections, "/ 下一步") {
+		t.Fatalf("通用小节不该再设「下一步」节: %q", summarizeSections)
 	}
 }

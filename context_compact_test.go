@@ -183,7 +183,7 @@ func TestBuildContextAfterFold(t *testing.T) {
 	}
 	_ = call
 	_ = tool
-	msgs := a.buildContext(sess, "SYS")
+	msgs := a.buildContext(sess, "SYS", 0)
 	joined := ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -921,7 +921,7 @@ func TestCompactHistoryIndependentOfMode(t *testing.T) {
 	join := func(mode string) string {
 		a.Cfg.CompactMode = mode
 		var b strings.Builder
-		for _, m := range a.buildContext(sess, "SYS") {
+		for _, m := range a.buildContext(sess, "SYS", 0) {
 			if s, ok := m.Content.(string); ok {
 				b.WriteString(s + "\n")
 			}
@@ -972,7 +972,7 @@ func TestCompactHistoryIndependentOfMode(t *testing.T) {
 	seedRound(t, a, "s2", "新一轮", false) // seq 8-9，边界后原文
 	a.Cfg.CompactMode = "rule"
 	var b strings.Builder
-	for _, m := range a.buildContext(s2, "SYS") {
+	for _, m := range a.buildContext(s2, "SYS", 0) {
 		if s, ok := m.Content.(string); ok {
 			b.WriteString(s + "\n")
 		}
@@ -1014,7 +1014,7 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 		t.Fatalf("一级后调用行应为动作行: %q", got)
 	}
 	// 组装：折叠边界注入提示，位于折叠内容之后、三轮原文之前
-	msgs := a.buildContext(sess, "SYS")
+	msgs := a.buildContext(sess, "SYS", 0)
 	joined := ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -1057,7 +1057,7 @@ func TestSecondLevelFoldAndBoundaryNote(t *testing.T) {
 		t.Fatalf("已二级后重复点应报已折叠, got err=%v", err)
 	}
 	// 全折（三轮也折了）：提示缀在尾部，仍恰好 1 条
-	msgs = a.buildContext(sess, "SYS")
+	msgs = a.buildContext(sess, "SYS", 0)
 	joined = ""
 	for _, m := range msgs {
 		if s, ok := m.Content.(string); ok {
@@ -1096,7 +1096,7 @@ func TestCompactResendsFullEnvSnapshot(t *testing.T) {
 	seedRound(t, a, "s1", "三轮", false)
 	joinCtx := func() string {
 		joined := ""
-		for _, m := range a.buildContext(sess, "SYS") {
+		for _, m := range a.buildContext(sess, "SYS", 0) {
 			if s, ok := m.Content.(string); ok {
 				joined += s + "\n"
 			}

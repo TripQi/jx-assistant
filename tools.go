@@ -665,9 +665,9 @@ func (t *toolContext) readSection(it readItem) readSeg {
 	}
 	// end 是**含**的行号：limit 就是"最多读几行"（旧实现写成了 start+limit，
 	// 实际每次多返回一行，与工具描述不符；段头显示区间后这个偏差会直接露馅）。
-	end := start + limit - 1
-	if end > len(lines) {
-		end = len(lines)
+	end := len(lines)
+	if limit <= len(lines)-start {
+		end = start + limit - 1
 	}
 	seg.header = fmt.Sprintf("===== %s（第 %d-%d 行，共 %d 行）=====", seg.disp, start, end, len(lines))
 	seg.startLine = start

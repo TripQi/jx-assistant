@@ -100,6 +100,10 @@ func (m migration) checksum() string {
 // storeMigrations 是库结构的全部演进史，只允许在末尾追加。
 // 历史条目一经应用即被 checksum 冻结（改动会拒绝启动），
 // 新的结构变化一律新增条目，保持旧库可平滑升级。
+// 唯一的例外形态是**同号补插**（2026-11 上游与本仓库各用 0016：
+// 0016_message_covers_from 与 0016_thinking_six_levels 按编号邻着排）：
+// 账本按全串 id 记，老库只补跑缺的那一条，已记账的不会重跑；
+// 但既有条目一个字都不许改（改了就 checksum 不一致、拒绝启动）。
 var storeMigrations = []migration{
 	{
 		id: "0001_baseline",

@@ -2216,7 +2216,9 @@ func runReadImage(t *toolContext, args json.RawMessage) (string, error) {
 		return "", err
 	}
 	res := imageEnvelope(att, path)
-	if target, err := t.app.resolveTarget(t.sess); err != nil || !target.SupportsImages {
+	if target, err := t.app.resolveTarget(t.sess); err != nil {
+		res += "\n图片已入库并展示；当前模型不可用：" + err.Error()
+	} else if !target.SupportsImages {
 		res += "\n当前模型不支持图片，可使用OCR工具"
 	}
 	return fmt.Sprintf("%s\n来源文件：%s\n格式：%s，尺寸 %dx%d，%d 字节",

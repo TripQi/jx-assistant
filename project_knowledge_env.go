@@ -42,7 +42,7 @@ func (a *App) projectKnowledgeEnv(sess *SessionMeta) (string, error) {
 			if k.BudgetLimit > 0 {
 				percent = float64(used) / float64(k.BudgetLimit) * 100
 			}
-			body = fmt.Sprintf("# 项目知识库（仅适用于下述项目）\n- 项目：%s / %s\n- 当前工作区：%s\n- 知识版本：v%d\n- 更新时间：%s\n- 预算：%d / %d 单元（%.1f%%）\n- 有效性：本块整体替代早前项目知识，以当前版本为准；历史快照或摘要中的旧约束可能已失效，冲突须核实。\n\n%s\n", p.Name, p.ID, ws, k.Revision, k.UpdatedAt, used, k.BudgetLimit, percent, k.Content)
+			body = fmt.Sprintf("# 项目知识库（仅适用于下述项目）\n- 项目：%s / %s\n- 当前工作区：%s\n- 知识版本：v%d\n- 更新时间：%s\n- 预算：%d / %d 单元（%.1f%%）\n- 有效性：本块整体替代早前项目知识，以当前版本为准；历史快照或摘要中的旧约束可能已失效，冲突须核实。\n- 修订建议：工作会话和 aux 不可直接修改正文；仅在必要时向长期助理的任务回执或当前用户对话说明项目、依据版本、遗漏/冲突点、建议及事实依据；无须填写空模板。\n\n%s\n", p.Name, p.ID, ws, k.Revision, k.UpdatedAt, used, k.BudgetLimit, percent, k.Content)
 		} else if p == nil {
 			body += "- 当前工作区未登记项目；需要项目知识时请用户到设置页登记，当前任务可继续。\n"
 		}

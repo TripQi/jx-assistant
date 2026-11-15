@@ -308,9 +308,9 @@ func (a *App) userMemoryEnvBlock(sess *SessionMeta) string {
 	case "aux":
 		b.WriteString("- 记忆维护：记忆内容由用户在 设置 → AI 记忆与拟人化 维护（本会话为只读答疑，没有记忆读写能力）\n")
 	default:
-		b.WriteString("- 记忆维护：component_call 调组件 " + userMemoryComponentID + " 的两条能力——memory_query 查询全部字段、memory_update 更新「用户身份与喜好」段（即「用户身份与习惯、喜好」一项；了解到用户新的身份/偏好/习惯/项目背景时主动更新；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
+		b.WriteString("- 记忆维护：component_call 调组件 " + userMemoryComponentID + " 的两条能力——memory_query 查询全部字段、memory_update 更新「用户身份与喜好」段（即「用户身份与习惯、喜好」一项；了解到用户新的身份/偏好/习惯或跨项目偏好时主动更新；项目背景与项目约束归项目知识库，不写入用户记忆；整体替换式写入，先查再改；单次写入上限 1000 字，超长会报错，需精简后重试" + userMemoryScopeNote(sessionScoped) + "）；用户的名字与你的名字/身份由用户在 设置 → AI 记忆与拟人化 维护，不要改动\n")
 	}
-	return "# 用户记忆（用户与助手的长期设定，全部会话生效）\n" + b.String()
+	return "# 用户记忆（用户与助手的长期设定，全部会话生效）\n" + b.String() + "- 信息边界：这里只记用户身份、习惯、喜好和跨项目偏好；项目背景与有效约束归项目知识库。旧混合记忆不自动清空，先向用户列出项目专属片段，确认绑定并写入验证后，再经确认移除对应片段。\n"
 }
 
 // userMemoryScopeNote 会话独立人格时的附加说明（给模型交代读写的落点差异）：

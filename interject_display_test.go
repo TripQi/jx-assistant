@@ -30,6 +30,9 @@ function renderQueueDock() {}
 function renderMessages(msgs, view) { view.rendered = view.state.pendingSteer.map(p => p.id); }
 function pendingHint(view, text) { view.hint = text; }
 function clearQuote() {}
+function removeLive() {}
+function releaseOlder() {}
+function reloadMessagesSoon() {}
 function autoGrow() {}
 function clearSessionDraftLS(id) { cleared.push(id); }
 function clearSubDraftLS(id) { cleared.push(id); }
@@ -37,7 +40,7 @@ function clearSubDraftLS(id) { cleared.push(id); }
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"handleGlobalEvent", "applyPending", "sendMidrun"} {
+	for _, name := range []string{"handleGlobalEvent", "handleEvent", "reconcilePendingSteer", "applyPending", "sendMidrun"} {
 		src := string(raw)
 		start := strings.Index(src, "function "+name+"(")
 		if start < 0 {

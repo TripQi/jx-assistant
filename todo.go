@@ -600,21 +600,42 @@ func (s *todoScheduler) load() *TodoData {
 		}
 		return &TodoData{Version: todoDataVersion}
 	}
-	var d TodoData
-	if err := json.Unmarshal([]byte(raw), &d); err != nil {
-		log.Printf("[待办] 数据解析失败，按空清单重建（原文档仍留在库中 todo_bad 键下）: %v", err)
+	var decoded *TodoData
+	err := json.Unmarshal([]byte(raw), &decoded)
+	if err == nil {
+		switch {
+		case decoded == nil:
+			err = fmt.Errorf("文档根节点为 null，需要待办对象")
+		default:
+			for i, task := range decoded.Tasks {
+				if task == nil {
+					err = fmt.Errorf("tasks[%d] 为 null，需要任务对象", i)
+					break
+				}
+			}
+			if err == nil {
+				for i, record := range decoded.Records {
+					if record == nil {
+						err = fmt.Errorf("records[%d] 为 null，需要执行记录对象", i)
+						break
+					}
+				}
+			}
+		}
+	}
+	if err != nil {
+		log.Printf("[待办] 数据校验失败，使用空清单（原文保留在原键并备份到 todo_bad 时间戳键）: %v", err)
 		_ = s.app.Store.SetGlobalData(todoDataKey+"_bad_"+time.Now().Format("20060102150405"), raw)
 		return &TodoData{Version: todoDataVersion}
 	}
+	d := *decoded
 	if d.Tasks == nil {
 		d.Tasks = []*TaskItem{}
 	}
 	if d.Records == nil {
 		d.Records = []*RunRecord{}
 	}
-	if d.Version == 0 {
-		d.Version = todoDataVersion
-	}
+	// 未写版本/版本为 0 也是旧格式，必须先迁移，不能提前标成最新版。
 	s.migrateData(&d)
 	return &d
 }
@@ -877,7 +898,8 @@ type todoRequest struct {
 	Permission  string    `json:"permission"`
 	// 任务模型（仅 AI 任务）：modelMode = dispatch（跟随派发设置，默认）| global（全局
 	// 默认模型）| custom（指定渠道+模型，model 里给完整指向）。只传 modelMode 即可
-	// 换档；custom 必须带 model。
+	// 换档；custom 必须带 model。仅 update：只传 model 自动切 custom；
+	// 显式非 custom 档位忽略旧 model。
 	ModelMode string    `json:"modelMode,omitempty"`
 	Model     *ModelRef `json:"model,omitempty"`
 	Thinking  *string   `json:"thinking"` // nil 保留，空串明确清除
@@ -924,6 +946,7 @@ func (r todoRequest) normalize() (executor, dir, command, shell, perm, target st
 }
 
 // normalizeModel 归一三档「任务模型」字段：程序任务一律清空（它不经过模型）；
+// 非 custom 明确忽略 model，以兼容旧客户端切回跟随时仍携带旧指向；
 // custom 必须带完整的渠道+模型。返回存进 TaskItem 的模态与指向。
 func (r todoRequest) normalizeModel(executor string) (string, *ModelRef, error) {
 	if executor != execAssistant {
@@ -976,7 +999,7 @@ func (s *todoScheduler) create(r todoRequest) (*TaskView, error) {
 		return nil, err
 	}
 	modelMode, modelRef, err := r.normalizeModel(executor)
-	if executor == execAssistant && target != targetTask {
+	if executor == execAssistant && target != targetTask && normTodoModelMode(r.ModelMode) == todoModelCustom {
 		// 长期助理是既有会话：待办模型配置不生效，也不据此拦截保存。
 		modelMode, modelRef, err = normTodoModelMode(r.ModelMode), r.Model, nil
 	}
@@ -1093,14 +1116,19 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 			return nil, fmt.Errorf("程序任务没有「任务模型」（它不经过模型）")
 		}
 		merged := todoRequest{ModelMode: firstNonEmpty(r.ModelMode, next.ModelMode)}
+		// 部分更新只传 model 即指定模型；显式切回跟随时仍忽略旧指向。
+		if r.ModelMode == "" && r.Model != nil {
+			merged.ModelMode = todoModelCustom
+		}
 		if r.Model != nil {
 			merged.Model = r.Model
 		} else {
 			merged.Model = next.Model
 		}
 		mode, ref, err := merged.normalizeModel(next.Executor)
-		if next.Target != targetTask {
-			mode, ref, err = normTodoModelMode(merged.ModelMode), merged.Model, nil
+		if next.Target != targetTask && normTodoModelMode(merged.ModelMode) == todoModelCustom {
+			// 长期助理既有模型不受待办控制；仍保留其自选字段的兼容存储行为。
+			mode, ref, err = todoModelCustom, merged.Model, nil
 		}
 		if err != nil {
 			return nil, err
@@ -1112,6 +1140,7 @@ func (s *todoScheduler) update(r todoRequest) (*TaskView, error) {
 		next.ModelMode, next.Model = mode, ref
 	}
 	if next.Executor != execAssistant {
+		// 兼容部分更新：切类型无需重传模型；程序任务绝不保留 AI 专属字段。
 		next.ModelMode, next.Model, next.Thinking = "", nil, ""
 	}
 	next.UpdatedAt = time.Now().UnixMilli()

@@ -200,7 +200,19 @@ func (e *ContextEngine) toolChangeNote(sess *SessionMeta, defs []ToolDef) string
 // 用量记账（组件 usage-stats，二开保留）：每一跳都是一次真实的模型调用，
 // 就各自记一条 purpose=compact 的明细（成功失败都记）。两跳漏记一条，压缩
 // 开销就漏账；不把多跳合并成一条汇总，明细才能对上实际花销。
-func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools []ToolDef) (string, error) {
+func (e *ContextEngine) CallSummarizer(sess *SessionMeta, msgs []Message, tools []ToolDef) (out string, finalErr error) {
+	// 业务验收与逐跳费用是两套口径：结果只记一次，不能把已发生的调用费用抹掉。
+	defer func() {
+		outcome, detail := "success", "摘要生成验收成功（落库由调用方负责）"
+		p := map[string]any{"type": "ctx", "kind": "compact_outcome"}
+		if finalErr != nil {
+			outcome, detail = "failure", finalErr.Error()
+			p["error"] = finalErr.Error()
+		}
+		p["outcome"], p["detail"] = outcome, "compact_outcome="+outcome+"："+detail
+		e.Journal(sess, p)
+	}()
+
 	target, terr := e.app.resolveTarget(sess)
 	if terr != nil {
 		return "", terr // 模型不可用：如实报错，不让摘要悄悄走别的渠道

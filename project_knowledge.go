@@ -14,7 +14,21 @@ func init() {
 
 // 能力实现再次核验门控，避免宿主直调绕过 component_call 的公共门。
 func projectCapabilityContext(t *toolContext, write bool) error {
-	if t == nil || t.app == nil || t.sess == nil || t.sess.ID == "" || !projectReadableMode(t.sess.Mode) {
+	if t == nil || t.app == nil || t.app.Store == nil || t.sess == nil || t.sess.ID == "" {
+		return fmt.Errorf("缺少合法项目会话上下文或模式不支持")
+	}
+	fresh, err := t.app.Store.Get(t.sess.ID)
+	if err != nil || fresh == nil {
+		return fmt.Errorf("无法读取当前项目会话授权，拒绝访问")
+	}
+	mergeRunAuthorization(t.sess, fresh)
+	return projectCapabilitySessionContext(t, write)
+}
+
+// 只校验传入的权威快照；写事务可使用它，禁止在此重入 Store。
+// projectKnowledgeEnabled 仅查组件与会话覆盖内存注册表，不访问 Store。
+func projectCapabilitySessionContext(t *toolContext, write bool) error {
+	if !projectReadableMode(t.sess.Mode) {
 		return fmt.Errorf("缺少合法项目会话上下文或模式不支持")
 	}
 	if !t.app.projectKnowledgeEnabled(t.sess) {
@@ -174,14 +188,16 @@ func runProjectKnowledgeUpdate(t *toolContext, raw json.RawMessage) (string, err
 	if p.ProjectID == "" || p.ExpectedRevision == nil || p.Content == nil {
 		return "", fmt.Errorf("需要 project_id、expected_revision 与完整 content；先读取当前版本")
 	}
-	k, err := t.app.Store.SaveProjectKnowledge(p.ProjectID, *p.ExpectedRevision, *p.Content, nil, func(pr Project) error { return projectCapabilityContext(t, true) })
+	k, err := t.app.Store.SaveProjectKnowledgeForSession(p.ProjectID, *p.ExpectedRevision, *p.Content, t.sess.ID, func(pr Project, current *SessionMeta) error {
+		auth := *t
+		auth.sess = current
+		return projectCapabilitySessionContext(&auth, true)
+	})
 	if err != nil {
 		return "", err
 	}
 	pr, err := t.app.Store.GetProject(p.ProjectID)
-	if err != nil {
-		return "", err
-	}
+	if err != nil { return "", err }
 	return projectJSON(projectKnowledgeView(pr, k))
 }
 

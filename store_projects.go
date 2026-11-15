@@ -301,6 +301,28 @@ func (s *Store) SaveProjectKnowledge(id string, expectedRevision int64, content 
 	if authorize == nil {
 		return ProjectKnowledge{}, ErrProjectAuthorizationRequired
 	}
+	return s.saveProjectKnowledge(id, expectedRevision, content, budgetLimit, func(tx *sql.Tx, p Project) error { return authorize(p) })
+}
+
+// AI 写入只能按 session ID 在写事务内取当前身份，不能拿运行指针作授权。
+// 回调只读宿主内存注册表，不得重入 Store 或取得第二条数据库连接。
+func (s *Store) SaveProjectKnowledgeForSession(id string, expectedRevision int64, content, sessionID string, authorize func(Project, *SessionMeta) error) (ProjectKnowledge, error) {
+	if sessionID == "" || authorize == nil {
+		return ProjectKnowledge{}, ErrProjectAuthorizationRequired
+	}
+	return s.saveProjectKnowledge(id, expectedRevision, content, nil, func(tx *sql.Tx, p Project) error {
+		var current SessionMeta
+		var plan int
+		err := tx.QueryRow(`SELECT id,mode,permission,plan_mode FROM sessions WHERE id=?`, sessionID).Scan(&current.ID, &current.Mode, &current.Permission, &plan)
+		if err != nil {
+			return fmt.Errorf("无法读取当前项目会话授权: %w", err)
+		}
+		current.PlanMode = plan != 0
+		return authorize(p, &current)
+	})
+}
+
+func (s *Store) saveProjectKnowledge(id string, expectedRevision int64, content string, budgetLimit *int64, authorize func(*sql.Tx, Project) error) (ProjectKnowledge, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -312,7 +334,7 @@ func (s *Store) SaveProjectKnowledge(id string, expectedRevision int64, content 
 	if err != nil {
 		return ProjectKnowledge{}, err
 	}
-	if err = authorize(p); err != nil {
+	if err = authorize(tx, p); err != nil {
 		return ProjectKnowledge{}, err
 	}
 	if p.Archived {

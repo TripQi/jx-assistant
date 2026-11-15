@@ -1322,6 +1322,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	a.repairDanglingToolCalls(sess, emit)
 	// 开轮留痕：本轮拼装快照（系统提示词/环境快照/工具定义）由上下文引擎
 	// 组装并落 kind=prompt 行（OpenRound），主循环不再亲手拼这条行
+	a.syncRunPerms(sess) // 开轮展示快照也须按面板当前身份组装。
 	a.ctxEngine().OpenRound(sess, emit)
 	// Claude Code 插件：SessionStart hook（只在会话首轮发，对齐 Claude 的
 	// startup 语义；additionalContext 忽略——首条环境快照已定）
@@ -1366,6 +1367,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			if !cp {
 				break
 			}
+			a.syncRunPerms(sess) // 压缩期间可能发生 PATCH，重组前再次刷新。
 			pack = a.ctxEngine().Assemble(sess, emit)
 			msgs = pack.Msgs
 		}

@@ -118,6 +118,9 @@ func TestProjectCapabilityPermissionMatrix(t *testing.T) {
 					p := projectBindTest(t, a, "own", root)
 					other := projectBindTest(t, a, "other", t.TempDir())
 					sess := &SessionMeta{ID: "session-test", Mode: mode, Workspace: root, Permission: permission, PlanMode: plan}
+					if err := a.Store.Create(sess); err != nil {
+						t.Fatal(err)
+					}
 					before := projectTestKnowledge(t, a.Store, p.ID)
 					out, e := callProjectTest(a, sess, "project_knowledge_get", map[string]any{"project_id": p.ID})
 					if e != nil || !strings.Contains(out, p.ID) {
@@ -151,6 +154,9 @@ func TestProjectCapabilitiesOwnershipArchiveSwitchAndThreshold(t *testing.T) {
 	p := projectBindTest(t, a, "own", root)
 	other := projectBindTest(t, a, "other", t.TempDir())
 	s := &SessionMeta{ID: "s", Mode: "coding", Workspace: root, Permission: permFull}
+	if err := a.Store.Create(s); err != nil {
+		t.Fatal(err)
+	}
 	for _, args := range []any{map[string]any{"project_id": other.ID}, map[string]any{"workspace": other.Workspaces[0].DisplayPath}} {
 		if _, e := callProjectTest(a, s, "project_knowledge_get", args); e == nil {
 			t.Fatal("spoofed ownership accepted")
@@ -161,6 +167,9 @@ func TestProjectCapabilitiesOwnershipArchiveSwitchAndThreshold(t *testing.T) {
 		t.Fatalf("list ownership: %s %v", out, e)
 	}
 	s.Mode = "assistant"
+	if err := a.Store.SaveMeta(s); err != nil {
+		t.Fatal(err)
+	}
 	p.Archived = true
 	if _, e = a.Store.UpdateProject(p); e != nil {
 		t.Fatal(e)

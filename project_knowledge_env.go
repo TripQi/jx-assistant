@@ -75,9 +75,22 @@ func (a *App) checkProjectHistoryInheritance(parent, child *SessionMeta) error {
 	if err != nil {
 		return fmt.Errorf("无法核实目标项目，拒绝继承历史：%w", err)
 	}
-	// 两边均未登记时没有项目身份可串味，保留既有普通分支行为；一边命中则严格隔离。
+	// 未登记不代表历史没有项目内容（绑定可能已解除）；只有可证明同一工作区才放行。
 	if p == nil && c == nil {
-		return nil
+		var workspaces [2]ProjectWorkspace
+		for i, sess := range []*SessionMeta{parent, child} {
+			if sess == nil || (sess.Remote == nil && sess.Workspace == "" && a.Cfg == nil) {
+				return fmt.Errorf("无法核实有效工作区，拒绝继承历史；请使用不继承上下文的专家和自足任务书")
+			}
+			w, err := a.sessionProjectWorkspace(sess)
+			if err != nil || w.WorkspaceKey == "" || strings.ContainsRune(w.DisplayPath, 0) {
+				return fmt.Errorf("无法核实有效工作区，拒绝继承历史；请使用不继承上下文的专家和自足任务书")
+			}
+			workspaces[i] = w
+		}
+		if workspaces[0].WorkspaceKind == workspaces[1].WorkspaceKind && workspaces[0].WorkspaceKey == workspaces[1].WorkspaceKey {
+			return nil
+		}
 	}
 	if p == nil || c == nil || p.ID != c.ID {
 		return fmt.Errorf("跨项目或未登记项目不能继承父会话完整历史；请使用不继承上下文的专家和自足任务书，目标工作区须自行加载项目知识")

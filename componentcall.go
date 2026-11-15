@@ -129,6 +129,13 @@ func runComponentCall(t *toolContext, raw json.RawMessage) (string, error) {
 	if capDef.Writes && t.sess != nil && t.sess.PlanMode {
 		return "", fmt.Errorf("计划模式下暂停写类组件能力（「%s」声明为写入型）；先用只读能力调研，exit_plan_mode 获批后再调", capName)
 	}
+	// 宿主实现不经过文件/命令沙箱：统一拦写能力，读能力不受影响。
+	// 保留计划模式优先；计划获批退出后，仍需满足会话的写权限。
+	if capDef.Writes {
+		if err := requireNotReadOnly(t, fmt.Sprintf("调用写类组件能力「%s / %s」", comp, capName)); err != nil {
+			return "", err
+		}
+	}
 	run, ok := componentCapabilityRun(comp, capName)
 	if !ok {
 		return "", fmt.Errorf("能力「%s」已在组件清单里声明，但宿主没有安装它的实现（程序版本可能偏旧）；请更新程序或改用其它能力", capName)

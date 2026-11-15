@@ -433,6 +433,34 @@ var storeMigrations = []migration{
 			`ALTER TABLE usage_events ADD COLUMN provider_rank INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// 项目登记是宿主共享身份；知识仅保留当前正文，不创建历史或事件表。
+		id: "0021_project_knowledge",
+		sql: []string{
+			`CREATE TABLE projects (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			`CREATE TABLE project_workspaces (
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+				workspace_kind TEXT NOT NULL,
+				workspace_key TEXT NOT NULL,
+				display_path TEXT NOT NULL,
+				UNIQUE(workspace_kind, workspace_key)
+			)`,
+			`CREATE INDEX idx_project_workspaces_project ON project_workspaces(project_id)`,
+			`CREATE TABLE project_knowledge (
+				project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+				content TEXT NOT NULL DEFAULT '',
+				revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+				updated_at TEXT NOT NULL,
+				budget_limit INTEGER NOT NULL DEFAULT 4000 CHECK(budget_limit > 0)
+			)`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

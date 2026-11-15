@@ -20,8 +20,10 @@ package main
 //       退出：任务管理器结束 voicetype_go.exe（taskkill /f /im voicetype_go.exe）。
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,11 +68,21 @@ var (
 	asrReady atomic.Bool
 )
 
-// findPython 探测可用的 python 解释器：本目录 runtime → 两个数字助理安装位
-// 的共享运行时 → PATH。找到哪个记日志，一个都没有返回 ""（启动时报错）。
+// findPython 优先本目录 runtime，再 exe 上三级的共享运行时，最后历史候选与 PATH。
 func findPython() string {
+	exe, err := os.Executable()
+	if err != nil {
+		vtLog("无法定位输入法 exe：%v", err)
+		return ""
+	}
+	return findPythonAt(filepath.Dir(exe))
+}
+
+// findPythonAt 按 exe 落位自举；不让启动者的工作目录或 PATH 抢走共享运行时。
+func findPythonAt(exeDir string) string {
 	cands := []string{
-		filepath.Join(vtDir, "runtime", "python", "python.exe"),
+		filepath.Join(exeDir, "runtime", "python", "python.exe"),
+		filepath.Clean(filepath.Join(exeDir, "..", "..", "..", "技能", "_runtime", "python", "python.exe")),
 		`D:\123\坚祥数字助理GO\技能\_runtime\python\python.exe`,
 		`D:\Desktop\童浩\智能体工作目录\坚祥数字助理GO\技能\_runtime\python\python.exe`,
 	}
@@ -82,6 +94,7 @@ func findPython() string {
 	if p, err := exec.LookPath("python"); err == nil {
 		return p
 	}
+	vtLog("python 探测失败（尝试过：%v + PATH），识别服务起不来——检查共享运行时 技能\\_runtime\\python 是否存在", cands)
 	return ""
 }
 
@@ -196,16 +209,16 @@ func startAsr() {
 }
 
 // vtTranscribe 16k PCM → WAV → 自带服务 /v1/audio/transcriptions → 文本。
-func vtTranscribe(pcm []byte) (string, error) {
-	if !asrReady.Load() {
-		// 服务还没就绪：最多再等 60s（首次模型加载期间用户先说了话）
-		waited := 0
-		for !asrReady.Load() && waited < 60 {
-			time.Sleep(time.Second)
-			waited++
-		}
-		if !asrReady.Load() {
-			return "", fmt.Errorf("ASR 服务未就绪")
+// deadline 是本轮识别的总时限（含等服务就绪与 HTTP 重试），到点必须返回——
+// 保证调用方 UI 永远有结果（成功/失败/超时），不再出现"识别中"无期限悬挂。
+func vtTranscribe(pcm []byte, deadline time.Time) (string, error) {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	for !asrReady.Load() {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("%w（等待识别服务就绪）", vtErrTimeout)
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 	wav := vtPcmToWav(pcm, vtSampleRate)
@@ -220,26 +233,49 @@ func vtTranscribe(pcm []byte) (string, error) {
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	client := &http.Client{Timeout: 120 * time.Second}
+	req = req.WithContext(ctx)
 	// 服务端偶尔 5xx（历史坑：VAD 实例被并发共用会崩）时重试一次：
 	// 一次识别失败就要用户重说一遍，代价远大于多等 300ms。
 	for attempt := 0; ; attempt++ {
+		// 单次请求的超时 = 剩余 deadline（不设别的封顶）：超长语音的推理本身
+		// 可能超过两分钟（慢 CPU 上 RTF≈0.5，300s 语音要 ~150s），再叠一层
+		// 120s 封顶会把长语音提前误杀；总时限由 vtAsrTimeoutSec 线性给出，
+		// 这里只负责守死它。
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return "", fmt.Errorf("%w（等待服务/重试耗尽 %.0fs）", vtErrTimeout, remain.Seconds()*-1)
+		}
+		client := &http.Client{Timeout: remain}
 		resp, err := client.Do(req)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || time.Until(deadline) <= 0 {
+				return "", fmt.Errorf("%w（HTTP %.0fs 无应答）", vtErrTimeout, remain.Seconds())
+			}
 			return "", err
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		resp.Body.Close()
 		if err != nil {
+			if ctx.Err() != nil || os.IsTimeout(err) {
+				return "", fmt.Errorf("%w（读取识别应答）", vtErrTimeout)
+			}
 			return "", err
 		}
-		if resp.StatusCode >= 500 && attempt == 0 {
+		if !time.Now().Before(deadline) {
+			return "", vtErrTimeout
+		}
+		if resp.StatusCode >= 500 && attempt == 0 && time.Until(deadline) > 2*time.Second {
 			vtLog("识别服务 %d，300ms 后重试一次：%s", resp.StatusCode, strings.TrimSpace(string(data)))
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return "", vtErrTimeout
+			case <-time.After(300 * time.Millisecond):
+			}
 			req, _ = http.NewRequest("POST", fmt.Sprintf("http://%s:%d/v1/audio/transcriptions", asrHost, asrPort),
 				bytes.NewReader(body))
 			req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 			req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			req = req.WithContext(ctx)
 			continue
 		}
 		if resp.StatusCode != 200 {
@@ -258,6 +294,42 @@ func vtTranscribe(pcm []byte) (string, error) {
 			return "", fmt.Errorf("识别失败: %s", out.Error.Message)
 		}
 		return out.Text, nil
+	}
+}
+
+// vtTranscribeWithTimeout 带总超时的识别入口：到点必返回（成功/失败/超时三态），
+// UI 永远收得到结果。内部 vtTranscribe 已按 deadline 收口，这里的 select 是
+// 双保险（防内部任何一处意外长等）；迟到的结果进缓冲通道后直接被丢弃，
+// 不会在超时提示之后突然注入文字吓到用户。
+func vtTranscribeWithTimeout(pcm []byte, timeoutSec int) (string, error) {
+	return vtTranscribeUntil(pcm, time.Now().Add(time.Duration(timeoutSec)*time.Second), vtTranscribe)
+}
+
+// vtTranscribeUntil 的工作函数只返回数据，不能注入；超时后缓冲通道中的迟到结果直接丢弃。
+// 注入 deadline/工作函数供毫秒级回归验证，不改产品预算。
+func vtTranscribeUntil(pcm []byte, deadline time.Time, transcribe func([]byte, time.Time) (string, error)) (string, error) {
+	if !time.Now().Before(deadline) {
+		return "", vtErrTimeout
+	}
+	type asrRes struct {
+		text string
+		err  error
+	}
+	ch := make(chan asrRes, 1)
+	go func() {
+		t, e := transcribe(pcm, deadline)
+		ch <- asrRes{t, e}
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		if !time.Now().Before(deadline) {
+			return "", vtErrTimeout
+		}
+		return r.text, r.err
+	case <-timer.C:
+		return "", vtErrTimeout
 	}
 }
 
@@ -400,6 +472,20 @@ func vtSetState3(state, text string, arg int) {
 	vtEval(fmt.Sprintf(`vt.state(%q, %q, %d)`, state, text, arg))
 }
 
+// vtErrTimeout 总超时哨兵：vtTranscribeWithTimeout 到点后返回它，
+// 提示层据此区分「识别超时」与「识别失败」。
+var vtErrTimeout = errors.New("识别超时")
+
+// vtAsrTimeoutSec 一轮识别的总超时：语音时长 1:1 + 8s，下限 15s，不设上限。
+// 沿用上游预算；冷启动与慢机器长语音的实际充足性仍须真机验证。
+func vtAsrTimeoutSec(audioSec int) int {
+	t := audioSec + 8
+	if t < 15 {
+		t = 15
+	}
+	return t
+}
+
 // vtEstimateSec 识别耗时预估（照搬 SayIt calculateThinkingDuration）。
 func vtEstimateSec(recSec int) int {
 	switch {
@@ -505,7 +591,10 @@ type vtMidSeg struct {
 // vtMidLoop 中途识别：串行消费切段器产出的段，只做气泡展示与日志。
 func vtMidLoop() {
 	for seg := range vtMidChGlobal {
-		text, err := vtTranscribe(seg.PCM)
+		// 中途段是展示性的，超时按段时长 1:1 走同一个公式（见 vtAsrTimeoutSec）；
+		// 超时/失败只丢这一段的气泡，不影响结束后的全量识别。
+		audioSec := len(seg.PCM) / 2 / vtSampleRate
+		text, err := vtTranscribeWithTimeout(seg.PCM, vtAsrTimeoutSec(audioSec))
 		vtPending.Add(-1)
 		if !vtGenOK(seg.Gen) {
 			continue // 上一轮残留的段
@@ -597,13 +686,21 @@ func vtFinishSession(gen int32, sess *vtCapture) {
 	text := ""
 	if len(pcm) > vtSampleRate/8 { // <125ms 视为误触
 		var err error
-		if text, err = vtTranscribe(pcm); err != nil {
+		audioSec := len(pcm) / 2 / vtSampleRate
+		if text, err = vtTranscribeWithTimeout(pcm, vtAsrTimeoutSec(audioSec)); err != nil {
 			vtLog("识别失败: %v", err)
 			// 失败也留档：音频是"重新识别"的原料，不能这轮白说
 			vtSaveHistory(pcm, "", "asr_failed")
 			if vtGenOK(gen) {
-				vtSetStateIf(gen, "error", "识别失败，请重试")
-				time.Sleep(1100 * time.Millisecond)
+				// 超时单独成词（用户要求看得见的明确结束）：停留 1.5s 比"识别失败"的
+				// 1.1s 略长，让用户看清"这是超时、可以立刻重试"，绝不是永久"识别中"。
+				if errors.Is(err, vtErrTimeout) {
+					vtSetStateIf(gen, "error", "识别超时，请重试")
+					time.Sleep(1500 * time.Millisecond)
+				} else {
+					vtSetStateIf(gen, "error", "识别失败，请重试")
+					time.Sleep(1100 * time.Millisecond)
+				}
 				vtOverlayHideIf(gen)
 			}
 			return
@@ -1112,12 +1209,17 @@ func vtReidentify(n int) {
 	gen := vtSessionGen.Add(1)
 	vtOverlayShow()
 	vtSetState3If(gen, "processing", "识别中", vtEstimateSec(len(pcm)/2/vtSampleRate))
-	text, err := vtTranscribe(pcm)
+	text, err := vtTranscribeWithTimeout(pcm, vtAsrTimeoutSec(len(pcm)/2/vtSampleRate))
 	if err != nil {
 		vtLog("重新识别失败: %v", err)
 		if vtGenOK(gen) {
-			vtSetStateIf(gen, "error", "识别失败，请重试")
-			time.Sleep(1100 * time.Millisecond)
+			if errors.Is(err, vtErrTimeout) {
+				vtSetStateIf(gen, "error", "识别超时，请重试")
+				time.Sleep(1500 * time.Millisecond)
+			} else {
+				vtSetStateIf(gen, "error", "识别失败，请重试")
+				time.Sleep(1100 * time.Millisecond)
+			}
 			vtOverlayHideIf(gen)
 		}
 		return

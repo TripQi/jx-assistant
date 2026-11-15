@@ -170,7 +170,16 @@ func runProjectKnowledgeGet(t *toolContext, raw json.RawMessage) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return projectJSON(projectKnowledgeView(*pr, k))
+	out, err := projectJSON(projectKnowledgeView(*pr, k))
+	if err != nil {
+		return "", err
+	}
+	// 完整 JSON（含转义与元数据）必须能穿过 RunAgent 的全局结果上限；
+	// 不把半份知识或截坏的 JSON 当作成功读取，也不虚构不存在的分页接口。
+	if len(out) > toolResultMaxBytes {
+		return "", fmt.Errorf("项目知识完整结果为 %d 字节，超过单次工具结果容量 %d 字节，未返回正文、未截断、未修改知识；请用户到 设置 → 项目知识库 查看完整正文并精简后重试。当前能力不支持 offset 或分页，不要重复同一获取请求，也不要切换模型或渠道", len(out), toolResultMaxBytes)
+	}
+	return out, nil
 }
 
 func runProjectKnowledgeUpdate(t *toolContext, raw json.RawMessage) (string, error) {
@@ -196,9 +205,10 @@ func runProjectKnowledgeUpdate(t *toolContext, raw json.RawMessage) (string, err
 	if err != nil {
 		return "", err
 	}
-	pr, err := t.app.Store.GetProject(p.ProjectID)
-	if err != nil { return "", err }
-	return projectJSON(projectKnowledgeView(pr, k))
+	// 写事务已经成功：回执只取提交结果，不再查询项目或回传大正文，
+	// 避免落库成功后因读取失败或全局裁切而给出失败/损坏的回执。
+	used := ProjectKnowledgeBudget(k.Content)
+	return projectJSON(map[string]any{"project_id": k.ProjectID, "revision": k.Revision, "updated_at": k.UpdatedAt, "budget_limit": k.BudgetLimit, "used": used, "warning": projectKnowledgeWarning(used, k.BudgetLimit), "saved": true})
 }
 
 func projectKnowledgeWarning(used, limit int64) string {

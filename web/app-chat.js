@@ -8780,8 +8780,8 @@ function setupScrollTuck() {
 /* ---------- 图片悬停放大预览（输入框附件缩略图 / 消息里的图片共用一枚浮层） ----------
    两处图片来源：输入框上方的待发附件缩略图 .attach-thumb，以及消息里显示的图片
    .tc-img。它们各自被 overflow 容器裁着（.attach-rail / .bubble / .proc-body），
-   所以浮层只能挂 body + position:fixed，全页只建一枚节点、反复复用——图片密集的
-   消息里连续划过不新建 DOM，也就不会卡。
+   所以浮层只能挂 body + position:fixed，全页只建一枚外壳节点；加载图片按请求隔离，
+   防止切图或取消后迟到的 load 重新打开浮层。
 
    为什么要延迟：一碰就弹，扫过一排缩略图就是一路闪。停 340ms 才算「想看」；移开
    140ms 才收——这段空隙正是缩略图与浮层之间的距离，指针落进浮层即取消收起，来回
@@ -8803,9 +8803,10 @@ let zoomBox = null, zoomPic = null;
 let zoomAnchor = null;        // 浮层当前对应的那张缩略图（收起时清空）
 let zoomShown = false;
 let zoomShowTimer = 0, zoomHideTimer = 0;
-let zoomPress = null, zoomPressTimer = 0, zoomClickGuard = false;
+let zoomPress = null, zoomPressTimer = 0, zoomClickGuard = null;
+let zoomRequest = null;      // 每次加载独立身份：旧 load/error 不能影响新预览
 
-// 浮层节点（懒建、全页唯一）：图与外壳一起复用，只换 img 的地址
+// 浮层外壳懒建、全页唯一；图片节点按加载请求隔离，避免迟到事件串到下一张图
 function zoomNode() {
   if (zoomBox) return zoomBox;
   zoomBox = document.createElement('div');
@@ -8813,9 +8814,6 @@ function zoomNode() {
   zoomPic = document.createElement('img');
   zoomPic.alt = '';
   zoomPic.decoding = 'async';
-  // 浮层里的图自己失败（附件被 ✕ 掉 objectURL 已回收、远端 404）：立刻收，不留空白框
-  zoomPic.addEventListener('error', zoomHideNow);
-  zoomPic.addEventListener('load', () => { if (zoomAnchor && zoomPic.naturalWidth) zoomReveal(); });
   zoomBox.appendChild(zoomPic);
   document.body.appendChild(zoomBox); // 挂 body：哪一层 overflow 都裁不到它
   zoomBox.addEventListener('pointerenter', zoomCancelHide);   // 指针挪进浮层：别收
@@ -8849,20 +8847,32 @@ function zoomPlace(rect, w, h) {
 
 // 弹出：等浮层里的图解码好再显示（没画出来的图弹出来只会是一个空框）
 function zoomShowFor(img) {
-  if (!img) return;
+  if (!img || !img.isConnected) { zoomHideNow(); return; }
   const src = img.currentSrc || img.src;
-  if (!src) return;                                // 还没有地址（远程 blob 未就绪等）
-  if (img.complete && !img.naturalWidth) return;    // 源图自己就没加载成功：不弹
+  if (!src || (img.complete && !img.naturalWidth)) { zoomHideNow(); return; }
   zoomNode();
   zoomAnchor = img;
   zoomCancelHide();
-  if (zoomPic.getAttribute('src') !== src) zoomPic.src = src; // 复用节点：只换地址
-  if (zoomPic.complete && zoomPic.naturalWidth) zoomReveal(); // 已缓存：立刻出
-  // 否则等 zoomNode 里那个 load 监听（届时若已移开，zoomAnchor 已清空，自然不弹）
+  // 同一有效请求可复用；取消后的重试即使同 src 也必须换节点与身份。
+  if (!zoomRequest || zoomRequest.src !== src || zoomRequest.anchor !== img) {
+    const pic = document.createElement('img');
+    pic.alt = ''; pic.decoding = 'async';
+    const request = { src, anchor: img, pic };
+    zoomRequest = request;
+    zoomBox.classList.remove('show'); zoomShown = false;
+    zoomBox.replaceChild(pic, zoomPic); zoomPic = pic;
+    pic.addEventListener('load', () => zoomReveal(request));
+    pic.addEventListener('error', () => { if (zoomRequest === request) zoomHideNow(); });
+    pic.src = src;
+  }
+  if (zoomPic.complete && zoomPic.naturalWidth) zoomReveal(zoomRequest);
 }
 
-function zoomReveal() {
-  if (!zoomAnchor || !zoomPic.naturalWidth) return;
+function zoomReveal(request) {
+  if (!request || request !== zoomRequest) return;
+  if (!zoomAnchor || !zoomAnchor.isConnected ||
+      (zoomAnchor.currentSrc || zoomAnchor.src) !== request.src) { zoomHideNow(); return; }
+  if (!request.pic.naturalWidth) return;
   // 隐藏态用 visibility:hidden，仍有布局，可直接量出「按原图比例 + 80vw/80vh 上限」的尺寸
   const w = zoomBox.offsetWidth, h = zoomBox.offsetHeight;
   const pos = zoomPlace(zoomAnchor.getBoundingClientRect(), w, h);
@@ -8875,13 +8885,18 @@ function zoomReveal() {
 function zoomHideNow() {
   clearTimeout(zoomShowTimer); zoomShowTimer = 0;
   clearTimeout(zoomHideTimer); zoomHideTimer = 0;
+  clearTimeout(zoomPressTimer); zoomPressTimer = 0;
+  zoomPress = null;
+  zoomClickGuard = null;
+  zoomRequest = null; // 先作废身份，再撤销 src；迟到 load/error 均不能 reveal
+  if (zoomPic) zoomPic.removeAttribute('src');
   zoomAnchor = null;
   zoomShown = false;
   if (zoomBox) zoomBox.classList.remove('show');
 }
 
 function zoomScheduleHide() {
-  if (!zoomShown) { zoomAnchor = null; return; }
+  if (!zoomShown) { zoomHideNow(); return; }
   if (zoomHideTimer) return; // 已排上：多个 pointerout（子元素/嵌套）不重复排
   zoomHideTimer = setTimeout(() => {
     zoomHideTimer = 0;
@@ -8922,24 +8937,28 @@ function setupImageZoom() {
     if (!zoomClosestImg(e.target)) return;
     clearTimeout(zoomShowTimer); zoomShowTimer = 0;
     if (zoomShown) zoomScheduleHide();
+    else zoomHideNow();
   });
 
   // 触屏：长按出同一枚浮层；按在空白处则收
   document.addEventListener('pointerdown', (e) => {
+    // 新 pointerdown 标志新手势，不能继承上一轮的 click 抑制。
+    zoomClickGuard = null;
     const img = zoomClosestImg(e.target);
     if (!img) {
-      if (zoomShown && !zoomBox.contains(e.target)) zoomHideNow(); // 点空白处关闭
+      if (!zoomBox || !zoomBox.contains(e.target)) zoomHideNow();
       return;
     }
     if (!isTouch(e)) return; // 鼠标靠悬停
-    zoomPress = { x: e.clientX, y: e.clientY, id: e.pointerId };
-    clearTimeout(zoomPressTimer);
+    zoomHideNow();
+    const press = { x: e.clientX, y: e.clientY, id: e.pointerId, img, fired: false };
+    zoomPress = press;
     zoomPressTimer = setTimeout(() => {
       zoomPressTimer = 0;
-      zoomPress = null;
-      // 长按之后浏览器还会补一个 click（点图片＝打开原图）：只吞这一次余波
-      zoomClickGuard = true;
-      setTimeout(() => { zoomClickGuard = false; }, 700);
+      if (zoomPress !== press || !img.isConnected) { zoomHideNow(); return; }
+      press.fired = true;
+      // 绑定本轮指针和源图，直到松手产生的 click；不按长按开始时间过期。
+      zoomClickGuard = press;
       zoomShowFor(img);
     }, ZOOM_LONG_PRESS);
   }, { passive: true });
@@ -8948,32 +8967,37 @@ function setupImageZoom() {
     if (!zoomPress || e.pointerId !== zoomPress.id) return;
     if (Math.abs(e.clientX - zoomPress.x) > ZOOM_MOVE_TOL ||
         Math.abs(e.clientY - zoomPress.y) > ZOOM_MOVE_TOL) {
-      clearTimeout(zoomPressTimer); zoomPressTimer = 0;
-      zoomPress = null; // 滑起来了：这是滚动，不是长按
+      zoomHideNow(); // 滑起来了：取消本次手势与预览
     }
   }, { passive: true });
 
   const zoomPressEnd = (e) => {
     if (!zoomPress || (e && e.pointerId !== zoomPress.id)) return;
+    if (e.type === 'pointercancel' || !zoomPress.fired) { zoomHideNow(); return; }
     clearTimeout(zoomPressTimer); zoomPressTimer = 0;
-    zoomPress = null;
+    zoomPress = null; // 正常松手保留长按预览及本轮 click guard
   };
   document.addEventListener('pointerup', zoomPressEnd, { passive: true });
   document.addEventListener('pointercancel', zoomPressEnd, { passive: true });
 
   // 长按弹出的余波 click 吞掉（capture 抢在图片链接/卡片之前）；短按照旧
   document.addEventListener('click', (e) => {
-    if (!zoomClickGuard) return;
-    zoomClickGuard = false;
+    const guard = zoomClickGuard;
+    if (!guard || zoomClosestImg(e.target) !== guard.img) return;
+    // 老内核的兼容 MouseEvent 没有 pointerId；仍须命中原图且中间无新手势。
+    if (e.pointerId != null && e.pointerId >= 0 && e.pointerId !== guard.id) return;
+    zoomClickGuard = null;
     e.preventDefault();
     e.stopPropagation();
   }, true);
 
   // 位置会变的一切情况（滚动、改窗口大小）一律收起，不留一张飘在原处的浮层；
   // Esc 同效。scroll 不冒泡，用 capture 才能听到内层容器的滚动
-  document.addEventListener('scroll', () => { if (zoomShown || zoomShowTimer) zoomHideNow(); }, true);
-  window.addEventListener('resize', () => { if (zoomShown || zoomShowTimer) zoomHideNow(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && zoomShown) zoomHideNow(); });
+  document.addEventListener('scroll', zoomHideNow, true);
+  window.addEventListener('resize', zoomHideNow);
+  window.addEventListener('blur', zoomHideNow);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) zoomHideNow(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') zoomHideNow(); });
 }
 
 $('btn-send').onclick = send;

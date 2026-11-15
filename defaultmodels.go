@@ -514,7 +514,10 @@ func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
 	ref, source, err := a.todoModelChain(m, custom)
 	if err != nil {
 		shown := custom.norm()
-		if m != todoModelCustom {
+		switch source {
+		case "派发任务默认模型":
+			shown, _ = a.dispatchDefaultRef()
+		case "全局默认模型":
 			shown = a.globalDefaultRef()
 		}
 		v := ModelRefView{Mode: m, Source: source, Provider: shown.Provider, ProviderKey: shown.ProviderKey, Model: shown.Model}

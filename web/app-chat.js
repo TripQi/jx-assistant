@@ -5897,19 +5897,10 @@ async function sendMidrun(content, viaInput, view, voiceUsed) {
   }
 }
 
-// 本轮 chat 是否已落库：从会话详情倒序找最后一条用户发言（role=user 且
-// kind=chat/空——注入回报行不算用户发言），正文与本次一致即认定服务端已收下。
-// 给 send 的断连兜底用：误判代价不对称——把已落库的消息再发一遍会重复执行一
-// 轮（执行记录+排队项两条一样的），把没落库的误判成已落库只是少发一条（界面
-// 随后接回流，用户看得见会话还在跑，重发即可）。
-function userChatLanded(msgs, content) {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role !== 'user') continue;
-    if (m.kind && m.kind !== 'chat') continue;
-    return m.content === content;
-  }
-  return false;
+// 只认本次 POST 的请求标识：旧消息可能同文，发送钩子也可能改写正文。
+function userChatLanded(msgs, requestId) {
+  return typeof requestId === 'string' && requestId !== '' && (msgs || []).some((m) =>
+    m.role === 'user' && m.kind === 'chat' && m.requestId === requestId);
 }
 
 // prepareSend 是 send 的准备段：发送前钩子（可等待）→ 空文案守卫 → 懒建会话 →
@@ -6066,19 +6057,20 @@ async function send(forceContent, view) {
   const pre = await prepareSend(forceContent, view);
   if (!pre) return;
   const { input, content, sid, fromInput } = pre;
+  // getRandomValues 在非 HTTPS 的局域网入口也可用，不依赖 randomUUID 的安全上下文。
+  const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 
   let aborted = false;
   // 服务端是否已收下这条消息：handleChat 在返回响应头之前就完成了落库并启动
   // 执行——只要拿到 2xx 响应头，之后流再断，消息也一定在跑了，绝不能重发
   //（否则同一条消息一边执行、一边又出现在排队队列，正是远程断流时「重复排队」
-  // 的根源）。响应头都没回来的断连没法靠这个标记，只能靠内容比对兜底（见
-  // userChatLanded）。
+  // 的根源）。响应头前断连，则用 requestId 探测服务端实际落库的关联。
   let accepted = false;
   try {
     const res = await fetch(`/api/sessions/${sid}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, voiceUsed: !!pre.voiceUsed }),
+      body: JSON.stringify({ content, requestId, voiceUsed: !!pre.voiceUsed }),
       signal: view.state.abort.signal,
     });
     if (!res.ok) {
@@ -6109,7 +6101,7 @@ async function send(forceContent, view) {
           const d = await api('/api/sessions/' + sid);
           if (d.pending && view.state.cur && view.state.cur.id === sid) applyPending(view, d.pending);
           running = !!(d.running || (d.meta && d.meta.status === 'running'));
-          accepted = userChatLanded(d.messages || [], content);
+          accepted = userChatLanded(d.messages || [], requestId);
         } catch (e2) { /* 探测也失败（服务不可达）：按没收下处理，走下面的兜底 */ }
       }
       if (accepted) {

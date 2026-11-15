@@ -2291,6 +2291,10 @@ func (a *App) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if err := a.Store.projectChatRequestIDs(m.ID, msgs); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	if err := a.Store.projectPendingIDs(m.ID, msgs); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -4236,6 +4240,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		RequestID string `json:"requestId"` // 仅关联本次用户发送，不进入 Message/模型协议
 		Content   string `json:"content"`
 		VoiceUsed bool   `json:"voiceUsed"` // 本条消息含语音听写转写文字（组件听写落框时打的标记）
 	}
@@ -4316,7 +4321,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 发起的这一轮不属于经理，即使它由经理轮排队/插话衔接而来）
 	a.revokeManagerTurn(m.ID)
 	um := TextMessage("user", body.Content)
-	sm := a.appendMessage(m, um)
+	sm := &StoredMessage{Message: um, Kind: kindChat, RequestID: body.RequestID, CreatedAt: now()}
+	if err := a.Store.AppendRow(m.ID, sm); err != nil {
+		lock.Unlock()
+		a.finishRunOf(m.ID, run)
+		writeErr(w, 500, "用户消息保存失败："+err.Error())
+		return
+	}
+	m.UpdatedAt = now()
+	_ = a.Store.TouchRunMeta(m)
 	opening := []Event{{Type: "message", Message: &sm.Message, Seq: sm.Seq, Kind: kindChat}}
 	// 组件钩子的 additionalContext：用户消息后落一条系统注入行（先于 CC hook）
 	if compExtraContext != "" {

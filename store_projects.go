@@ -49,7 +49,7 @@ type ProjectKnowledge struct {
 type ProjectKnowledgeBudgetError struct{ Used, Limit int64 }
 
 func (e *ProjectKnowledgeBudgetError) Error() string {
-	return fmt.Sprintf("知识预算超限：已用 %d / %d，超出 %d；请精简正文后重试，确需扩容由用户在设置页调整", e.Used, e.Limit, e.Used-e.Limit)
+	return fmt.Sprintf("知识预算超限：已用 %d / %d，超出 %d；请删除过期、重复约束及进度流水，合并同类规则并精简背景后重试（不得截断）；确需扩容由用户在设置页调整", e.Used, e.Limit, e.Used-e.Limit)
 }
 
 // 按 code point 和四种脚本计数，非 CJK 全文仅取整一次；不复用 token 估算。

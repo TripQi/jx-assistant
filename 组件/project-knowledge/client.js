@@ -40,6 +40,47 @@
     if (type !== 'textarea') e.type = type || 'text';
     return e;
   }
+  // 与工作目录面板 renderWsPop 使用相同的线框 SVG 和 pop-item（15px / 9px 间距）。
+  function icon(parent, remote) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    [['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '2'], ['stroke-linejoin', 'round'], ['aria-hidden', 'true']].forEach(function (a) { svg.setAttribute(a[0], a[1]); });
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    if (remote) {
+      [4, 14].forEach(function (y) {
+        var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        [['x', '3'], ['y', String(y)], ['width', '18'], ['height', '7'], ['rx', '2']].forEach(function (a) { rect.setAttribute(a[0], a[1]); }); svg.appendChild(rect);
+      });
+      path.setAttribute('d', 'M7 8h.01M11 8h.01M7 18h.01M11 18h.01');
+    } else path.setAttribute('d', 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z');
+    svg.appendChild(path); parent.appendChild(svg);
+  }
+  function picker(parent, label) {
+    var box = node('div', parent); box.style.cssText = 'min-width:0;max-width:100%';
+    var trigger = button(box, '', function () { list.hidden = !list.hidden; trigger.setAttribute('aria-expanded', String(!list.hidden)); });
+    trigger.className = 'pop-item pf-input'; trigger.setAttribute('aria-label', label); trigger.setAttribute('aria-expanded', 'false');
+    var list = node('div', box); list.hidden = true;
+    list.style.cssText = 'max-height:240px;overflow:auto;border:1px solid var(--border);border-radius:8px';
+    var value = '', options = [], control = { onchange: null };
+    function caption() {
+      trigger.replaceChildren(); var o = options.find(function (x) { return x.value === value; });
+      icon(trigger, o && o.remote); var text = node('span', trigger, o ? o.label : label);
+      text.style.cssText = 'min-width:0;overflow-wrap:anywhere'; node('span', trigger, '⌄', 'pop-check');
+    }
+    Object.defineProperty(control, 'value', { get: function () { return value; }, set: function (v) { value = v; caption(); } });
+    control.setOptions = function (items) {
+      options = items; list.replaceChildren();
+      items.forEach(function (o) {
+        var b = button(list, '', function () { control.value = o.value; list.hidden = true; trigger.setAttribute('aria-expanded', 'false'); if (control.onchange) control.onchange(); });
+        b.className = 'pop-item'; icon(b, o.remote);
+        node('span', b, o.label).style.cssText = 'min-width:0;overflow-wrap:anywhere';
+      }); caption();
+    };
+    box.onkeydown = function (e) { if (e.key === 'Escape') { list.hidden = true; trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); } };
+    return control;
+  }
+  function kindPicker(parent, label) {
+    var p = picker(parent, label); p.setOptions([{ value: 'local', label: '本地' }, { value: 'remote', label: '远程', remote: true }]); p.value = 'local'; return p;
+  }
   function time(value) {
     if (!value) return '尚未更新';
     var d = new Date(value);
@@ -69,26 +110,85 @@
     var status = node('p', el, '', 'sf-desc'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     function message(text, error) { if (!alive()) return; status.textContent = text; status.style.color = error ? 'var(--danger)' : ''; }
     var top = node('div', el); top.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center';
-    var select = node('select', top, undefined, 'pf-input'); select.style.width = 'auto'; select.setAttribute('aria-label', '选择项目（含已归档）');
+    var select = picker(top, '请选择项目');
     button(top, '刷新项目列表', function () { refresh(); });
     var createName = input(el, '新项目名称');
+    node('p', el, '可先在下方选择或输入工作目录，再点击「新建项目」同时绑定；路径留空则仅创建项目。', 'sf-desc');
     button(el, '新建项目', function () {
       var name = createName.value.trim();
       if (!name) return message('请输入项目名称。', true);
       if (!leave()) return;
       perform(async function () {
+        var ws = resolvePath.value.trim() ? [{ workspace_kind: resolveKind.value, display_path: resolvePath.value.trim() }] : [];
+        // 先用既有解析接口校验，非法路径不留下一个空项目；实际绑定仍由 PATCH 权威校验。
+        if (ws.length) await api('/resolve', 'POST', ws[0]);
         var p = await api('', 'POST', { name: name });
+        try {
+          if (ws.length) await api('/' + encodeURIComponent(p.id), 'PATCH', { workspaces: ws, expected_updated_at: p.updated_at });
+        } catch (e) {
+          await refresh(p.id);
+          throw new Error('项目已新建，但目录绑定失败，请在此项目重试保存绑定：' + e.message);
+        }
         createName.value = '';
         await refresh(p.id);
-        message('项目已新建。');
+        message(ws.length ? '项目已新建并绑定所选工作目录。' : '项目已新建。');
       });
     });
     var editor = node('div', el);
     var resolveBox = node('div', el, undefined, 'gen-section');
     node('h4', resolveBox, '检查工作区实际归属');
-    var resolveKind = node('select', resolveBox, undefined, 'pf-input');
-    [['local', '本地'], ['remote', '远程']].forEach(function (v) { var o = node('option', resolveKind, v[1]); o.value = v[0]; });
-    var resolvePath = input(resolveBox, '绝对路径（远程：user@host:dir 或 user@host:port:dir）');
+    var resolveKind = kindPicker(resolveBox, '工作区类型');
+    var resolvePath = input(resolveBox, '工作目录（可选择或手输绝对路径；远程：user@host:dir、user@host:port:dir；IPv6：user@[2001:db8::1]:2222:/dir）');
+    resolvePath.placeholder = '选择已有目录，或直接输入路径';
+    var directories = picker(resolveBox, '选择已有工作目录');
+    function directoryOptions(remotes) {
+      var items = [], seen = new Set();
+      function add(kind, path) {
+        if (!path || seen.has(kind + ':' + path)) return;
+        seen.add(kind + ':' + path); items.push({ value: String(items.length), label: path, remote: kind === 'remote', kind: kind, path: path });
+      }
+      if (typeof state !== 'undefined') {
+        add('local', state.defaultWs);
+        if (typeof lsGet === 'function') lsGet('jx.wslist', []).forEach(function (p) { add('local', p); });
+        (state.sessions || []).forEach(function (s) { add('local', s.workspace); });
+      }
+      (remotes || []).forEach(function (r) {
+        var host = r.host || ''; if (host.indexOf(':') >= 0 && host[0] !== '[') host = '[' + host + ']';
+        if (host) add('remote', (r.user || 'root') + '@' + host + (r.port && r.port !== 22 ? ':' + r.port : '') + ':' + (r.dir || '/'));
+      });
+      projects.forEach(function (p) { (p.workspaces || []).forEach(function (w) { add(w.workspace_kind, w.display_path); }); });
+      directories.setOptions(items);
+      directories.onchange = function () {
+        var w = items.find(function (x) { return x.value === directories.value; });
+        if (w) { resolveKind.value = w.kind; resolvePath.value = w.path; resolveResult.textContent = '目录已填入，可新建项目并绑定，或添加到当前项目绑定。'; }
+      };
+    }
+    var remoteDirectories = [];
+    async function refreshDirectories() {
+      directoryOptions(remoteDirectories);
+      try {
+        var response = await fetch('/api/remotes', { cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var data = await response.json();
+        if (!alive()) return;
+        remoteDirectories = data.remotes || []; directoryOptions(remoteDirectories); lock();
+      } catch (e) { if (alive()) message('远程目录列表读取失败：' + e.message + '；仍可选择本地目录或手输。', true); }
+    }
+    button(resolveBox, '刷新可选目录', refreshDirectories);
+    button(resolveBox, '添加工作目录', async function () {
+      if (typeof isNarrow === 'function' && isNarrow()) return message(typeof NARROW_WS_ADD_NOTICE !== 'undefined' ? NARROW_WS_ADD_NOTICE : '请在电脑宽屏上选择目录，或手动输入。', true);
+      if (typeof pickWorkFolder !== 'function') return message('当前环境无法打开目录选择框，请手动输入。', true);
+      var path = await pickWorkFolder(); if (!alive() || !path) return;
+      if (typeof rememberWorkspace === 'function') rememberWorkspace(path);
+      resolveKind.value = 'local'; resolvePath.value = path; directoryOptions(remoteDirectories); lock();
+    });
+    button(resolveBox, '添加远程工作目录（手动填写）', function () { resolveKind.value = 'remote'; resolvePath.focus(); message('请输入 user@host:dir 或 user@host:port:dir；IPv6 主机请加方括号。不修改聊天的远程挂载。'); });
+    button(resolveBox, '添加到当前项目绑定', function () {
+      if (!current || current.project.archived) return message('请先选择一个使用中的项目。', true);
+      var path = resolvePath.value.trim(); if (!path) return message('请输入或选择工作目录。', true);
+      if (!current.workspaces.some(function (w) { return w.workspace_kind === resolveKind.value && w.display_path === path; })) current.workspaces.push({ workspace_kind: resolveKind.value, display_path: path });
+      renderEditor(); message('目录已加入绑定草稿，请点击「保存名称与绑定」。');
+    });
     var resolveResult = node('p', resolveBox, '', 'sf-desc');
     button(resolveBox, '解析归属', async function () {
       var path = resolvePath.value.trim(), kind = resolveKind.value, seq = ++resolving;
@@ -109,7 +209,6 @@
       el.querySelectorAll('input,textarea,select,button').forEach(function (e) {
         e.disabled = busy || loading || (e.closest('[data-pk-readonly]') !== null);
       });
-      select.disabled = busy || loading;
     }
     async function perform(fn) {
       if (busy) return;
@@ -118,9 +217,7 @@
       finally { busy = false; if (alive()) lock(); }
     }
     function renderOptions(id) {
-      select.replaceChildren();
-      var empty = node('option', select, '请选择项目'); empty.value = '';
-      projects.forEach(function (p) { var o = node('option', select, p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id); o.value = p.id; });
+      select.setOptions([{ value: '', label: '请选择项目' }].concat(projects.map(function (p) { return { value: p.id, label: p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id }; })));
       select.value = id || '';
     }
     async function refresh(id) {
@@ -130,6 +227,7 @@
         if (!alive() || seq !== generation) return;
         if (!Array.isArray(list)) throw new Error('项目列表格式不正确');
         projects = list;
+        refreshDirectories();
         var chosen = id || (current && current.project.id) || '';
         renderOptions(chosen);
         if (id) await choose(id);
@@ -206,10 +304,9 @@
         rows.replaceChildren();
         d.workspaces.forEach(function (w, i) {
           var row = node('div', rows); row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap';
-          var kind = node('select', row, undefined, 'pf-input'); kind.style.width = 'auto'; kind.setAttribute('aria-label', '绑定类型');
-          [['local', '本地'], ['remote', '远程']].forEach(function (v) { var o = node('option', kind, v[1]); o.value = v[0]; });
+          var kind = kindPicker(row, '绑定类型');
           kind.value = w.workspace_kind; kind.onchange = function () { w.workspace_kind = kind.value; };
-          var path = node('input', row, undefined, 'pf-input'); path.style.cssText = 'flex:1;min-width:180px'; path.value = w.display_path; path.setAttribute('aria-label', '绑定绝对路径'); path.oninput = function () { w.display_path = path.value; };
+          var path = node('input', row, undefined, 'pf-input'); path.style.cssText = 'flex:1;min-width:0;max-width:100%'; path.value = w.display_path; path.setAttribute('aria-label', '绑定绝对路径'); path.oninput = function () { w.display_path = path.value; };
           button(row, '解除此绑定', function () { d.workspaces.splice(i, 1); drawRows(); lock(); });
         });
       }

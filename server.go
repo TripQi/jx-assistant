@@ -2291,6 +2291,10 @@ func (a *App) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if err := a.Store.projectPendingIDs(m.ID, msgs); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	trimMessagesForUI(msgs) // 下发瘦身：库内原样，只削响应副本（见函数注释）
 	// 压缩摘要行并入下发副本（按 seq 归位到发生位置）：前端把每次模型摘要压缩
 	// 显示为一枚常显卡片（覆盖到哪一条 + 点开看完整摘要）。MessagesWithSeq 的

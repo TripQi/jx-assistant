@@ -5225,6 +5225,7 @@ function setStreamUI(on, view) {
 
 function handleEvent(ev, view) {
   view = view || mainView;
+  if (ev.sessionId && (!view.state.cur || ev.sessionId !== view.state.cur.id)) return;
   switch (ev.type) {
     case 'edited': {
       // 编辑重发的截断确认：服务端已删掉 seq 之后的记录并改写正文，
@@ -5249,14 +5250,10 @@ function handleEvent(ev, view) {
       if (view.state.pendingSend && ev.message && ev.message.role === 'user') {
         view.state.pendingSend = null;
       }
-      // 插话落库兜底：正式消息到达即摘掉同内容的虚线插话框。实框走本流
-      // （message 事件），虚框清理靠全局总线的 pending 广播——两条通道独立，
-      // 广播在断线重连窗口/订阅者跟不上被丢帧时，实框已现、虚框残留成双框
-      // （插话打断模型流的瞬间事件最密集，最易撞上）。按内容本地摘除，
-      // pending 广播正常到达时快照整体覆盖，两边不冲突。
-      if (ev.message && ev.message.role === 'user' && typeof ev.message.content === 'string'
-        && (view.state.pendingSteer || []).some((p) => p.content === ev.message.content)) {
-        view.state.pendingSteer = view.state.pendingSteer.filter((p) => p.content !== ev.message.content);
+      // 只按稳定 ID 对账；旧事件无 ID 时等 pending 快照，不猜正文。
+      if (ev.pendingId && ev.message && ev.message.role === 'user') {
+        ev.message.pendingId = ev.pendingId;
+        reconcilePendingSteer(view, ev.pendingId);
       }
       if (view.state.attached) {
         // 跟随别的连接发起的执行：以服务端为准整体重取，避免与已落库内容重复
@@ -5837,10 +5834,22 @@ async function editPendingMsg(view, pm) {
   }
 }
 
+// 同一视图按会话隔离落地回执，挡住跨通道迟到的 HTTP/广播快照。
+// attached 在重取历史前也要记住 ID；历史投影可在刷新后重新建立证据。
+function reconcilePendingSteer(view, pendingId) {
+  const st = view.state, sid = st.cur && st.cur.id;
+  if (!st.landedSteer || st.landedSteer.sid !== sid) st.landedSteer = { sid, ids: new Set() };
+  const ids = st.landedSteer.ids;
+  if (pendingId) ids.add(pendingId);
+  (st.msgs || []).forEach((m) => { if (m.role === 'user' && m.pendingId) ids.add(m.pendingId); });
+  st.pendingSteer = (st.pendingSteer || []).filter((p) => !ids.has(p.id));
+}
+
 // 待生效消息快照入视图（服务端下发或接口返回）：只对当前会话生效
 function applyPending(view, pending) {
   if (!pending) return;
   view.state.pendingSteer = pending.steer || [];
+  reconcilePendingSteer(view);
   view.state.pendingQueue = pending.queue || [];
   view.state.queuePaused = !!pending.paused;
   if (!view.state.pendingQueue.length) view.state.queueHeld = false; // 队列清空：保留横幅不再有意义
@@ -5872,6 +5881,7 @@ async function sendMidrun(content, viaInput, view, voiceUsed) {
         if (d.mode === 'steer') view.state.pendingSteer.push(pm);
         else view.state.pendingQueue.push(pm);
       }
+      reconcilePendingSteer(view);
       renderQueueDock(view);
       renderMessages(view.state.msgs, view);
     }

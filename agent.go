@@ -127,7 +127,8 @@ func runeTailStart(s string, limit int) int {
 
 // Event 是后端向前端推送的流式事件（SSE data 帧的载荷）。
 type Event struct {
-	Type       string   `json:"type"` // message|delta|tool_start|tool_end|tool_wait|sub_start|sub_end|title|done|stopped|error|pending|usage|approval_required|approval_resolved|question_required|question_resolved|todos
+	PendingID  string   `json:"pendingId,omitempty"` // message 对应的待生效项；不进入模型协议
+	Type       string   `json:"type"`                // message|delta|tool_start|tool_end|tool_wait|sub_start|sub_end|title|done|stopped|error|pending|usage|approval_required|approval_resolved|question_required|question_resolved|todos
 	Delta      string   `json:"delta,omitempty"`
 	Message    *Message `json:"message,omitempty"`
 	Thinking   string   `json:"thinking,omitempty"` // message 事件附带该步思考原文（前端实时渲染思考块用）
@@ -1299,7 +1300,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	interjectsBefore := func(emit func(Event)) bool {
 		got := a.drainSteer(sess.ID)
 		for _, pm := range got {
-			a.landUserSide(sess, pm.Content, pm.Kind, pm.Origin, emit)
+			a.landUserSide(sess, pm.Content, pm.Kind, pm.Origin, emit, pm.ID)
 		}
 		// 排走后广播最新快照（排队路径 popQueue 后有同一广播）：前端据此摘掉
 		// 「插话中」气泡——不广播的话消息已落库，气泡却一直挂在对话末尾

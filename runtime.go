@@ -577,12 +577,21 @@ func subQueueNote(sub *SessionMeta, note string) string {
 // 并按 AGENT.md 的约定显式刷新会话时间（touchesActivity 的口径不含这两类行，
 // 不能去改它）。落库后广播同型 message 事件：emit 非空时走本轮订阅通道
 //（执行体内部），否则走全局广播。
-func (a *App) landUserSide(m *SessionMeta, content, kind, origin string, emit func(Event)) *StoredMessage {
+func (a *App) landUserSide(m *SessionMeta, content, kind, origin string, emit func(Event), pendingID ...string) *StoredMessage {
 	if kind == "" {
 		kind = kindChat
 	}
 	var sm *StoredMessage
-	if kind == kindChat && origin == "" {
+	if len(pendingID) > 0 && pendingID[0] != "" {
+		sm = &StoredMessage{Message: TextMessage("user", content), Kind: kind, Origin: origin, CreatedAt: now(), PendingID: pendingID[0]}
+		// 消息与 ID 映射同事务提交；失败不发虚假的落地回执。
+		if err := a.Store.AppendRow(m.ID, sm); err != nil {
+			log.Printf("[插话落库] 会话 %s: %v", m.ID, err)
+			return nil
+		}
+		m.UpdatedAt = now()
+		_ = a.Store.TouchRunMeta(m)
+	} else if kind == kindChat && origin == "" {
 		sm = a.appendMessage(m, TextMessage("user", content))
 	} else if kind == kindChat {
 		sm = &StoredMessage{Message: TextMessage("user", content), Kind: kindChat, Origin: origin, CreatedAt: now()}
@@ -596,7 +605,7 @@ func (a *App) landUserSide(m *SessionMeta, content, kind, origin string, emit fu
 		m.UpdatedAt = now()
 		_ = a.Store.SaveMeta(m)
 	}
-	ev := Event{Type: "message", Message: &sm.Message, Seq: sm.Seq, Kind: kind, Origin: origin}
+	ev := Event{Type: "message", SessionID: m.ID, PendingID: sm.PendingID, Message: &sm.Message, Seq: sm.Seq, Kind: kind, Origin: origin}
 	if emit != nil {
 		emit(ev)
 	} else {
@@ -852,7 +861,7 @@ func (a *App) drainQueue(sess *SessionMeta, run *sessionRun, emit func(Event), a
 			break
 		}
 		a.broadcastPending(sess.ID)
-		a.landUserSide(sess, pm.Content, pm.Kind, pm.Origin, emit)
+		a.landUserSide(sess, pm.Content, pm.Kind, pm.Origin, emit, pm.ID)
 		if err = a.runGoalRounds(run.ctx, sess, emit); err != nil {
 			break
 		}

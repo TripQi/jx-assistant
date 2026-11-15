@@ -11,6 +11,7 @@
       "name": "memory_query",
       "description": "查询用户记忆的全部字段（用户称呼、用户身份与喜好、AI 助理名字与身份）",
       "parameters": { "type": "object", "properties": {} },
+      "writes": false,
       "modes": ["task", "office", "coding", "beginner-coding", "skill-create"]
     },
     {

@@ -168,6 +168,9 @@ func requireCapability(t *toolContext, capID, title string, args json.RawMessage
 // 语义是「不做任何写入/执行」，不能留绕开沙箱的旁门。报错统一指路：
 // request_permission 申请切档（弹审批），或用户手动切权限芯片。
 func requireNotReadOnly(t *toolContext, what string) error {
+	if t == nil || t.sess == nil {
+		return fmt.Errorf("缺少会话权限上下文，拒绝 %s：无法确认写入权限，请在有效会话中重试（fail-closed）", what)
+	}
 	if permModeOf(t.sess) != permReadOnly {
 		return nil
 	}
@@ -277,8 +280,11 @@ func (a *App) switchSessionPerm(s *SessionMeta, mode string) {
 	a.broadcast(Event{Type: "session_updated", SessionID: s.ID, Permission: permModeOf(s), Tools: s.Tools})
 }
 
-// permModeOf 返回会话的权限模式（未设置时默认修改工作区）。
+// permModeOf 返回会话的权限模式（未设置时默认修改工作区；缺失会话按只读拒绝写入）。
 func permModeOf(s *SessionMeta) string {
+	if s == nil {
+		return permReadOnly
+	}
 	switch s.Permission {
 	case permReadOnly, permFull, permWorkspace:
 		return s.Permission

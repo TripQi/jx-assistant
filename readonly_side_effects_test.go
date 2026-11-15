@@ -232,6 +232,21 @@ func TestReadOnlyDeliverySideEffects(t *testing.T) {
 	})
 }
 
+func TestReadOnlyMissingSessionFailsClosed(t *testing.T) {
+	if got := permModeOf(nil); got != permReadOnly {
+		t.Fatalf("缺失会话必须按只读处理: %q", got)
+	}
+	for _, tc := range []*toolContext{nil, {}} {
+		if err := requireNotReadOnly(tc, "测试写入"); err == nil || !strings.Contains(err.Error(), "缺少会话权限上下文") {
+			t.Fatalf("缺失上下文必须可读拒绝: %v", err)
+		}
+	}
+	_, err := runTodoTaskCreate(&toolContext{}, json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "缺少会话权限上下文") {
+		t.Fatalf("待办缺失会话必须在副作用前拒绝: %v", err)
+	}
+}
+
 func TestReadOnlySnapshotExemption(t *testing.T) {
 	for _, permission := range []string{permReadOnly, permWorkspace, permFull} {
 		t.Run(permission, func(t *testing.T) {

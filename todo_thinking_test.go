@@ -78,7 +78,7 @@ func TestTodoThinkingMigrationKeepsOldEmpty(t *testing.T) {
 func TestTodoThinkingToolCreateUpdate(t *testing.T) {
 	a, s := newDoneTestApp(t)
 	a.Todos = s
-	ctx := &toolContext{app: a}
+	ctx := &toolContext{app: a, sess: &SessionMeta{Permission: permWorkspace}}
 	out, err := runTodoTaskCreate(ctx, json.RawMessage(`{"title":"工具档位","description":"x","schedule":{"kind":"manual"},"model_mode":"global","thinking":"max"}`))
 	if err != nil || !strings.Contains(out, "已新建") {
 		t.Fatalf("新建失败: %s %v", out, err)

@@ -3419,7 +3419,7 @@ function handleGlobalEvent(ev) {
     case 'pending':
       // 插话/排队队列变化：只更新对应的那个视图（自己窗口的操作也会推回来，天然多端一致）
       if (state.cur && ev.sessionId === state.cur.id) applyPending(mainView, ev.pending);
-      if (subState.cur && ev.sessionId === state.cur.id) applyPending(subView, ev.pending);
+      if (subState.cur && ev.sessionId === subState.cur.id) applyPending(subView, ev.pending);
       break;
     case 'stopped':
       // 用户显式停止（runtime.go 终态广播）：不算「完成未查看」，只刷列表
@@ -5859,17 +5859,22 @@ async function sendMidrun(content, viaInput, view, voiceUsed) {
       method: 'POST', body: JSON.stringify({ content, mode, voiceUsed: !!voiceUsed }),
     });
     if (!d.accepted) { pendingHint(view, '发送失败：该会话当前不接受消息'); return; }
-    // 本地立即出效果（插话贴到对话末尾，排队进坞）；服务端的 pending 广播可能
-    // 先于本次响应到达，按 id 去重，避免同一条显示两次
-    const known = view.state.pendingSteer.concat(view.state.pendingQueue).some((p) => p.id === d.id);
-    if (!known) {
-      const pm = { id: d.id, content: content, createdAt: '' };
-      if (d.mode === 'steer') view.state.pendingSteer.push(pm);
-      else view.state.pendingQueue.push(pm);
-    }
-    renderQueueDock(view);
+    // 优先采用写响应时刻的待生效快照：已排水的插话不再按 mode 盲回显。
+    // 不按历史正文删框：用户重复发送同一句话时，新插话仍可能尚未生效。
     view._pinned = false; // 插话/排队展示在对话末尾：恢复跟随看得到回执
-    renderMessages(view.state.msgs, view);
+    if (d.pending) {
+      applyPending(view, d.pending);
+    } else {
+      // 兜底（老后端无快照字段）：沿用本地回显 + 广播按 id 去重
+      const known = view.state.pendingSteer.concat(view.state.pendingQueue).some((p) => p.id === d.id);
+      if (!known) {
+        const pm = { id: d.id, content: content, createdAt: '' };
+        if (d.mode === 'steer') view.state.pendingSteer.push(pm);
+        else view.state.pendingQueue.push(pm);
+      }
+      renderQueueDock(view);
+      renderMessages(view.state.msgs, view);
+    }
     pendingHint(view, d.mode === 'steer' ? '已插话：模型输出中立即打断生效；工具执行中等下一步调用模型' : '已排队：本轮结束后自动发送');
   } catch (e) {
     pendingHint(view, '发送失败：' + e.message);

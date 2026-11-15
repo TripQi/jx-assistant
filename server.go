@@ -3257,7 +3257,11 @@ func (a *App) handleInterject(w http.ResponseWriter, r *http.Request) {
 	if !a.IsRunning(m.ID) && !a.queuePausedOf(m.ID) {
 		a.kickQueue(m) // 本轮已经结束：排队消息自己开一轮，不依赖用户再点一次（暂停时只排队不拉起）
 	}
-	writeJSON(w, 200, map[string]any{"accepted": true, "id": pm.ID, "mode": mode})
+	// 响应带上此刻的待生效快照：steer 的 kick 排水极快（打断→注入可在响应写回
+	// 前完成），前端若按 mode 盲回显会把已生效的插话重新画成「插话中」虚线框，
+	// 且摘框事件早已发过、无人再收——慢链路/远程中继下必现幽灵框。快照是真值：
+	// 已排走就不画，还在队里就照画。
+	writeJSON(w, 200, map[string]any{"accepted": true, "id": pm.ID, "mode": mode, "pending": a.pendingOf(m.ID)})
 }
 
 // handlePending 处理排队坞上的操作：删除（remove）、提前为插话（steer）、

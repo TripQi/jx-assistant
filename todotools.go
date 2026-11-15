@@ -336,6 +336,9 @@ func todoTaskCreateTool() Tool {
 }
 
 func runTodoTaskCreate(t *toolContext, args json.RawMessage) (string, error) {
+	if err := requireNotReadOnly(t, "新建待办/定时任务"); err != nil {
+		return "", err
+	}
 	var p struct {
 		Title       string       `json:"title"`
 		Description string       `json:"description"`
@@ -408,6 +411,9 @@ func todoTaskUpdateTool() Tool {
 }
 
 func runTodoTaskUpdate(t *toolContext, args json.RawMessage) (string, error) {
+	if err := requireNotReadOnly(t, "修改待办/定时任务"); err != nil {
+		return "", err
+	}
 	var p struct {
 		TaskID      string        `json:"task_id"`
 		Title       string        `json:"title"`
@@ -475,6 +481,10 @@ func todoTaskDeleteTool() Tool {
 }
 
 func runTodoTaskDelete(t *toolContext, args json.RawMessage) (string, error) {
+	// 操作审批不授予写权限：必须先切档，再确认这一次删除。
+	if err := requireNotReadOnly(t, "删除待办/定时任务"); err != nil {
+		return "", err
+	}
 	var p struct {
 		TaskID string `json:"task_id"`
 	}
@@ -517,6 +527,9 @@ func todoTaskRunTool() Tool {
 }
 
 func runTodoTaskRun(t *toolContext, args json.RawMessage) (string, error) {
+	if err := requireNotReadOnly(t, "执行待办/定时任务"); err != nil {
+		return "", err
+	}
 	var p struct {
 		TaskID string `json:"task_id"`
 	}

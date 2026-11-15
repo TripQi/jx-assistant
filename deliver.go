@@ -138,6 +138,15 @@ func runDeliverResult(t *toolContext, args json.RawMessage) (string, error) {
 			}
 		}
 	}
+	// 纯卡片只写内部展示元数据，不动用户文件，故只读档也可登记。
+	// Android 固定搬到下载目录；桌面端只有 upload 路径承诺搬运。
+	for _, f := range p.Files {
+		if isAndroidRuntime || strings.TrimSpace(f.Upload) != "" {
+			if err := requireNotReadOnly(t, "交付搬运/回写原件"); err != nil {
+				return "", err
+			}
+		}
+	}
 	// 远程会话：卡片登记照常（远程工作区文件，下载走远程读取）；搬运目标在
 	// 本地上传目录，远程会话的工作区不在本机，搬不了。
 	if t.isRemote() {
@@ -349,13 +358,20 @@ func (a *App) flushDeliveries(sessionID string) {
 
 func (a *App) runDeliveryJob(j *DeliveryJob) {
 	j.ExecutedAt = now()
-	ws := a.Cfg.Workspace
-	if m, err := a.Store.Get(j.SessionID); err == nil {
-		if m.Remote != nil {
-			a.finishDeliveryJob(j, "failed", "远程会话不支持交付执行（工作区不在本机）")
-			return
-		}
-		ws = wsOr(a, m)
+	m, err := a.Store.Get(j.SessionID)
+	if err != nil {
+		a.finishDeliveryJob(j, "failed", "无法读取交付会话权限，已放弃搬运")
+		return
+	}
+	// 登记到轮末之间可能切回只读；恢复的旧作业也必须按最新档位复查。
+	if err := requireNotReadOnly(&toolContext{app: a, sess: m}, "执行交付搬运/回写原件"); err != nil {
+		a.finishDeliveryJob(j, "failed", err.Error())
+		return
+	}
+	ws := wsOr(a, m)
+	if m.Remote != nil {
+		a.finishDeliveryJob(j, "failed", "远程会话不支持交付执行（工作区不在本机）")
+		return
 	}
 	fail := func(msg string) {
 		a.finishDeliveryJob(j, "failed", msg)

@@ -89,7 +89,8 @@ type ComponentManifest struct {
 //   - Modes：可用模式白名单（空＝全部模式）。沿用原专用工具的门控口径：只读
 //     答疑（aux）与长期助理（assistant）通常不声明
 //   - Writes：是否会产生写入副作用（true 的能力在计划模式下暂停，与 write/edit
-//     同理；模型看得见、调用时被拦）
+//     同理；模型看得见、调用时被拦）。清单应显式声明 true/false；旧清单漏标
+//     仍按 false 加载，但扫描时给出诊断，避免漏标静默绕过写权限门控。
 type ComponentCapability struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
@@ -191,6 +192,7 @@ func (r *ComponentRegistry) rescan() {
 				log.Printf("[组件] %s 与已发现的 %s（%s）同名，已忽略；内置优先", cdir, m.ID, prev.Dir)
 				continue
 			}
+			warnComponentCapabilityWrites(cdir, data, m)
 			items[m.ID] = componentEntry{Manifest: m, Dir: cdir, BuiltIn: builtIn}
 		}
 	}
@@ -220,6 +222,43 @@ func (r *ComponentRegistry) rescan() {
 			_ = os.WriteFile(r.statePath, data, 0644)
 		}
 	}
+}
+
+// warnComponentCapabilityWrites 只诊断，不猜测权限或拒绝旧组件加载。
+// bool 零值分不清漏标和显式 false，必须检查原始 JSON；名称启发式仅提醒复核，
+// 不能证明实现只读，也不能替代组件作者正确声明 writes。
+func warnComponentCapabilityWrites(dir string, data []byte, m ComponentManifest) {
+	var raw struct {
+		Capabilities []map[string]json.RawMessage `json:"capabilities"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return // 已通过清单解析；这里只做兼容性诊断，不改变加载结果
+	}
+	for i, c := range m.Capabilities {
+		if i >= len(raw.Capabilities) {
+			break
+		}
+		value, present := raw.Capabilities[i]["writes"]
+		if !present || string(value) == "null" {
+			log.Printf("[组件][writes 诊断] %s/manifest.json 组件 %q 能力 %q 未显式声明布尔 writes；兼容旧清单按 false 加载，写入副作用可能绕过只读/计划模式门控，请复核并显式声明 writes: true/false（未自动修改清单）", dir, m.ID, c.Name)
+			continue
+		}
+		if !c.Writes && componentCapabilityNameSuggestsWrite(c.Name) {
+			log.Printf("[组件][writes 诊断] %s/manifest.json 组件 %q 能力 %q 显式 writes: false，但名称疑似写操作；请复核副作用及写权限门控（仅名称启发式，保持原值加载，未自动修改清单）", dir, m.ID, c.Name)
+		}
+	}
+}
+
+func componentCapabilityNameSuggestsWrite(name string) bool {
+	for _, word := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '_' || r == '-' || r == '.' || r == '/'
+	}) {
+		switch word {
+		case "write", "update", "create", "delete", "remove", "set", "save", "add", "append", "insert", "replace", "clear", "reset", "enable", "disable", "install", "uninstall", "publish", "upload", "send", "execute", "start", "stop", "commit", "push", "sync":
+			return true
+		}
+	}
+	return false
 }
 
 // IsEnabled 组件的全局生效值（未记录=缺省启用）。

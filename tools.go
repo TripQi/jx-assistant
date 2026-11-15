@@ -1272,6 +1272,8 @@ func snapshotFileTool() Tool {
 	}
 }
 
+// runSnapshotFile 是显式只读豁免：只写内部快照库，服务于文件回退，
+// 不改用户文件、不产生用户可见副作用；源文件仍须经过 read 权限检查。
 func runSnapshotFile(t *toolContext, args json.RawMessage) (string, error) {
 	var p struct {
 		Path string `json:"path"`

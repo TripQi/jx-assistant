@@ -25,6 +25,7 @@ import (
 // kind 区分 chat（正常对话）/ summary（压缩摘要）/ report（系统注入的回报）；
 // compact 存规则压缩后的表示（特殊值 omit 表示组装上下文时整行跳过）。
 type StoredMessage struct {
+	RequestID string `json:"requestId,omitempty"` // 仅 UI 投影；普通 /chat 请求的落库关联保存在 audit 行
 	PendingID string `json:"pendingId,omitempty"` // 仅 UI 投影；持久化关联存在 audit 行，不是数据库列
 	Message
 	ID         int64  `json:"id"`
@@ -1078,6 +1079,9 @@ func (s *Store) Append(id string, m Message) error {
 func (s *Store) AppendRow(id string, sm *StoredMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if sm.RequestID != "" && sm.Role == "user" && sm.Kind == kindChat {
+		return s.appendChatRequestRowLocked(id, sm)
+	}
 	if sm.PendingID != "" {
 		return s.appendPendingRowLocked(id, sm)
 	}

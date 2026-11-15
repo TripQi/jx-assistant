@@ -11,6 +11,9 @@ import io
 import json
 import math
 import os
+import multiprocessing
+import select
+import socket
 import struct
 import sys
 import threading
@@ -268,6 +271,147 @@ def extract_wav_from_multipart(body: bytes) -> bytes:
     return body[pos:pos + 8 + riff_size]
 
 
+class ClientDisconnected(Exception):
+    """The caller no longer owns an inference request."""
+
+
+def _inference_worker(conn, transcribe=None, warmup=None):
+    """Spawn-safe entry point; native models live only in this process."""
+    try:
+        if warmup is None:
+            get_recognizer()
+            get_vad()
+        else:
+            warmup()
+        conn.send(("ready", None))
+        while True:
+            wav = conn.recv()
+            try:
+                text = (transcribe or transcribe_wav)(wav)
+                conn.send(("ok", text))
+            except Exception as exc:
+                conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    except (EOFError, BrokenPipeError):
+        pass
+    finally:
+        conn.close()
+
+
+class InferenceWorker:
+    """One reusable model process; cancellation discards its entire native state.
+
+    Threads cannot interrupt sherpa/ONNX C++ calls. Only the process handle we
+    created is terminated, never a PID lookup or another desktop/service process.
+    The lock covers warmup, inference and reap, so queued requests cannot kill a
+    different request's worker. Normal requests keep both models resident.
+    """
+    def __init__(self, transcribe=None, warmup=None):
+        self._ctx = multiprocessing.get_context("spawn")
+        self._gate = threading.Lock()
+        self._closing = threading.Event()
+        self._process = None
+        self._conn = None
+        self._ready = False
+        self._transcribe = transcribe
+        self._warmup = warmup
+
+    def _discard(self):
+        process, conn = self._process, self._conn
+        self._process = self._conn = None
+        self._ready = False
+        if conn is not None:
+            conn.close()
+        if process is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+            if process.is_alive():
+                # Do not allow a second model process if OS termination failed.
+                self._process = process
+                raise RuntimeError("推理子进程无法终止")
+            process.close()
+
+    def _start(self):
+        if self._process is not None and self._process.is_alive():
+            if self._conn is None:
+                raise RuntimeError("上轮推理子进程尚未终止")
+            return
+        self._discard()
+        parent, child = self._ctx.Pipe()
+        process = self._ctx.Process(
+            target=_inference_worker,
+            args=(child, self._transcribe, self._warmup), daemon=True)
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            raise
+        child.close()
+        self._conn, self._process = parent, process
+
+    def _receive(self, disconnected):
+        while True:
+            if self._closing.is_set():
+                raise RuntimeError("识别服务正在关闭")
+            if disconnected():
+                raise ClientDisconnected()
+            if self._conn.poll(0.05):
+                return self._conn.recv()
+            if not self._process.is_alive():
+                raise RuntimeError("推理子进程意外退出")
+
+    def transcribe(self, wav, disconnected):
+        # A disconnected queued request must not interrupt the current owner.
+        while not self._gate.acquire(timeout=0.05):
+            if disconnected():
+                raise ClientDisconnected()
+        try:
+            if self._closing.is_set():
+                raise RuntimeError("识别服务正在关闭")
+            if disconnected():
+                raise ClientDisconnected()
+            try:
+                self._start()
+                if not self._ready:
+                    kind, _ = self._receive(disconnected)
+                    if kind != "ready":
+                        raise RuntimeError("推理子进程未就绪")
+                    self._ready = True
+                if disconnected():
+                    raise ClientDisconnected()
+                self._conn.send(wav)
+                kind, value = self._receive(disconnected)
+                if kind != "ok":
+                    raise RuntimeError(value)
+                return value
+            except BaseException:
+                self._discard()
+                raise
+        finally:
+            self._gate.release()
+
+    def close(self):
+        self._closing.set()
+        with self._gate:
+            self._discard()
+
+
+_worker = InferenceWorker()
+
+
+class ASRServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def server_close(self):
+        super().server_close()
+        _worker.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -288,6 +432,15 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": {"message": "not found"}})
 
+    def _disconnected(self):
+        # Peek only: consuming bytes would corrupt a pipelined/keep-alive request.
+        # HTTP clients must close the socket on cancellation (Go context does).
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
     def do_POST(self):
         if not self.path.rstrip("/").endswith("/audio/transcriptions"):
             self._json(404, {"error": {"message": f"unknown route: {self.path}"}})
@@ -298,23 +451,31 @@ class Handler(BaseHTTPRequestHandler):
             wav = extract_wav_from_multipart(body)
             import time
             t0 = time.time()
-            text = transcribe_wav(wav)
+            text = _worker.transcribe(wav, self._disconnected)
             ms = int((time.time() - t0) * 1000)
             print(f"[vt-asr] {len(wav)//1024}KB → {len(text)}字 / {ms}ms", file=sys.stderr)
             self._json(200, {"text": text})
+        except (ClientDisconnected, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+            print("[vt-asr] 客户端已断开，本轮推理已停止", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             import traceback
             traceback.print_exc()
-            self._json(500, {"error": {"message": f"{type(e).__name__}: {e}", "type": "server_error"}})
+            try:
+                self._json(500, {"error": {"message": f"{type(e).__name__}: {e}", "type": "server_error"}})
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self.close_connection = True
 
 
 def main():
-    print("[vt-asr] 预热引擎（GPU/CPU 自动探测）...", file=sys.stderr)
-    get_recognizer()
-    get_vad()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"[vt-asr] 就绪 http://{HOST}:{PORT}/v1/audio/transcriptions", file=sys.stderr)
-    srv.serve_forever()
+    # Binding first avoids loading another model copy when the port is occupied.
+    srv = ASRServer((HOST, PORT), Handler)
+    try:
+        print(f"[vt-asr] 就绪 http://{HOST}:{PORT}/v1/audio/transcriptions", file=sys.stderr)
+        # Models warm up on the first live request in a cancellable spawn worker.
+        srv.serve_forever()
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

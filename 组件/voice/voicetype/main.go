@@ -376,12 +376,15 @@ func vtReadHistory() []vtHistoryItem {
 // vtSaveHistory 落一条记录：pcm 存成 wav（nil 则不带音频），滚动裁掉最老的
 // 并删除其音频文件。旧格式（text/injected 字段）读进来直接被新结构替换。
 func vtSaveHistory(pcm []byte, text, status string) {
+	vtSaveHistoryAt(pcm, text, status, time.Now())
+}
+
+func vtSaveHistoryAt(pcm []byte, text, status string, now time.Time) {
 	arr := vtReadHistory()
-	item := vtHistoryItem{Time: time.Now().Format("2006-01-02 15:04:05"), Text: text, Status: status}
+	item := vtHistoryItem{Time: now.Format("2006-01-02 15:04:05"), Text: text, Status: status}
 	if len(pcm) > 0 {
-		os.MkdirAll(filepath.Join(vtDir, "history"), 0755)
-		name := "history/" + time.Now().Format("20060102-150405.000") + ".wav"
-		if err := os.WriteFile(filepath.Join(vtDir, filepath.FromSlash(name)), vtPCMToWav(pcm), 0644); err != nil {
+		name, err := vtWriteHistoryAudio(pcm, now)
+		if err != nil {
 			vtLog("历史音频写入失败: %v", err)
 		} else {
 			item.Audio = name
@@ -397,6 +400,29 @@ func vtSaveHistory(pcm []byte, text, status string) {
 		arr = arr[len(arr)-vtHistoryKeep:]
 	}
 	os.WriteFile(filepath.Join(vtDir, "history.json"), mustJSON(arr), 0644)
+}
+
+// vtWriteHistoryAudio 独占创建唯一文件：同毫秒、重启或已有旧命名音频都不能互相覆盖。
+// JSON 仍存相对路径，试听与重新识别无需区分新旧文件名。
+func vtWriteHistoryAudio(pcm []byte, now time.Time) (string, error) {
+	dir := filepath.Join(vtDir, "history")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, now.Format("20060102-150405.000")+"-*.wav")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(vtPCMToWav(pcm))
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return "history/" + filepath.Base(f.Name()), nil
 }
 
 // vtPCMToWav 16kHz/16bit/单声道 PCM 加 44 字节 WAV 头（历史音频自给自足，

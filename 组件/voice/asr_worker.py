@@ -22,7 +22,7 @@ stdout 纪律：协议应答走原 fd1 的独立句柄；启动时把 sys.stdout
 落位（组件自包含）：本脚本与模型都在 组件/voice/ 里——
   组件/voice/asr_worker.py   本文件
   组件/voice/models/xasr/    离线模型（草稿与定稿共用；流式模型已删省 163MB）
-运行时用共享便携 Python（技能/_runtime/python，随仓库分发；sherpa-onnx/numpy 缺失自装）。
+运行时用共享便携 Python（技能/_runtime/python，随仓库分发；缺失依赖只报错，不自动安装）。
 （评估期的 paraformer/sensevoice/qwen 分支已删——结论见 git 历史 054c19e881。）
 """
 import base64
@@ -182,40 +182,28 @@ def main():
         state["engine"] = None
         state["model"] = None
 
-    # ---------- 运行时依赖自愈 ----------
+    # ---------- 运行时依赖检测（只在装载引擎时检查） ----------
     def ensure_deps():
-        """新机自愈：共享便携运行时没带语音组件的依赖（sherpa-onnx 与
-        numpy——语音组件的依赖不进技能装配清单）——首次使用时从清华镜像
-        装缺的（sherpa-onnx 约 20MB，秒级）。失败把可执行的补救命令带回给用户。"""
+        """共享运行时也服务 Office/PDF/OCR，不能在识别时擅自安装或修复包。"""
         missing = []
         try:
-            import sherpa_onnx  # noqa: F401
-            # 校验到属性为止：半卸载/损坏的包 import 也能成功，骗过纯导入检查
-            # （实测踩过：pyd 被存活 worker 锁住时 pip 只删一半）
+            import sherpa_onnx
             if not hasattr(sherpa_onnx, "OfflineRecognizer"):
-                raise ImportError("sherpa_onnx 不完整（缺 OfflineRecognizer）")
-        except Exception:
-            missing.append("sherpa-onnx")
+                raise ImportError("缺 OfflineRecognizer，包可能损坏或版本不兼容")
+        except Exception as e:
+            missing.append(("sherpa-onnx", str(e)))
         try:
-            import numpy  # noqa: F401 —— transcribe 的 pcm→float 转换用
-        except Exception:
-            missing.append("numpy")
-        if not missing:
-            return
-        import subprocess
-        print(f"[voice] 首次使用/修复：安装 {' '.join(missing)}（清华镜像）…", file=sys.stderr)
-        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall",
-                            "--no-deps", *missing,
-                            "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"])
-        if r.returncode != 0:
-            raise RuntimeError("依赖自动安装失败：请手动执行 "
-                               + sys.executable + " -m pip install " + " ".join(missing))
-        # 装完清模块缓存：本进程可能已 import 过坏包（sys.modules 里是旧货），
-        # 不清的话后续 import 拿到的仍是修复前的残骸（实测踩过）
-        for k in [k for k in list(sys.modules)
-                  if k == "sherpa_onnx" or k.startswith("sherpa_onnx.")
-                  or k == "numpy" or k.startswith("numpy.")]:
-            del sys.modules[k]
+            import numpy  # noqa: F401
+        except Exception as e:
+            missing.append(("numpy", str(e)))
+        if missing:
+            packages = " ".join(name for name, _ in missing)
+            detail = "；".join(f"{name}: {reason}" for name, reason in missing)
+            raise RuntimeError(
+                f"语音依赖缺失或不可用：{detail}。未自动修改共享运行时。"
+                "请通过技能管理器修复语音依赖，或由维护者确认共享依赖兼容性后手动执行："
+                f'"{sys.executable}" -m pip install --upgrade {packages}'
+                "（当前要求 sherpa-onnx 提供 OfflineRecognizer，numpy 可正常导入）")
 
     # ---------- 分片模型拼回 ----------
     def ensure_parts(xasr_dir):

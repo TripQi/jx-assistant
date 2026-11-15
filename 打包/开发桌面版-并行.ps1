@@ -27,20 +27,38 @@ $devData = Join-Path $devRoot "data"
 $devWs   = Join-Path $devRoot "工作区"
 
 # JSON 字符串字面量（转义反斜杠与引号）：Windows 路径要按 JSON 规则写进配置
-function To-JsonString([string]$s) { '"' + ($s -replace '\\', '\\' -replace '"', '\"') + '"' }
+function To-JsonString([string]$s) { ConvertTo-Json -InputObject $s -Compress }
 
-# 把配置文本里某个顶层键的值改成 $value；键不存在时插到最外层对象开头。
-# 为什么用正则改文本而不是 ConvertFrom-Json 往返：往返会重排格式、把不认得
-# 的东西（非 ASCII 转义等）改写一遍，用户手动复制来的配置看着一团糟。
+# 只替换顶层属性的值区间，未知字段、嵌套同名键与原有顺序/格式原样保留。
 function Set-DevConfigValue([string]$text, [string]$key, [string]$value) {
   $lit = To-JsonString $value
-  $pat = '"' + [regex]::Escape($key) + '"\s*:\s*"(?:[^"\\]|\\.)*"'
-  if ([regex]::IsMatch($text, $pat)) {
-    return [regex]::Replace($text, $pat, { param($m) '"' + $key + '": ' + $lit })
+  $parts = [regex]::Matches($text, '"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:]+')
+  $depth = 0
+  for ($i = 0; $i -lt $parts.Count; $i++) {
+    $token = $parts[$i].Value
+    if ($depth -eq 1 -and $token.StartsWith('"') -and
+        $i + 1 -lt $parts.Count -and $parts[$i + 1].Value -eq ':' -and
+        (ConvertFrom-Json -InputObject $token) -ceq $key) {
+      $start = $parts[$i + 2].Index
+      $valueDepth = 0
+      for ($j = $i + 2; $j -lt $parts.Count; $j++) {
+        $v = $parts[$j].Value
+        if ($valueDepth -eq 0 -and ($v -eq ',' -or $v -eq '}')) {
+          $end = $parts[$j - 1].Index + $parts[$j - 1].Length
+          return $text.Substring(0, $start) + $lit + $text.Substring($end)
+        }
+        if ($v -eq '{' -or $v -eq '[') { $valueDepth++ }
+        if ($v -eq '}' -or $v -eq ']') { $valueDepth-- }
+      }
+    }
+    if ($token -eq '{' -or $token -eq '[') { $depth++ }
+    if ($token -eq '}' -or $token -eq ']') { $depth-- }
   }
   $brace = $text.IndexOf('{')
-  if ($brace -lt 0) { return $text }
-  return $text.Substring(0, $brace + 1) + "`r`n  `"$key`": $lit," + $text.Substring($brace + 1)
+  if ($brace -lt 0) { throw 'Expected a JSON object' }
+  $rest = $text.Substring($brace + 1)
+  $comma = if ($rest.TrimStart().StartsWith('}')) { '' } else { ',' }
+  return $text.Substring(0, $brace + 1) + "`r`n  `"$key`": $lit$comma" + $rest
 }
 
 # 1) 只关本脚本产物的旧实例（按完整路径匹配：安装版与其他桌面 exe 不受影响）

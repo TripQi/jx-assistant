@@ -272,7 +272,8 @@ function tokenCombo(kind, value, apply, placeholder) {
     input.setAttribute('aria-expanded', 'true');
     // 打开时把高亮落在「当前值恰好是某个档位」的那一项上；自定义值就从头数
     const curIdx = items.findIndex((el) => el.classList.contains('cur'));
-    if (dir) setActive(curIdx >= 0 ? curIdx : (dir === 'last' ? items.length - 1 : 0));
+    setActive(curIdx >= 0 ? curIdx : (dir === 'last' ? items.length - 1 : 0));
+    input.focus();
     place();
     document.addEventListener('mousedown', onDocDown, true);
     window.addEventListener('resize', place);
@@ -2715,6 +2716,7 @@ function renderNav() {
 // 选中分区＝「地址」：一级菜单点击与各直达入口共用，两端同一条路径。唯一
 // 平台差异＝窄屏把历史补到两层（契约：openSettings 已先压好「一级」底座）
 function navGoto(pane) {
+  closeTokenCombo(); // 程序导航也要收起挂在 body 上的浮层
   setNav.pane = pane;
   setNav.level = 2;
   if (isNarrow() && setHistDepth < 2) {

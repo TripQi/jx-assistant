@@ -3030,10 +3030,7 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func wsOr(a *App, m *SessionMeta) string {
-	if m.Workspace != "" {
-		return m.Workspace
-	}
-	return a.Cfg.Workspace
+	return a.workspaceOf(m)
 }
 
 // handleUpload 接收文件上传：保存进会话工作区，注记文本随响应返回——由调用方

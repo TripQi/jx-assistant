@@ -197,8 +197,16 @@ func TestProjectKnowledgeInheritedHistoryIsolation(t *testing.T) {
 	if _, err := a.Store.CreateProject(Project{Name: "别的项目", Workspaces: []ProjectWorkspace{binding}}); err != nil {
 		t.Fatal(err)
 	}
-	for i, ws := range []string{otherWS, t.TempDir(), ""} {
-		child := &SessionMeta{ID: []string{"other-project", "unregistered", "empty-workspace"}[i], Mode: "task", Workspace: ws}
+	// Empty follows the configured default, which here belongs to the parent.
+	defaultChild := &SessionMeta{ID: "default-workspace", Mode: "task"}
+	if err := a.Store.Create(defaultChild); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := a.copyInheritedContext(parent.ID, defaultChild.ID); err != nil || n == 0 {
+		t.Fatalf("默认工作区绑定同项目应允许继承: %d %v", n, err)
+	}
+	for i, ws := range []string{otherWS, t.TempDir()} {
+		child := &SessionMeta{ID: []string{"other-project", "unregistered"}[i], Mode: "task", Workspace: ws}
 		if err := a.Store.Create(child); err != nil {
 			t.Fatal(err)
 		}

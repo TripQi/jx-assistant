@@ -61,15 +61,14 @@ func normalizeProjectWorkspace(kind, display string) (ProjectWorkspace, error) {
 	return w, nil
 }
 
-func sessionProjectWorkspace(sess *SessionMeta) (ProjectWorkspace, error) {
+func (a *App) sessionProjectWorkspace(sess *SessionMeta) (ProjectWorkspace, error) {
 	if sess == nil {
 		return ProjectWorkspace{}, fmt.Errorf("缺少有效会话")
 	}
 	if sess.Remote != nil {
 		return normalizeProjectWorkspace("remote", sess.Remote.Display())
 	}
-	// 不用全局默认工作区兜底，避免空工作区被悄悄归到另一个项目。
-	return normalizeProjectWorkspace("local", sess.Workspace)
+	return normalizeProjectWorkspace("local", a.workspaceOf(sess))
 }
 
 func projectWorkspaceContains(root, target ProjectWorkspace) bool {
@@ -103,10 +102,15 @@ func (a *App) resolveProjectWorkspace(target ProjectWorkspace) (*Project, error)
 }
 
 func (a *App) resolveSessionProject(sess *SessionMeta) (*Project, error) {
-	if sess == nil || (sess.Remote == nil && strings.TrimSpace(sess.Workspace) == "") {
+	if sess == nil {
 		return nil, nil
 	}
-	w, err := sessionProjectWorkspace(sess)
+	// 默认工作区必须有效才能参与归属；不将空值或相对路径猜成进程当前目录。
+	usingDefault := sess.Remote == nil && sess.Workspace == ""
+	if usingDefault && (a.Cfg == nil || strings.ContainsRune(a.Cfg.Workspace, 0) || !filepath.IsAbs(strings.TrimSpace(a.Cfg.Workspace))) {
+		return nil, nil
+	}
+	w, err := a.sessionProjectWorkspace(sess)
 	if err != nil {
 		return nil, err
 	}

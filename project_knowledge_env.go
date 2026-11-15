@@ -33,7 +33,7 @@ func (a *App) projectKnowledgeEnv(sess *SessionMeta) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("读取项目知识失败：%w", err)
 			}
-			ws := sess.Workspace
+			ws := a.workspaceOf(sess)
 			if sess.Remote != nil {
 				ws = sess.Remote.Display()
 			}

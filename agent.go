@@ -38,14 +38,8 @@ const (
 // 很少需要上百 KB，早一点提示模型改用「重定向到文件 + read 分段读」更省钱。
 const cmdOutputMaxBytes = 64 * 1024
 
-// toolResultClipMarker 是截断标记的固定前缀。检测「是否已裁过」只认这个前缀，
-// 标记文案后半段可自由调整而不影响去重判断。
+// toolResultClipMarker 是上下文层截断提示的固定前缀，仅用于展示，不作为可信状态。
 const toolResultClipMarker = "工具结果过长已截断"
-
-// clipHeadTailMarkerKey 是 clipHeadTail 判断「这段文本已经被裁过」的依据：各处
-// 标记文案都必须包含这半句（两个标记都写了「…过长已截断：原始共 N 字节…」）。
-// 留得长一点是为了不误伤正文里恰好出现「已截断」字样的输出。
-const clipHeadTailMarkerKey = "过长已截断：原始共"
 
 // clipHeadTail 是「头尾双保留」裁切的公用助手：超限时保留头部 2/3 + 尾部 1/3
 // （头尾共用同一份 limit 预算，所以总长度基本不变），中间插入 marker 生成的
@@ -58,17 +52,23 @@ func clipHeadTail(s string, limit int, marker func(total, head, tail int) string
 	if limit <= 0 || len(s) <= limit {
 		return s
 	}
-	// 已裁过就不再重复裁，免得到最后只剩一堆提示
-	if strings.Contains(s, clipHeadTailMarkerKey) {
-		return s
+	// 正文（包括源码示例中的标记）不是可信的裁剪状态；提示也必须计入硬预算。
+	budget := limit
+	for {
+		headLimit := budget * toolResultHeadNum / toolResultHeadDen
+		tailLimit := budget - headLimit
+		headCut := runeHeadCut(s, headLimit)
+		tailStart := runeTailStart(s, len(s)-tailLimit)
+		note := marker(len(s), headCut, len(s)-tailStart)
+		excess := headCut + len(note) + len(s) - tailStart - limit
+		if excess <= 0 {
+			return s[:headCut] + note + s[tailStart:]
+		}
+		budget -= excess
+		if budget < 0 {
+			return note[:runeHeadCut(note, limit)] // 极小预算连提示都容不下
+		}
 	}
-	headLimit := limit * toolResultHeadNum / toolResultHeadDen
-	tailLimit := limit - headLimit
-
-	headCut := runeHeadCut(s, headLimit)            // 不超过 headLimit，且落在 rune 边界
-	tailStart := runeTailStart(s, len(s)-tailLimit) // 不早于该位置，且落在 rune 边界
-	// len(s) > limit 时必有 tailStart > headLimit >= headCut，tailStart-headCut > 0
-	return s[:headCut] + marker(len(s), headCut, len(s)-tailStart) + s[tailStart:]
 }
 
 // cmdTruncNote 是执行层的截断标记：说明保留了多少，并明确告诉模型下一步怎么做
@@ -84,8 +84,7 @@ func cmdTruncNote(total, head, tail int) string {
 // 一段省略说明（总字节数、头尾各保留多少、省略了多少、如何分段读取完整内容）。
 // 两个切口都在 rune 边界收口，不会劈开多字节字符。
 func clipToolResult(out string) string {
-	// 已裁过（个别工具如 read 自己就按同一上限裁）就不再重复裁，免得把提示也切掉
-	if len(out) <= toolResultMaxBytes || strings.Contains(out, toolResultClipMarker) {
+	if len(out) <= toolResultMaxBytes {
 		return out
 	}
 	return clipHeadTail(out, toolResultMaxBytes, func(total, head, tail int) string {
@@ -1553,11 +1552,8 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 					from := target.Model + " @ " + target.BaseURL
 					sess.Provider, sess.Model, sess.ProviderKey = "", "", ""
 					_ = a.Store.SaveMeta(sess)
-					nt, nerr := a.resolveTarget(sess)
-					if nerr != nil {
-						return nerr // 全局默认也跑不起来：如实报错，不再一层层试
-					}
-					target = nt
+					// 本步复用已解析的默认快照；空引用落库保持后续轮次跟随默认的既有语义。
+					target = def
 					modelFallback = true
 					a.auditWrite(sess, map[string]any{"type": "model_fallback",
 						"expert": sess.Expert, "from_model": from, "to_model": target.Model,

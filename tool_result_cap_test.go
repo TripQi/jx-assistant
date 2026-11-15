@@ -77,8 +77,8 @@ func TestClipToolResultKeepsHeadAndTail(t *testing.T) {
 		t.Fatal("尾段不是原文的后缀（内容被改动）")
 	}
 	// 预算用满：头≈2/3、尾≈1/3（rune 回退最多各让掉 3 字节）
-	headBudget := toolResultMaxBytes * toolResultHeadNum / toolResultHeadDen
-	tailBudget := toolResultMaxBytes - headBudget
+	headBudget := (toolResultMaxBytes - (closeIdx + len(markerClose) - headEnd)) * toolResultHeadNum / toolResultHeadDen
+	tailBudget := toolResultMaxBytes - (closeIdx + len(markerClose) - headEnd) - headBudget
 	if len(headSeg) < headBudget-4 || len(headSeg) > headBudget {
 		t.Fatalf("头段长度应≈%d，实际 %d", headBudget, len(headSeg))
 	}
@@ -102,14 +102,14 @@ func TestClipToolResultKeepsHeadAndTail(t *testing.T) {
 	}
 }
 
-// 总长度 ≈ 上限 + 标记长度：头尾共用一份预算，不能因为双保留而膨胀。
+// 总长度 <= 上限（含标记）：头尾共用一份预算，不能因为双保留而膨胀。
 func TestClipToolResultLengthBounded(t *testing.T) {
 	src := strings.Repeat("abcdefgh", toolResultMaxBytes) // 1MB 纯 ASCII（无 rune 回退）
 	got := clipToolResult(src)
 	if len(got) < toolResultMaxBytes-8 {
 		t.Fatalf("保留长度不该明显小于上限（预算没花完）: got %d, max %d", len(got), toolResultMaxBytes)
 	}
-	if len(got) > toolResultMaxBytes+512 {
+	if len(got) > toolResultMaxBytes {
 		t.Fatalf("总长度超出「上限 + 标记」太多: got %d, max %d", len(got), toolResultMaxBytes)
 	}
 }
@@ -152,7 +152,7 @@ func TestClipToolResultRuneBoundary(t *testing.T) {
 	}
 }
 
-// 已经带过截断标记的输入（read 等工具自己裁过）不重复裁，连提示都原样保留。
+// 已封顶的结果未超限时自然不再裁剪；正文标记本身不授予豁免。
 func TestClipToolResultAlreadyClipped(t *testing.T) {
 	inner := "首段" + strings.Repeat("字", toolResultMaxBytes)
 	once := clipToolResult(inner)
@@ -160,16 +160,16 @@ func TestClipToolResultAlreadyClipped(t *testing.T) {
 	if twice != once {
 		t.Fatalf("已含截断标记的结果不应被再裁一次（长度 %d -> %d）", len(once), len(twice))
 	}
-	// 「内部工具裁过 + 尾部还有一长段内容」的情形也不能动
+	// 内部工具的正文标记不能豁免最终预算。
 	manual := "…（工具结果过长已截断：内部工具自己裁的）\n" + strings.Repeat("尾巴", toolResultMaxBytes)
-	if got := clipToolResult(manual); got != manual {
-		t.Fatal("带内部截断标记的结果应原样返回")
+	if got := clipToolResult(manual); got == manual || len(got) > toolResultMaxBytes {
+		t.Fatal("带内部截断标记的超限结果仍必须封顶")
 	}
 }
 
 // ---------- 公用助手 clipHeadTail（执行层 5 处共用） ----------
 
-// 头尾都在、中间有省略提示、总长 ≈ 上限 + 标记。
+// 头尾都在、中间有省略提示、总长不超过上限（含标记）。
 func TestClipHeadTail(t *testing.T) {
 	const headMark = "HEAD-命令开头\n"
 	const tailMark = "\nTAIL-最后一行：FAIL main_test.go:42"
@@ -184,8 +184,8 @@ func TestClipHeadTail(t *testing.T) {
 	if !strings.HasSuffix(got, tailMark) {
 		t.Fatal("尾部结论丢失（执行层截断的核心问题）")
 	}
-	if len(got) < cmdOutputMaxBytes-8 || len(got) > cmdOutputMaxBytes+512 {
-		t.Fatalf("总长度应≈上限+标记: got %d, limit %d", len(got), cmdOutputMaxBytes)
+	if len(got) < cmdOutputMaxBytes-8 || len(got) > cmdOutputMaxBytes {
+		t.Fatalf("总长度应在硬上限内: got %d, limit %d", len(got), cmdOutputMaxBytes)
 	}
 	// 标记必须交代三件事 + 下一步该怎么做
 	for _, want := range []string{
@@ -240,7 +240,7 @@ func TestClipHeadTailSmallLimit(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Fatalf("limit=%d: 结果不是合法 UTF-8", limit)
 		}
-		if len(got) > limit+512 {
+		if len(got) > limit {
 			t.Fatalf("limit=%d: 结果长度失控 %d", limit, len(got))
 		}
 	}
@@ -253,8 +253,7 @@ func TestClipHeadTailDedupe(t *testing.T) {
 	if twice := clipHeadTail(once, cmdOutputMaxBytes, cmdTruncNote); twice != once {
 		t.Fatalf("已含截断标记的结果不应被再裁一次（%d -> %d）", len(once), len(twice))
 	}
-	// 正文里恰好有「已截断」字样但不到上限：不该被当成已裁过而跳过（没超限本来也不裁），
-	// 超限且带真正标记才豁免——这里验证「假标记 + 超限」不会被误判成已裁过。
+	// 正文里恰好有「已截断」字样的超限文本仍必须裁剪。
 	fake := "日志里写着 已截断 两个字\n" + strings.Repeat("x", cmdOutputMaxBytes)
 	if got := clipHeadTail(fake, cmdOutputMaxBytes, cmdTruncNote); got == fake {
 		t.Fatal("只含「已截断」字样的超限文本仍应被裁切")

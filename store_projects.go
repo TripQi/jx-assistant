@@ -15,6 +15,7 @@ import (
 const DefaultProjectKnowledgeBudget int64 = 4000
 
 var (
+	ErrProjectMetadataConflict      = errors.New("项目名称或绑定已变更，请保留草稿并刷新后合并再保存")
 	ErrProjectNotFound              = errors.New("项目不存在，请重新查询登记项目")
 	ErrProjectArchived              = errors.New("项目已归档，请先由用户在设置页恢复")
 	ErrProjectRevisionConflict      = errors.New("知识版本冲突，请重读当前正文后合并再保存")
@@ -202,11 +203,14 @@ func (s *Store) CreateProject(p Project) (Project, error) {
 	return result, nil
 }
 
-// 元数据和绑定整体替换；归档/恢复不伪装为正文更新，重复保存不刷新时间。
+// 整体替换兼容内部调用；携带原快照时间，陈旧副本不得覆盖新元数据。
 func (s *Store) UpdateProject(p Project) (Project, error) {
-	if err := validateProject(p); err != nil {
-		return Project{}, err
-	}
+	return s.PatchProject(p.ID, &p.Name, &p.Archived, &p.Workspaces, &p.UpdatedAt)
+}
+
+// 只应用提交字段；读取、冲突校验及更新都在同一事务，未提交字段不受并发编辑影响。
+// expectedUpdatedAt 与知识 revision 独立，预算和正文仍共用原有 revision。
+func (s *Store) PatchProject(id string, name *string, archived *bool, workspaces *[]ProjectWorkspace, expectedUpdatedAt *string) (Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -214,8 +218,24 @@ func (s *Store) UpdateProject(p Project) (Project, error) {
 		return Project{}, err
 	}
 	defer tx.Rollback()
-	current, err := readProject(tx, p.ID)
+	current, err := readProject(tx, id)
 	if err != nil {
+		return Project{}, err
+	}
+	if expectedUpdatedAt != nil && *expectedUpdatedAt != current.UpdatedAt {
+		return Project{}, ErrProjectMetadataConflict
+	}
+	p := current
+	if name != nil {
+		p.Name = *name
+	}
+	if archived != nil {
+		p.Archived = *archived
+	}
+	if workspaces != nil {
+		p.Workspaces = *workspaces
+	}
+	if err := validateProject(p); err != nil {
 		return Project{}, err
 	}
 	equal := p.Name == current.Name && p.Archived == current.Archived && len(p.Workspaces) == len(current.Workspaces)

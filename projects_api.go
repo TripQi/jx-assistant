@@ -40,7 +40,7 @@ func decodeProjectRequest(w http.ResponseWriter, r *http.Request, v any) bool {
 func projectResponse(w http.ResponseWriter, v any, err error) {
 	if err != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, ErrProjectRevisionConflict) {
+		if errors.Is(err, ErrProjectRevisionConflict) || errors.Is(err, ErrProjectMetadataConflict) {
 			code = http.StatusConflict
 		}
 		if errors.Is(err, ErrProjectNotFound) {
@@ -77,9 +77,10 @@ func (a *App) handleProjectPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p struct {
-		Name       *string `json:"name"`
-		Archived   *bool   `json:"archived"`
-		Workspaces *[]struct {
+		ExpectedUpdatedAt *string `json:"expected_updated_at"`
+		Name              *string `json:"name"`
+		Archived          *bool   `json:"archived"`
+		Workspaces        *[]struct {
 			Kind        string `json:"workspace_kind"`
 			DisplayPath string `json:"display_path"`
 		} `json:"workspaces"`
@@ -100,21 +101,7 @@ func (a *App) handleProjectPatch(w http.ResponseWriter, r *http.Request) {
 		}
 		bindings = &ws
 	}
-	pr, e := a.Store.GetProject(r.PathValue("id"))
-	if e != nil {
-		projectResponse(w, nil, e)
-		return
-	}
-	if p.Name != nil {
-		pr.Name = *p.Name
-	}
-	if p.Archived != nil {
-		pr.Archived = *p.Archived
-	}
-	if bindings != nil {
-		pr.Workspaces = *bindings
-	}
-	pr, e = a.Store.UpdateProject(pr)
+	pr, e := a.Store.PatchProject(r.PathValue("id"), p.Name, p.Archived, bindings, p.ExpectedUpdatedAt)
 	projectResponse(w, pr, e)
 }
 func (a *App) handleProjectDelete(w http.ResponseWriter, r *http.Request) {

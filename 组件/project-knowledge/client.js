@@ -219,7 +219,7 @@
         perform(async function () {
           var newName = d.name.trim(); if (!newName) throw new Error('项目名称不能为空');
           var ws = d.workspaces.map(function (w) { if (!w.display_path.trim()) throw new Error('绑定路径不能为空'); return { workspace_kind: w.workspace_kind, display_path: w.display_path.trim() }; });
-          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { name: newName, workspaces: ws });
+          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { name: newName, workspaces: ws, expected_updated_at: p.updated_at });
           d.project = saved; d.name = saved.name; d.workspaces = bindings(saved);
           projects = projects.map(function (x) { return x.id === saved.id ? saved : x; });
           renderOptions(saved.id); renderEditor(); message('名称与绑定已保存；知识正文请单独保存。');
@@ -230,7 +230,7 @@
         if (!leave()) return;
         if (!window.confirm(p.archived ? '恢复后该项目可正常注入和维护，确认恢复？' : '归档后停止自动注入并只读保留，不中断正在运行的会话。确认归档？')) return;
         perform(async function () {
-          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { archived: !p.archived });
+          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { archived: !p.archived, expected_updated_at: p.updated_at });
           d.project = saved;
           projects = projects.map(function (x) { return x.id === saved.id ? saved : x; }); renderOptions(saved.id); renderEditor();
           message(saved.archived ? '已归档，未保存草稿仍留在内存；恢复使用后可继续编辑。' : '已恢复使用。');

@@ -41,33 +41,42 @@ func activeHost(t *toolContext) (browserTarget, error) {
 	return h, nil
 }
 
-// capNoteBrowser 是 browser_* 工具描述统一携带的权限提醒句。
+// capNoteBrowserWrite 提醒能力授权不等于授予写权限。
+const capNoteBrowserWrite = "只读档禁止此动作（能力已开启或获批也不等于切档）；请用 request_permission(target=workspace-write, justification=…) 申请切档，或请用户切权限芯片。"
+
+// capNoteBrowser 是 browser_* 工具描述统一携带的能力提醒句。
 const capNoteBrowser = "需会话开启「操作浏览器」能力：未开启时本工具会被拦下，可在被拦后同轮带 request_capability=true 与一句 justification 重试向用户申请开启（弹审批卡）；不要改用命令行拉浏览器（沙箱内必败）。"
 
 func browserOpenTool() Tool {
 	return Tool{
 		Spec: toolSpec("browser_open",
 			"打开或导航到指定网页或本地文件（各实例各自保留地址与登录态，重开会回到之前的页面）。url 接受浏览器支持的任意地址：http/https 网址、file:/// 本地文件路径，以及 edge://、about: 等内部页（部分内部页浏览器本身不允许嵌入打开，会自然报导航失败）。mode 选打开方式："+
-			"headless（默认）在内嵌浏览器打开——桌面版显示在右栏「浏览器」面板（原生 Edge 网页，用户可旁观并随时直接操作），网页版在后台运行；两种形态都是每个会话一个独立实例（页面与登录态互不串台，用户切到别的对话时面板跟着切走，切回来即恢复）；"+
-			"headed 弹一个独立的浏览器窗口，用户在真实窗口里查看和操作，适合演示给用户、需要用户配合填写的场景（各会话独立窗口与登录态、互不干扰；窗口被手动关闭后再次 open 会自动重开新窗口）。"+
-			"grants 可选：给该会话的浏览器实例预授权站点权限，每项「权限名@origin」（如 automatic_downloads@https://mail.qq.com——预授权 QQ 邮箱自动下载多个文件，不再弹「网页想要下载多个文件」确认；权限名是 Chromium content settings 类型名，与浏览器设置页一一对应，常用还有 notifications、geolocation、microphone、camera；origin 可写宽如 https://[*.]qq.com）。"+
-			"预授权只对列出的站点生效、其余站点保持默认询问，写入实例 profile 需重启生效（工具自动处理：在跑的实例会自动重开，登录态保留）。"+
-			"之后的其他 browser_* 工具作用于最近一次 browser_open 选定的实例。返回页面标题与最终地址。"+capNoteBrowser,
+				"headless（默认）在内嵌浏览器打开——桌面版显示在右栏「浏览器」面板（原生 Edge 网页，用户可旁观并随时直接操作），网页版在后台运行；两种形态都是每个会话一个独立实例（页面与登录态互不串台，用户切到别的对话时面板跟着切走，切回来即恢复）；"+
+				"headed 弹一个独立的浏览器窗口，用户在真实窗口里查看和操作，适合演示给用户、需要用户配合填写的场景（各会话独立窗口与登录态、互不干扰；窗口被手动关闭后再次 open 会自动重开新窗口）。"+
+				"grants 可选：给该会话的浏览器实例预授权站点权限，每项「权限名@origin」（如 automatic_downloads@https://mail.qq.com——预授权 QQ 邮箱自动下载多个文件，不再弹「网页想要下载多个文件」确认；权限名是 Chromium content settings 类型名，与浏览器设置页一一对应，常用还有 notifications、geolocation、microphone、camera；origin 可写宽如 https://[*.]qq.com）。"+
+				"预授权只对列出的站点生效、其余站点保持默认询问；只读档禁止 grants（普通导航仍可用）。写入实例 profile 需重启生效（工具自动处理：在跑的实例会自动重开，登录态保留）。"+
+				"之后的其他 browser_* 工具作用于最近一次 browser_open 选定的实例。返回页面标题与最终地址。"+capNoteBrowser,
 			objSchema(withCapRequest(map[string]any{
 				"url":    strProp("要打开的地址：http/https 网址、file:/// 本地路径或浏览器内部页（edge:// 等）"),
 				"mode":   strProp("headless（默认，内嵌形态）或 headed（独立窗口）"),
 				"grants": map[string]any{"type": "array", "items": strProp("预授权项：权限名@origin，如 automatic_downloads@https://mail.qq.com"), "description": "可选：给该会话浏览器实例预授权的站点权限（默认不授任何权）"},
 			}), "url")),
 		Run: func(t *toolContext, args json.RawMessage) (string, error) {
-			if err := requireCapability(t, capBrowser, "操作浏览器", args); err != nil {
-				return "", err
-			}
 			var p struct {
 				URL    string   `json:"url"`
 				Mode   string   `json:"mode"`
 				Grants []string `json:"grants"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
+				return "", err
+			}
+			if len(p.Grants) > 0 {
+				// 导航可只读使用，但站点预授权会写 profile，不能混在导航里豁免。
+				if err := requireNotReadOnly(t, "写入浏览器站点预授权"); err != nil {
+					return "", err
+				}
+			}
+			if err := requireCapability(t, capBrowser, "操作浏览器", args); err != nil {
 				return "", err
 			}
 			h := t.app.browserFor(sessionBrowserKey(t), p.Mode)
@@ -126,10 +135,13 @@ func browserContentTool() Tool {
 func browserClickTool() Tool {
 	return Tool{
 		Spec: toolSpec("browser_click",
-			"点击当前网页里匹配 CSS 选择器的元素（第一个匹配项）。点击后稍等页面反应。"+capNoteBrowser,
+			"点击当前网页里匹配 CSS 选择器的元素（第一个匹配项）。点击后稍等页面反应。"+capNoteBrowserWrite+capNoteBrowser,
 			objSchema(withCapRequest(map[string]any{"selector": strProp("CSS 选择器")}), "selector"),
 		),
 		Run: func(t *toolContext, args json.RawMessage) (string, error) {
+			if err := requireNotReadOnly(t, "点击网页（可能提交表单或触发外部写操作）"); err != nil {
+				return "", err
+			}
 			if err := requireCapability(t, capBrowser, "操作浏览器", args); err != nil {
 				return "", err
 			}
@@ -155,7 +167,7 @@ func browserClickTool() Tool {
 func browserTypeTool() Tool {
 	return Tool{
 		Spec: toolSpec("browser_type",
-			"向当前网页里匹配 CSS 选择器的输入框输入文本（支持中文，整段注入）。clear=true 时先清空已有内容（默认清空）。"+capNoteBrowser,
+			"向当前网页里匹配 CSS 选择器的输入框输入文本（支持中文，整段注入）。clear=true 时先清空已有内容（默认清空）。"+capNoteBrowserWrite+capNoteBrowser,
 			objSchema(withCapRequest(map[string]any{
 				"selector": strProp("输入框的 CSS 选择器，如 input[name='q']"),
 				"text":     strProp("要输入的文本"),
@@ -163,6 +175,9 @@ func browserTypeTool() Tool {
 			}), "selector", "text"),
 		),
 		Run: func(t *toolContext, args json.RawMessage) (string, error) {
+			if err := requireNotReadOnly(t, "向网页输入（可能触发外部写操作）"); err != nil {
+				return "", err
+			}
 			if err := requireCapability(t, capBrowser, "操作浏览器", args); err != nil {
 				return "", err
 			}
@@ -269,10 +284,14 @@ func browserViewportTool() Tool {
 func browserEvaluateTool() Tool {
 	return Tool{
 		Spec: toolSpec("browser_evaluate",
-			"在当前网页执行 JavaScript 并返回结果（JSON 序列化）。用于提取浏览器组件覆盖不到的数据，如 document.querySelector(...).href、JSON.stringify(window.__data)。"+capNoteBrowser,
+			"在当前网页执行 JavaScript 并返回结果（JSON 序列化）。用于提取浏览器组件覆盖不到的数据，如 document.querySelector(...).href、JSON.stringify(window.__data)。"+capNoteBrowserWrite+capNoteBrowser,
 			objSchema(withCapRequest(map[string]any{"js": strProp("要执行的 JavaScript 表达式或语句")}), "js"),
 		),
 		Run: func(t *toolContext, args json.RawMessage) (string, error) {
+			// 任意 JS 无法可靠判定只读，统一按可写执行入口处理。
+			if err := requireNotReadOnly(t, "在网页执行 JavaScript（可能产生外部副作用）"); err != nil {
+				return "", err
+			}
 			if err := requireCapability(t, capBrowser, "操作浏览器", args); err != nil {
 				return "", err
 			}

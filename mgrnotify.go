@@ -283,13 +283,35 @@ const (
 // errResolveCallerForeign 认不出身份的 AI 会话代决时给的可读原因。
 var errResolveCallerForeign = errors.New("这条决议请求的调用者不是长期助理主对话、也不在它派生的子对话链上：AI 会话只能代决经理自己那一轮（经理经 call_api 代决）的卡，其它卡请留给用户处理")
 
+// callerSessionHeaderName 是 AI 会话直调请求的调用者头：runCallAPI 给每个 AI
+// 会话的直调请求注入它（值＝该会话自己的 id），子对话注入的就是子会话 id。
+const callerSessionHeaderName = "X-JX-Caller-Session"
+
+// callerSessionHeader 取一条请求的调用者头。present 只看「有没有」不看取值——
+// 空值同样算带上：宁可让异常请求被拒，也不给 AI 留一条回落成用户语义的缝。
+// sid 是去掉首尾空白后的值（可能为空）。
+func callerSessionHeader(r *http.Request) (sid string, present bool) {
+	for k, vs := range r.Header {
+		if !strings.EqualFold(k, callerSessionHeaderName) {
+			continue
+		}
+		for _, v := range vs {
+			if s := strings.TrimSpace(v); s != "" {
+				return s, true
+			}
+		}
+		return "", true
+	}
+	return "", false
+}
+
 // resolveCallerOf 给一条决议请求的调用者分身份：**有头即 AI**（runCallAPI 给
 // 每个 AI 会话的直调请求注入 X-JX-Caller-Session=它自己的会话 id，子对话注入的
 // 就是子会话 id；与 projects_api.go 的 projectSettingsRequest 同一惯例），带上
 // 头却认不出身份时报 foreign 而不是 user——回落成用户语义等于任何 AI 会话都能
 // 经 call_api 跳过全部经理授权校验。无头的才是真用户。
 func (a *App) resolveCallerOf(r *http.Request) resolveCallerKind {
-	sid := strings.TrimSpace(r.Header.Get("X-JX-Caller-Session"))
+	sid, _ := callerSessionHeader(r)
 	if sid == "" {
 		return resolveCallerUser
 	}

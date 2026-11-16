@@ -30,6 +30,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -239,6 +240,11 @@ func (a *App) resolveQuestion(id, answer string) error {
 	}
 	return nil
 }
+
+// errStopTimerByCaller 是 AI 会话请求停表时的可读拒绝原因（server.go 的
+// stop_timer 分支）：停表只表达「用户在场」，AI 会话无权替用户表态——否则任何
+// 会话都能把任意一张卡的倒计时无限冻结。
+var errStopTimerByCaller = errors.New("停表是「用户在场」的信号（悬停/触碰提问卡或点停止按钮），只有界面上的用户能发；AI 会话（经理、子对话、任务会话都一样）不能替用户停表。这张卡继续按原倒计时等用户作答，请让用户处理该询问/审批")
 
 // holdQuestion 标记「用户已经碰到/已经在看着这条请求」，并停掉它的计时：
 //   - 悬停/触碰卡片或点停止按钮（前端 askHoldTimer）：带时限的提问停表转不限时；

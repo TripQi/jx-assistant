@@ -607,11 +607,14 @@
   /* ---------- ↑↓：按「此刻」左侧列表切对话 ----------
      列表是活的（新建 / 归档 / 分组折叠 / 回收视图都会变），DOM 就是唯一真相——
      按键瞬间读 #session-list 里可见的 .session-item 顺序，找当前项上下移动；
-     到头不环绕。当前对话不在列表里（如长期助理对话）时：向下进第一项、向上不动。 */
+     到头不环绕。当前对话不在列表里（如长期助理对话）时：向下进第一项、向上不动。
+     展开出来的子会话行（.s-child）不算条目：子会话只在右栏显示、绝不切主对话区
+     （点它要走 openSubRow：落父会话 + 右栏定位），方向键只在顶层对话之间走。 */
   function switchConversation(dir) {
     const box = $('session-list');
     if (!box) return;
-    const items = Array.from(box.querySelectorAll('.session-item')).filter((el) => el.dataset.sid);
+    const items = Array.from(box.querySelectorAll('.session-item'))
+      .filter((el) => el.dataset.sid && !el.classList.contains('s-child'));
     if (!items.length) return;
     const idx = items.findIndex((el) => el.classList.contains('active'));
     const next = idx < 0 ? (dir > 0 ? 0 : -1) : idx + dir;

@@ -528,9 +528,11 @@ function sessionPendingAsk(id) {
 // 状态就对不齐）。「子对话运行中」：顶层会话自己空闲但名下有子对话在跑——用户
 // 在侧栏一眼看出那个主对话有动静（数据源全量 state.sessions，some 短路够快）。
 function sessionStatusCell(s) {
-  const kidRun = !s.parentId && (state.sessions || [])
-    .some((k) => k.parentId === s.id && k.status === 'running' && !k.archived);
-  const key = sessionPendingAsk(s.id) ? 'wait' : s.status === 'running' ? 'running' : kidRun ? 'subrun' : s.lastStop;
+  // 名下有子代理在跑：展开时用「⟳ 运行中」这一格，收起时改由标题后的 ⟳N 计数胶囊
+  // 表达（subRunChip）——同一行只留一处运行指示，不叠两套
+  const kidRun = !s.parentId && subTreeOf(s, state.sessions, subOpen).runN > 0;
+  const chipShown = kidRun && subOpen.has(s.id);
+  const key = sessionPendingAsk(s.id) ? 'wait' : s.status === 'running' ? 'running' : (kidRun && !chipShown) ? 'subrun' : s.lastStop;
   const st = STATUS_CELLS[key];
   return st ? `<span class="s-time ${st.cls}" title="${esc(st.tip)}">${st.text}</span>` : '';
 }
@@ -568,11 +570,24 @@ function sessionItem(s) {
   const rawTitle = String(s.title || '(未命名)');
   const isFork = rawTitle.endsWith('（分支）');
   const mainTitle = isFork ? rawTitle.slice(0, -4) : rawTitle;
+  // 子对话折叠（见上方「会话行内子对话折叠」）：有子会话的行出箭头，没有的放
+  // 同宽占位（visibility:hidden），父/非父行的标题左缘才对得齐一列；箭头只切
+  // 展开态，跟会话本身无关
+  const tree = subTreeOf(s, state.sessions, subOpen);
+  const chev = tree.has
+    ? `<button class="s-chev${tree.open ? ' open' : ''}" title="${tree.open ? '收起子对话' : '展开子对话'}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg></button>`
+    : `<span class="s-chev none"></span>`;
+  // 收起态的运行中子代理数量（展开后明细就在下面，subRunChip 自己收回）
+  const kidChip = subRunChip(tree)
+    ? `<span class="s-kidrun" title="名下 ${tree.runN} 个子代理正在执行（点标题左侧箭头展开看明细）">${subRunChip(tree)}</span>`
+    : '';
   item.innerHTML =
     wsChip +
     `<span class="dot${dot}"></span>` +
+    chev +
     `<span class="s-title" title="${esc(rawTitle)}">${esc(mainTitle)}</span>` +
     (isFork ? `<span class="s-fork" title="从「${esc(mainTitle)}」分支出">分支</span>` : '') +
+    kidChip +
     timeCell +
     `<span class="row-acts">` +
       (binView ? `<button class="ra-restore" title="恢复"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg></button>` : '') +
@@ -583,6 +598,9 @@ function sessionItem(s) {
     if (e.target.closest('.row-acts')) return;
     openSession(s.id);
   };
+  // 箭头单独接 click 并阻止冒泡：展开/收起绝不顺手把当前对话切走
+  const chevBtn = item.querySelector('button.s-chev');
+  if (chevBtn) chevBtn.onclick = (e) => { e.stopPropagation(); toggleSubOpen(s.id); };
   item.querySelector('.ra-copy').onclick = (e) => {
     e.stopPropagation();
     navigator.clipboard.writeText(s.title || '(未命名)');
@@ -597,6 +615,98 @@ function sessionItem(s) {
   };
   item.oncontextmenu = (e) => { e.preventDefault(); openSessionMenu(s, item.getBoundingClientRect(), item); };
   return item;
+}
+
+/* ---------- 左侧栏：会话行内子对话折叠 ----------
+   问题：子会话（parent_id 非空）不进顶层列表（renderSessionList 的 visible 过滤），
+   用户不点开右栏就看不出「哪个主对话名下还有子代理在跑、跑到哪」。
+   做法：父行标题左侧一枚折叠箭头，只切展开态（不切当前对话），展开后在父行下
+   缩进列出该父名下全部未归档子会话（不只运行中：干完的也留着，方便回看），
+   运行中的子行带 ⟳ 标记；收起时父行标题后给「运行中的子代理数量」⟳N，展开后
+   明细替代计数——同一行永远只有一处运行指示，不叠两套展示。
+   数据全部来自 state.sessions（GET /api/sessions 已返回含 parentId/status 的全量
+   会话），不新增接口；展开态存 subOpen（内存），列表刷新后保留，刷新页面回默认收起。 */
+
+const subOpen = new Set(); // 已展开的父会话 id（内存态：默认收起，刷新页面即回默认）
+const SUB_MAX_DEPTH = 3;   // 缩进视觉上限：多级子会话按 parent 链平铺，再深也按 3 级缩
+
+// 直系子会话：未归档（进了回收站的那些各自在回收站视图）、按更新时间倒序
+function subKidsOf(sid, sessions) {
+  return (sessions || [])
+    .filter((k) => k.parentId === sid && !k.archived)
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+}
+
+// 名下所有层级的子会话（平铺，带 depth 供缩进）：今天派发工具只允许一级，这里
+// 仍按 parent 链递归——将来放开多级，展示不用另写一套
+function subDescendants(sid, sessions, depth) {
+  const out = [];
+  const d = depth || 1;
+  if (d > SUB_MAX_DEPTH + 2) return out; // 防脏数据成环
+  for (const k of subKidsOf(sid, sessions)) {
+    out.push({ id: k.id, title: k.title || '(未命名)', updatedAt: k.updatedAt || '',
+      parentId: sid, depth: Math.min(d, SUB_MAX_DEPTH), running: k.status === 'running' });
+    for (const g of subDescendants(k.id, sessions, d + 1)) out.push(g);
+  }
+  return out;
+}
+
+// 折叠模型：该不该出箭头、是否展开、运行中的子代理条数、展开时的子行清单
+function subTreeOf(s, sessions, open) {
+  if (!s) return { has: false, open: false, runN: 0, rows: [] };
+  const kids = subKidsOf(s.id, sessions);
+  const all = kids.length ? subDescendants(s.id, sessions, 1) : [];
+  const isOpen = !!(open && open.has(s.id));
+  return { has: kids.length > 0, open: isOpen,
+    runN: all.filter((r) => r.running).length,
+    rows: isOpen ? all : [] };
+}
+
+// 收起态才给计数胶囊：展开时明细就在下面，两处同时出现＝同一事实显示两遍
+function subRunChip(tree) {
+  return (!tree.open && tree.runN > 0) ? '⟳' + tree.runN : '';
+}
+
+// 箭头点击：只切展开态并就地重绘（父行的点击＝打开对话，语义保持不变）
+function toggleSubOpen(sid) {
+  if (subOpen.has(sid)) subOpen.delete(sid); else subOpen.add(sid);
+  renderSessionList();
+}
+
+// 子行内容（纯字符串拼装：与其它行的 innerHTML 拼法一致，标题一律转义）
+function subRowHTML(row) {
+  const run = row.running ? '<span class="s-run" title="正在执行（⟳ 运行中）">⟳</span>' : '';
+  return `<span class="s-title">${esc(row.title)}</span>` + run +
+    `<span class="s-time">${esc(relTime(row.updatedAt))}</span>`;
+}
+
+function subRowItem(row) {
+  const el = document.createElement('div');
+  el.className = 'session-item s-child' + (row.running ? ' running' : '');
+  el.dataset.sid = row.id;
+  el.dataset.depth = String(row.depth);
+  el.innerHTML = subRowHTML(row);
+  el.onclick = () => openSubRow(row.id);
+  return el;
+}
+
+// 子行点击：先落到直系父会话（已经在那儿就不重复加载），再让右栏定位到这个子会话
+function openSubRow(id) {
+  const s = (state.sessions || []).find((x) => x.id === id);
+  if (!s) return;
+  const pid = s.parentId || '';
+  if (pid && (!state.cur || state.cur.id !== pid)) openSession(pid);
+  rpOpen('subs');
+  openSubSession(id);
+}
+
+// 一条会话块＝父行 +（展开时）紧跟其后的缩进子行：平铺/时间线/分组三个视图都
+// 经它出条目，展开态在三种视图下表现一致
+function sessionBlock(s) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(sessionItem(s));
+  for (const row of subTreeOf(s, state.sessions, subOpen).rows) frag.appendChild(subRowItem(row));
+  return frag;
 }
 
 /* ---------- 回收站视图：点底部「回收站」，整个工作区列表切成回收站 ----------
@@ -881,7 +991,7 @@ function renderSessionList() {
     box.classList.add('flat');
     let n = 0;
     for (const s of visible) {
-      if (!recycled.has(wsOf(s)) || keep.has(s.id)) { box.appendChild(sessionItem(s)); n++; }
+      if (!recycled.has(wsOf(s)) || keep.has(s.id)) { box.appendChild(sessionBlock(s)); n++; }
     }
     if (!n) box.innerHTML = '<div class="ws-empty">没有会话</div>';
     return;
@@ -910,7 +1020,7 @@ function renderSessionList() {
       head.className = 'time-band';
       head.textContent = b.label;
       box.appendChild(head);
-      b.items.forEach((s) => box.appendChild(sessionItem(s)));
+      b.items.forEach((s) => box.appendChild(sessionBlock(s)));
     });
     if (!visible.length) box.innerHTML = '<div class="ws-empty">没有会话</div>';
     return;
@@ -994,7 +1104,7 @@ function renderSessionList() {
     if (!collapsed) {
       const list = document.createElement('div');
       list.className = 'ws-group-list';
-      for (const s of items) list.appendChild(sessionItem(s));
+      for (const s of items) list.appendChild(sessionBlock(s));
       if (!items.length) list.innerHTML = '<div class="ws-empty">（空目录）</div>';
       group.appendChild(list);
     }

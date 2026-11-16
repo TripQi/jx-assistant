@@ -300,6 +300,35 @@ body.sb-collapsed #sidebar { width: 0; min-width: 0; border-right-width: 0; }
   white-space: nowrap; overflow: hidden;
 }
 
+/* ---------- 会话行内子对话折叠（app-left.js：父行箭头 + 缩进子行） ----------
+   箭头与工作区分组的 chev 同款（未展开朝右、展开转 90°）；没有子会话的行放
+   同宽占位（visibility:hidden），父/非父行的标题左缘才对得齐一列。子行缩进
+   按行上的 data-depth 给，深度由 app-left.js 的 subTreeOf 算好（多级平铺）。 */
+.session-item .s-chev {
+  flex: none; width: 12px; height: 12px; padding: 0; border: 0; background: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-3); cursor: pointer;
+}
+.session-item .s-chev svg { width: 12px; height: 12px; transition: transform .15s; }
+.session-item .s-chev.open svg { transform: rotate(90deg); }
+.session-item .s-chev:hover { color: var(--text); }
+.session-item .s-chev.none { visibility: hidden; cursor: default; }
+/* 收起态的「运行中的子代理数量」：小字弱胶囊、accent 色，父行一眼看出名下有子代理在跑 */
+.session-item .s-kidrun {
+  flex: none; padding: 0 4px; border-radius: 5px;
+  font-size: 11px; line-height: 16px; font-weight: 600; color: var(--accent);
+  background: rgba(0, 122, 255, .08);
+}
+/* 子行：看着比父行轻一档（字号/颜色降级），缩进让出箭头列 + 每级 14px */
+.session-item.s-child { padding-top: 5px; padding-bottom: 5px; padding-left: 20px; }
+.session-item.s-child[data-depth="2"] { padding-left: 34px; }
+.session-item.s-child[data-depth="3"] { padding-left: 48px; }
+.session-item.s-child .s-title { font-size: 12.5px; color: var(--text-2); }
+.session-item.s-child .s-time { font-size: 11px; }
+/* 子行没有 row-acts，悬停不需要让位显示时间（父行那条规则会把它藏起来） */
+.session-item.s-child:hover .s-time { visibility: visible; }
+.session-item.s-child .s-run { flex: none; font-size: 11.5px; font-weight: 600; color: var(--accent); }
+
 .sidebar-foot {
   display: flex; flex-direction: column; gap: 3px;
   padding: 4px 10px 12px;

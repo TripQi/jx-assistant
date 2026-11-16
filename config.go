@@ -218,11 +218,13 @@ type CompanyQuotaCfg struct {
 }
 
 // AskAlertCfg 询问提醒配置段：Enabled=nil＝默认开启；AfterSec 触发秒数
-// （默认 240=4 分钟，钳 30-600）；Text 朗读文案（空＝默认那句）。
+// （默认 240=4 分钟，钳 30-600）；Text 朗读文案（空＝默认那句）；
+// OnAppear＝卡片刚出现时的即时提示音（nil＝默认开，见 pendingalert.go）。
 type AskAlertCfg struct {
 	Enabled  *bool  `json:"enabled,omitempty"`
 	AfterSec int    `json:"afterSec,omitempty"`
 	Text     string `json:"text,omitempty"`
+	OnAppear *bool  `json:"onAppear,omitempty"`
 }
 
 // MgrNotifyCfg 经理代理通知配置段：Enabled=nil＝默认开启（false=关闭）；
@@ -266,6 +268,15 @@ func (c *Config) askAlertOn() bool {
 		return false
 	}
 	return c.AskAlert.Enabled == nil || *c.AskAlert.Enabled
+}
+
+// askAlertOnAppear 卡片刚出现时是否即时提示（nil 接收器/没写过该键＝开）：
+// 关掉后回到「等满 AfterSec 才提醒」的旧行为（pendingalert.go）。
+func (c *Config) askAlertOnAppear() bool {
+	if c == nil {
+		return false
+	}
+	return c.AskAlert.OnAppear == nil || *c.AskAlert.OnAppear
 }
 
 // askAlertAfterSec 触发秒数（解析后的生效值，30-600）。

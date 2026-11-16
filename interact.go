@@ -144,6 +144,10 @@ func (a *App) requestUserAnswer(ctx context.Context, sess *SessionMeta, q *UserQ
 		Kind: q.Kind, Summary: q.Question, Plan: q.Plan, Options: q.Options, Reason: q.Question,
 		DeadlineMs: q.DeadlineMs}
 	a.broadcast(ev)
+	// 卡片出现即提示（pendingalert.go，设置·常规·询问提醒，默认开）：必须由用户
+	// 决定的卡一出现就叮一声 + 任务栏闪一下；经理此刻可代批的卡不打扰用户，
+	// 等那一轮收口/用户接管后再补。同一张卡只即时响一次。
+	a.alertPendingCardOnAppear(q.ID)
 	// 声光提醒（设置·常规，默认开）：等待达到设定时长仍未答且未停表时，系统
 	// 叮一声（MessageBeep，不走语音组件）+ 广播 ask_alert（前端全屏闪烁，并在
 	// 浮窗上走完 15 秒倒计时后才朗读配置文案）。作答/超时/停表/停止都会被下面
@@ -177,6 +181,7 @@ func (a *App) requestUserAnswer(ctx context.Context, sess *SessionMeta, q *UserQ
 		a.permMu.Lock()
 		delete(a.questions, q.ID)
 		a.permMu.Unlock()
+		a.forgetPendingCardAlert(q.ID) // 卡收走：即时提示状态一并清掉（pendingalert.go）
 		// 停止连带取消待审批：本轮被停止（ctx 取消）时，无时限的待审批计划随
 		// 本轮作废（拒绝/撤销语义，不是批准）。不清的话它会一直挂在库里，
 		// /api/questions 兜底轮询还会把它重新挂出来——用户点完停止，审批卡

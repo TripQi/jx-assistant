@@ -71,22 +71,34 @@ func (a *App) grantManagerTurn(sid string, r *sessionRun) {
 
 // revokeManagerTurn 撤销经理代批资格（用户亲发消息=用户接管：handleChat /
 // handleInterject / handleRetry）。代数递增让竞态窗口里晚到的旧授权作废。
+// 资格一撤，那一轮里「没打扰用户」的卡就无人代批了：补一次卡片即时提示
+//（pendingalert.go，同一张卡只响一次）。
 func (a *App) revokeManagerTurn(sid string) {
 	a.runMu.Lock()
 	a.mgrTurnGen[sid]++
 	delete(a.mgrTurns, sid)
 	a.runMu.Unlock()
+	// 补通知跑在后台：撤销这条路只碰 runMu、不拿卡片锁也不做 IO（mgrnotify_atomic_test.go
+	// 钉着这条不变量：调用方可能正持着 permMu），所以不能在这里同步去摸卡片。
+	go a.flushDeferredPendingCards(sid)
 }
 
 // dropManagerTurnOf 轮收口时按身份清授权（closeRun 调用，正常完成/失败/停止/
 // 硬终结都走那里）：只清属于这一轮的条目——收口与下一次投递授权并发时，
-// 不能误删已指向新一轮的授权。
+// 不能误删已指向新一轮的授权。清掉的正是这一轮时，把当时让给经理代批、
+// 没打扰用户的卡补上一次提示（pendingalert.go）。
 func (a *App) dropManagerTurnOf(sid string, r *sessionRun) {
 	a.runMu.Lock()
+	dropped := false
 	if g, ok := a.mgrTurns[sid]; ok && g.run == r {
 		delete(a.mgrTurns, sid)
+		dropped = true
 	}
 	a.runMu.Unlock()
+	if dropped {
+		// 收口路径同样只碰 runMu：补通知放后台（与 revokeManagerTurn 同款考虑）。
+		go a.flushDeferredPendingCards(sid)
+	}
 }
 
 // managerTurnActive 会话当前正在执行的那一轮是否由经理投递开启（经理代批

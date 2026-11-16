@@ -110,8 +110,10 @@ func TestApprovalAlertThenTimeoutDeny(t *testing.T) {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if _, beeps := spy.counts(); beeps != 1 {
-		t.Fatalf("到点应叮一声，实际 %d 次", beeps)
+	// 卡片刚出现时还响过 1 声（pendingalert.go 的即时提示，与久等提醒共用
+	// 同一个叮声通道）：到点这一次是第 2 声——次数必须确切，不放松。
+	if _, beeps := spy.counts(); beeps != 2 {
+		t.Fatalf("卡片出现 1 声 + 到点 1 声 = 2 声，实际 %d 次", beeps)
 	}
 	if texts := spy.frontTexts(); !strings.Contains(texts[0], "会话一") ||
 		!strings.Contains(texts[0], "rm -rf 构建临时目录") {
@@ -160,8 +162,10 @@ func TestApprovalAlertThenTimeoutDeny(t *testing.T) {
 		t.Fatal("超时后审批卡应从待决清单里消失")
 	}
 	time.Sleep(400 * time.Millisecond) // 再等一会儿：确认不会补第二次提醒
-	if n, beeps := spy.counts(); n != 1 || beeps != 1 {
-		t.Fatalf("超时后不该再补提醒：front=%d beep=%d（应各 1 次）", n, beeps)
+	// front=1 证明只到点提醒了 1 次；beep=2 = 卡片出现那 1 声 + 到点那 1 声，
+	// 超时后不再补第 3 声。
+	if n, beeps := spy.counts(); n != 1 || beeps != 2 {
+		t.Fatalf("超时后不该再补提醒：front=%d beep=%d（应 1 次窗口提醒 + 2 声叮）", n, beeps)
 	}
 }
 
@@ -202,7 +206,9 @@ func TestApprovalResolvedBeforeAlertStaysQuiet(t *testing.T) {
 		t.Fatal("用户决定后审批没有结束等待")
 	}
 	time.Sleep(1000 * time.Millisecond) // 越过原定 800ms 提醒点
-	if n, beeps := spy.counts(); n != 0 || beeps != 0 {
-		t.Fatalf("用户已点掉，不该再提醒：front=%d beep=%d", n, beeps)
+	// 卡片出现那一刻的即时提示（pendingalert.go）仍该响 1 声；到点那次不许再有：
+	// front 保持 0（没盖过屏）、beep 恰好 1 声。
+	if n, beeps := spy.counts(); n != 0 || beeps != 1 {
+		t.Fatalf("用户已点掉，到点不该再提醒（只剩卡片出现那 1 声）：front=%d beep=%d", n, beeps)
 	}
 }

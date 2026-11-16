@@ -128,6 +128,22 @@ func alertFallbackNotify(title, text string) {
 	trayBalloon(title, text) // 托盘图标没挂上时它自己安静跳过
 }
 
+// pendingCardAlertFlash 卡片刚出现时的轻量唤起：只闪本进程登记的主窗口的任务栏
+// 按钮，用户已经就在本程序前台时什么都不做。
+//
+// 与 alertBringToFront 的区别是「不打扰」：不抢前台、不还原窗口、不盖全屏蒙层、
+// 不弹气泡——那套留给「等满 N 分钟仍无人处理」的久等提醒，卡片刚冒出来就抢窗口
+// 会直接打断用户正在做的事。只用本进程登记的 HWND（不按标题跨进程找窗口）：
+// 取不到就当没信号，叮声已经响过。
+func pendingCardAlertFlash() {
+	if alertOwnProcessInForeground() {
+		return
+	}
+	if hwnd := mainWndHwnd.Load(); hwnd != 0 {
+		alertFlashTaskbar(hwnd)
+	}
+}
+
 // alertBringToFront 把提醒顶到用户眼前：还原/显示 → 抢前台 → 抢不到就闪+通知。
 func alertBringToFront(title, text string) {
 	hwnd := alertMainHwnd()

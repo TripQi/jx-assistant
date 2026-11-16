@@ -148,8 +148,9 @@ func (a *App) requestUserAnswer(ctx context.Context, sess *SessionMeta, q *UserQ
 	// 决定的卡一出现就叮一声 + 任务栏闪一下；经理此刻可代批的卡不打扰用户，
 	// 等那一轮收口/用户接管后再补。同一张卡只即时响一次。
 	a.alertPendingCardOnAppear(q.ID)
-	// 声光提醒（设置·常规，默认开）：等待达到设定时长仍未答且未停表时，系统
-	// 叮一声（MessageBeep，不走语音组件）+ 广播 ask_alert（前端全屏闪烁，并在
+	// 声光提醒（设置·常规，默认开）：等待达到设定时长仍未答且未停表时，响一声
+	// （设置里选的音效方案，默认 Windows 通知音；不走语音组件）+ 广播 ask_alert
+	// （前端全屏闪烁，并在
 	// 浮窗上走完 15 秒倒计时后才朗读配置文案）。作答/超时/停表/停止都会被下面
 	// 的 defer 掐掉；触发那一刻已停表的直接不响——停表=用户碰到过卡片，或已从
 	// 任何入口打开对应的计划页/浮窗在看（在场），连提醒一起暂停。
@@ -279,9 +280,10 @@ func (a *App) holdQuestion(id string) {
 	}
 }
 
-// askAlertBeep 久等提醒到点的叮声（平台实现：MessageBeep；测试里换成计数桩，
-// 跑测试时不真响）。
-var askAlertBeep = systemBeep
+// askAlertSound 播一次「询问提醒」的提示音：久等提醒到点与卡片刚出现共用同一
+// 档音效（设置·常规·询问提醒 →「提示音方案」，实现见 alertsound.go）。
+// 换桩即可在测试里静音运行：计数桩不真发声、不依赖本机音频设备。
+var askAlertSound = func(c *Config) { playAlertSound(c.resolveAlertSound()) }
 
 // alertScreenHook 久等提醒的「桌面全屏蒙层」入口（平台实现 alertfull_windows.go；
 // 测试里换桩，不在 CI 里真弹窗口）。qid=questionId/approvalId，关闭请求按它
@@ -289,7 +291,7 @@ var askAlertBeep = systemBeep
 // 主窗口的提醒层一起收起——两处提醒点任意一处、两边同退）。
 var alertScreenHook = alertScreenShow
 
-// fireAskAlert 发一次久等提醒到点动作（唤起窗口 + 全屏蒙层 + 叮声 + 广播 ask_alert）。
+// fireAskAlert 发一次久等提醒到点动作（唤起窗口 + 全屏蒙层 + 提示音 + 广播 ask_alert）。
 // 提问 / 计划审批 / 越权审批共用同一套机制与同一个设置项（设置·常规·询问提醒）：
 // questionID / approvalID 二选一填（前端按它把对应卡片与提醒层联动收起），
 // sessionTitle/summary 进浮窗文案，output 是朗读文案。
@@ -307,7 +309,7 @@ func (a *App) fireAskAlert(questionID, approvalID, sessionID, sessionTitle, summ
 		alertFrontText(sessionTitle, summary), qid, func() {
 			a.broadcast(Event{Type: "ask_alert_dismiss"})
 		})
-	askAlertBeep()
+	askAlertSound(a.Cfg)
 	a.broadcast(Event{Type: "ask_alert", QuestionID: questionID, ApprovalID: approvalID,
 		SessionID: sessionID, Title: sessionTitle, Summary: summary, Output: output})
 }

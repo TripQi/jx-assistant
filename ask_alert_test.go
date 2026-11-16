@@ -140,10 +140,10 @@ func TestAskAlertWakesWindowAndBeeps(t *testing.T) {
 
 	type frontCall struct{ title, text string }
 	front := make(chan frontCall, 4)
-	oldFront, oldBeep, oldScreen := alertFrontHook, askAlertBeep, alertScreenHook
+	oldFront, oldBeep, oldScreen := alertFrontHook, askAlertSound, alertScreenHook
 	alertFrontHook = func(title, text string) { front <- frontCall{title, text} }
 	beeps := 0
-	askAlertBeep = func() { beeps++ }
+	askAlertSound = func(*Config) { beeps++ }
 	// 全屏蒙层也换桩：跑测试不真弹原生窗口，只断言「到点确实去盖屏了、qid 正确」
 	type screenCall struct {
 		title, text, qid string
@@ -152,7 +152,7 @@ func TestAskAlertWakesWindowAndBeeps(t *testing.T) {
 	alertScreenHook = func(title, text, qid string, onDismiss func()) {
 		screen <- screenCall{title, text, qid}
 	}
-	defer func() { alertFrontHook, askAlertBeep, alertScreenHook = oldFront, oldBeep, oldScreen }()
+	defer func() { alertFrontHook, askAlertSound, alertScreenHook = oldFront, oldBeep, oldScreen }()
 
 	ch, unsub := a.subscribe()
 	defer unsub()

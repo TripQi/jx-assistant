@@ -3291,6 +3291,12 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
 
 /* 常规页「文件备份」行内布局：开关/输入与说明同行 */
 .sf-inline { display: flex; align-items: center; gap: 10px; min-height: 28px; }
+/* 询问提醒·提示音两行：一格里同时装下拉/按钮/说明（或输入框/按钮），窄屏必须
+   允许换行，否则 500px 以下横向溢出 */
+.sf-inline.sf-wrap { flex-wrap: wrap; row-gap: 8px; }
+/* 自定义提示音路径输入框：吃掉剩余宽度；min-width:0 才能被压缩（pf-input 是
+   width:100% 的 flex 子项，不给 min-width 就会把整行撑破） */
+#set-askalert-wav { flex: 1 1 220px; min-width: 0; }
 
 /* ---------- 回到底部按钮（主/子对话通用；滚离底部时浮现于输入区上方正中） ----------
    定位容器：主对话是 #msg-zone（setupWidthHandles 建的包层），子对话现场把

@@ -555,8 +555,24 @@
               <div class="sf-label">卡片出现时提示音</div>
               <div class="sf-inline">
                 <label class="pr-toggle"><input type="checkbox" id="set-askalert-appear-on"><span></span></label>
-                <span class="sf-desc">提问卡/审批卡一出现就叮一声＋任务栏闪烁（程序放后台也听得到）；长期助理当前可代批的卡不打扰你。关掉后只在「触发时长」到点时才提醒</span>
+                <span class="sf-desc">提问卡/审批卡一出现就响一声＋任务栏闪烁（程序放后台也听得到）；长期助理当前可代批的卡不打扰你。关掉后只在「触发时长」到点时才提醒</span>
               </div>
+            </div>
+            <div class="set-field">
+              <div class="sf-label">提示音方案</div>
+              <div class="sf-inline sf-wrap">
+                <div id="sel-askalert-sound"></div>
+                <button type="button" class="ccp-row-btn" id="set-askalert-sound-try">试听</button>
+                <span class="sf-desc">卡片出现与「触发时长」到点用的是同一个音效；系统提示音是原来那声叮（安静）</span>
+              </div>
+            </div>
+            <div class="set-field" id="set-askalert-wav-field" style="display:none">
+              <div class="sf-label">自定义 WAV 路径</div>
+              <div class="sf-inline sf-wrap">
+                <input id="set-askalert-wav" class="pf-input" placeholder="D:\声音\提示.wav" autocomplete="off" spellcheck="false">
+                <button type="button" class="ccp-row-btn" id="set-askalert-wav-pick">选择…</button>
+              </div>
+              <p class="sf-desc" id="set-askalert-wav-state">只支持 .wav 文件的绝对路径（Windows 提示音接口只认 wav）；路径无效时保存会被拒绝，不会悄悄换成别的音</p>
             </div>
             <div class="set-field">
               <div class="sf-label">触发时长（秒）</div>

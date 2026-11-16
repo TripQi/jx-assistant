@@ -1,12 +1,13 @@
 /* 宿主提供的「项目登记」管理视图（项目身份 + 多工作区绑定 + 归档/删除）。
  *
  * 为什么放在宿主而不是某个组件里：项目登记是全实例唯一的一套（Project 表 +
- * /api/projects 服务）。项目知识库页需要它，项目事件页也需要它——而项目事件
- * 组件在知识库组件关闭时仍要能登记和管理项目。把视图做进宿主、两个设置页都挂
+ * /api/projects 服务）。项目事件页与项目知识库页都挂这一份（各自不再自带登记表单），
+ * 而项目事件组件在知识库组件关闭时仍要能登记和管理项目。把视图做进宿主、两个设置页都挂
  * 这一份，就不存在「第二套登记体系」，也不依赖另一个组件是否启用。
  *
- * 接口约定：JX.projectRegistry.mount(el, {onChange}) → {refresh()}；
- * JX.projectRegistry.list() → Promise<Project[]>（含归档，供调用方自己渲染下拉）。
+ * 接口约定：JX.projectRegistry.mount(el, {onChange(list, id)}) → {refresh(id), dispose()}；
+ * JX.projectRegistry.list() → Promise<Project[]>（含归档，供调用方自己渲染下拉）；
+ * JX.projectRegistry.budget(content) → Promise<{used, warning}>（字段预算预览复用宿主同一算法）。
  * 本视图不做知识正文，也不碰事件数据。
  */
 (function () {
@@ -109,7 +110,7 @@
         if (p) startEdit(p);
       }
       if (opts.onChange) {
-        try { opts.onChange(state.projects); } catch (e) { console.warn('[project-registry]', e); }
+        try { opts.onChange(state.projects, selectId || ''); } catch (e) { console.warn('[project-registry]', e); }
       }
     }
 
@@ -180,6 +181,7 @@
           kind.onchange = function () { w.workspace_kind = kind.value; };
           const path = node('input', line, undefined, 'pf-input');
           path.type = 'text';
+          path.setAttribute('aria-label', '绑定绝对路径');
           path.style.flex = '1 1 200px';
           path.value = w.display_path;
           path.oninput = function () { w.display_path = path.value; };
@@ -189,6 +191,7 @@
         addLine.style.cssText = 'display:flex;gap:6px;align-items:center';
         const newPath = node('input', addLine, undefined, 'pf-input');
         newPath.type = 'text';
+        newPath.setAttribute('aria-label', '新绑定路径');
         newPath.style.flex = '1 1 200px';
         newPath.placeholder = 'D:\\work\\proj 或 user@host:目录';
         const newKind = node('select', addLine, undefined, 'pf-input');
@@ -205,6 +208,28 @@
             renderBindings();
           } catch (e) { message(e.message, true); }
         });
+        // 本机选目录的能力由宿主提供（与聊天工作目录面板同一入口），不依赖任何组件；
+        // 拿不到就退回手填路径，不影响登记。
+        button(addLine, '解析归属', async function () {
+          let target;
+          try { target = normalizeBinding(newKind.value, newPath.value); } catch (e) { return message(e.message, true); }
+          try {
+            const result = await api('/resolve', 'POST', target);
+            const p = result && result.project;
+            message(p ? '实际归属：' + p.name + ' / ' + p.id + (p.archived ? '（已归档，不回退到外层项目）' : '（使用中）') : '未登记：不会回退到其他项目。');
+          } catch (e) { message('解析失败：' + e.message, true); }
+        });
+        button(addLine, '选择目录…', async function () {
+          if (typeof isNarrow === 'function' && isNarrow()) return message(typeof NARROW_WS_ADD_NOTICE !== 'undefined' ? NARROW_WS_ADD_NOTICE : '请在电脑宽屏上选择目录，或直接填写路径。', true);
+          if (typeof pickWorkFolder !== 'function') return message('当前环境无法打开目录选择框，请直接填写路径。', true);
+          try {
+            const path = await pickWorkFolder();
+            if (!path || !alive()) return;
+            newKind.value = 'local';
+            newPath.value = path;
+            if (typeof rememberWorkspace === 'function') rememberWorkspace(path);
+          } catch (e) { message('选择目录失败：' + e.message, true); }
+        });
       }
       renderBindings();
       const foot = node('div', box);
@@ -220,6 +245,11 @@
       if (!state.draftBindings.length) return message('至少绑定一个工作区，否则事件与知识无法归属', true);
       state.busy = true;
       try {
+        // 绑定路径先过服务端规范化（/resolve）：前端正则只做快速拦截，两个设置页共用这一条校验，
+        // 不再让「事件页只靠前端正则、知识库页另有服务端校验」两种口径漂移。
+        for (const w of state.draftBindings) {
+          await api('/resolve', 'POST', { workspace_kind: w.workspace_kind, display_path: w.display_path });
+        }
         if (isNew) {
           const p = await api('', 'POST', { name: name });
           await api('/' + p.id, 'PATCH', { expected_updated_at: p.updated_at, workspaces: state.draftBindings });
@@ -291,6 +321,11 @@
 
   JX.projectRegistry = {
     mount: mount,
-    list: function () { return api('', 'GET'); }
+    list: function () { return api('', 'GET'); },
+    // 字段预算预览：复用宿主同一算法（ProjectKnowledgeBudget 的 /api/projects/budget），
+    // 调用方不要用 JS 字符串长度代替预算单元。
+    budget: function (content) {
+      return api('/budget', 'POST', { content: String(content === undefined || content === null ? '' : content), budget_limit: 1 });
+    }
   };
 })();

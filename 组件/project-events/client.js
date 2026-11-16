@@ -15,7 +15,11 @@
     ['plan', '方案确认'], ['milestone', '阶段成果'], ['issue', '关键问题'],
     ['validation', '验证结论'], ['blocker', '阻碍变化'], ['acceptance', '用户验收'], ['other', '其他关键事实']
   ];
-  var LIMIT = 20;
+  // 设置页默认条数跟设计 §6.2 的 UI 推荐对齐（事件 12 条、记录/来源 20 条），
+  // 不把 UI 的大页当作 AI 查询默认。
+  var EVENT_LIMIT = 12;
+  var PAGE_LIMIT = 20;
+  var PROJECT_LIMIT = 20;
 
   async function api(path, method, body) {
     var res = await fetch('/api/project-events' + path, {
@@ -54,6 +58,34 @@
     var e = node('input', box, undefined, 'pf-input');
     e.type = 'text';
     return e;
+  }
+  // 字段预算预览：按字段显示「已用 / 上限 单元」，数值来自宿主同一预算函数
+  // （JX.projectRegistry.budget，服务端同一算法），不用 JS 字符串长度代替预算单元。
+  function budgetField(parent, input, limit, label) {
+    var line = node('p', parent, label + '：已用 – / ' + limit + ' 单元', 'sf-desc');
+    line.setAttribute('aria-live', 'polite');
+    var seq = 0;
+    function refresh() {
+      var mine = ++seq;
+      if (!(window.JX && JX.projectRegistry && typeof JX.projectRegistry.budget === 'function')) {
+        line.textContent = label + '：上限 ' + limit + ' 单元（本版本无预算预览，保存时由服务端校验）';
+        return;
+      }
+      JX.projectRegistry.budget(input.value).then(function (r) {
+        if (mine !== seq || !line.isConnected) return;
+        var used = Number(r && r.used);
+        if (!isFinite(used)) return;
+        line.textContent = label + '：已用 ' + used + ' / ' + limit + ' 单元' + (used > limit ? ' · 已超限，请精简后再保存（不会静默截断）' : '');
+        line.style.color = used > limit ? 'var(--danger)' : '';
+      }).catch(function (e) {
+        if (mine !== seq) return;
+        line.textContent = label + '：上限 ' + limit + ' 单元（预算预览失败：' + (e && e.message ? e.message : '未知错误') + '；保存时仍由服务端权威校验）';
+      });
+    }
+    if (typeof input.addEventListener === 'function') input.addEventListener('input', refresh);
+    else input.oninput = refresh;
+    refresh();
+    return line;
   }
   function select(parent, label, options, value) {
     var box = node('label', parent, undefined, 'set-field');
@@ -151,7 +183,7 @@
     var filterBox = node('div', el);
     filterBox.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end';
     var scopeSel = select(filterBox, '范围', [['active', '未结束'], ['history', '已完成/取消'], ['all', '全部']], 'active');
-    var statusSel = select(filterBox, '状态', [['', '按范围']].concat(STATUS), '');
+    var statusSel = select(filterBox, '状态筛选', [['', '按范围']].concat(STATUS), '');
     var keywordInput = field(filterBox, '目标关键词');
     var projectKeywordInput = field(filterBox, '项目关键词');
     scopeSel.onchange = function () { ui.scope = scopeSel.value; loadOverview(); };
@@ -195,7 +227,7 @@
         if (ui.eventKeyword) q.set('event_keyword', ui.eventKeyword);
         if (ui.projectKeyword) q.set('project_keyword', ui.projectKeyword);
         if (ui.includeArchived) q.set('include_archived', '1');
-        q.set('project_limit', '12');
+        q.set('project_limit', String(PROJECT_LIMIT));
         var data = await api('/overview?' + q.toString());
         if (gen !== generation || !alive()) return;
         ui.overview = data;
@@ -276,7 +308,7 @@
         if (ui.eventKeyword) q.set('event_keyword', ui.eventKeyword);
         if (ui.projectKeyword) q.set('project_keyword', ui.projectKeyword);
         if (ui.includeArchived) q.set('include_archived', '1');
-        q.set('project_limit', '12');
+        q.set('project_limit', String(PROJECT_LIMIT));
         q.set('project_cursor', cursor || '');
         var data = await api('/overview?' + q.toString());
         if (gen !== generation || !alive()) return;
@@ -292,6 +324,8 @@
       }
     }
 
+    // 新建表单：状态选非讨论中时必须同次给一条关键事实（服务端要求同事务附事实，
+    // 不能靠「下一步追加」——旧提示把用户引向一个服务端不接受的路径）。
     function renderCreate() {
       createBox.replaceChildren();
       if (!ui.projects.length) return;
@@ -304,25 +338,48 @@
       // 显式选第一个：不依赖浏览器的 <select> 默认选中行为，也避免提交空 project_id。
       if (ui.projects.length) projSel.value = ui.projects[0].id;
       var title = field(box, '标题（一句目标短语）');
+      budgetField(box, title, 80, '标题');
       var summary = field(box, '概况（一句当前状态）');
-      var status = select(box, '状态', STATUS, 'discussing');
-      var line = node('p', box, '直接建成非讨论中状态时，请在下一步追加一条关键事实（时间线入口在目标里）。', 'sf-desc');
+      budgetField(box, summary, 240, '概况');
+      var status = select(box, '新建状态', STATUS, 'discussing');
+      node('div', box, '关键事实（直接建成处理中/待验收/暂停/已完成/取消时必填；建成讨论中可留空）', 'sf-label');
+      var factKind = select(box, '关键事实类型', KINDS, 'plan');
+      var factText = field(box, '关键事实');
+      budgetField(box, factText, 240, '关键事实');
+      var factAt = field(box, '事实时刻（可选，如 2026-11-16T09:30:00+08:00；不确定就留空）');
+      var curSid = currentSessionId();
+      var srcLabel = node('label', box, undefined, 'sf-label');
+      var useSession = node('input', srcLabel);
+      useSession.type = 'checkbox';
+      useSession.checked = !!curSid;
+      useSession.disabled = !curSid;
+      node('span', srcLabel, curSid ? ' 绑定当前会话作为来源（' + curSid + '）' : ' 当前没有可绑定的会话（用户录入的事实可以不绑来源）');
+      node('p', box, '只登记概况请保持「讨论中」；确已开始推进才选处理中，并同时写一句支撑它的事实（含依据会话）。', 'sf-desc');
       button(box, '新建目标', async function () {
+        var fact = factText.value.trim();
+        if (status.value !== 'discussing' && !fact) {
+          message('直接建成非讨论中状态必须同时给一条关键事实；只登记概况请把状态保持为「讨论中」。', true);
+          return;
+        }
+        var body = { project_id: projSel.value, title: title.value, summary: summary.value, status: status.value };
+        if (fact) {
+          body.record = {
+            kind: factKind.value,
+            text: fact,
+            occurred_at: factAt.value.trim(),
+            client_key: newKey(),
+            sources: useSession.checked && curSid ? [{ session_id: curSid }] : []
+          };
+        }
         try {
-          var data = await api('', 'POST', {
-            project_id: projSel.value,
-            title: title.value,
-            summary: summary.value,
-            status: status.value
-          });
+          var data = await api('', 'POST', body);
           message('已新建「' + data.event.title + '」。');
-          title.value = ''; summary.value = '';
+          title.value = ''; summary.value = ''; factText.value = ''; factAt.value = '';
           await loadOverview();
         } catch (e) {
           message('新建失败：' + e.message, true);
         }
       });
-      line.setAttribute('aria-hidden', 'true');
     }
 
     // ---------- 单项目目标列表 ----------
@@ -346,7 +403,7 @@
         q.set('scope', ui.scope);
         if (ui.status) q.set('status', ui.status);
         if (ui.eventKeyword) q.set('keyword', ui.eventKeyword);
-        q.set('limit', String(LIMIT));
+        q.set('limit', String(EVENT_LIMIT));
         if (cursor) q.set('cursor', cursor);
         var data = await api('?' + q.toString());
         if (gen !== generation || !alive()) return;
@@ -405,13 +462,16 @@
       node('div', edit, '修改概况（按 revision 校验；只改标题/概况不强制补事实，改状态需补一条事实）', 'sf-label');
       var title = field(edit, '标题');
       title.value = ev.title;
+      budgetField(edit, title, 80, '标题');
       var summary = field(edit, '概况');
       summary.value = ev.summary;
-      var status = select(edit, '状态', STATUS, ev.status);
+      budgetField(edit, summary, 240, '概况');
+      var status = select(edit, '当前状态', STATUS, ev.status);
       var recBox = node('div', edit);
       recBox.style.cssText = 'display:grid;gap:8px';
       var recKind = select(recBox, '同事务追加的事实类型', KINDS, 'milestone');
       var recText = field(recBox, '事实（一句；留空则不追加）');
+      budgetField(recBox, recText, 240, '事实');
       var recSource = node('label', recBox, undefined, 'sf-label');
       var recUseSession = node('input', recSource);
       recUseSession.type = 'checkbox';
@@ -460,6 +520,7 @@
       node('div', add, '追加一条关键事实（一句、单行；页码内按事实时间正序）', 'sf-label');
       var addKind = select(add, '类型', KINDS, 'milestone');
       var addText = field(add, '事实');
+      budgetField(add, addText, 240, '事实');
       var addAt = field(add, '事实时刻（可选，如 2026-11-16T09:30:00+08:00；不确定就留空）');
       var addSourceLine = node('div', add);
       addSourceLine.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center';
@@ -513,7 +574,7 @@
       if (!box2) return;
       try {
         var q = new URLSearchParams();
-        q.set('limit', String(LIMIT));
+        q.set('limit', String(PAGE_LIMIT));
         if (cursor) q.set('cursor', cursor);
         var data = await api('/' + encodeURIComponent(ev.event_id) + '/records?' + q.toString());
         if (gen !== generation || !alive()) return;
@@ -606,7 +667,9 @@
           button(line, '复核这条', async function () {
             try {
               var one = await api('/records/' + encodeURIComponent(rec.record_id) + '/sources?source_id=' + encodeURIComponent(s.source_id));
-              var v = (one.sources || [])[0];
+              var list = one.sources || [];
+              var v = null;
+              for (var i = 0; i < list.length; i++) { if (list[i] && list[i].source_id === s.source_id) { v = list[i]; break; } }
               message(v ? (v.note || sourceStateText(v)) : '复核没有返回这条来源。', false, box);
             } catch (e) {
               message('复核失败：' + e.message, true, box);
@@ -627,6 +690,7 @@
       box.style.cssText = 'border:1px dashed var(--border);border-radius:8px;padding:8px;margin-top:6px;display:grid;gap:6px';
       var text = field(box, '更正后的事实');
       text.value = rec.text;
+      budgetField(box, text, 240, '事实');
       var kind = select(box, '类型', KINDS, rec.kind);
       var at = field(box, '事实时刻（留空＝未明确）');
       at.value = rec.occurred_at || '';

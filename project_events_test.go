@@ -200,7 +200,7 @@ func TestProjectEventStatusRequiresFactOnlyOnRealChange(t *testing.T) {
 	}
 	ev := createEvent(t, a, s, map[string]any{
 		"project_id": p.ID, "title": "带事实的处理中", "summary": "已有事实支撑。", "status": "processing",
-		"record": map[string]any{"kind": "plan", "text": "方案已确认，进入实现。", "sources": []any{}},
+		"record": map[string]any{"kind": "plan", "text": "方案已确认，进入实现。", "sources": []any{map[string]any{"session_id": s.ID}}},
 	})
 
 	// 仅改标题/概况：当前状态非讨论中也不强制补事实（本轮收敛的口径）。
@@ -226,7 +226,7 @@ func TestProjectEventStatusRequiresFactOnlyOnRealChange(t *testing.T) {
 	}
 	out = mustEventCap(t, a, s, "project_event_update", map[string]any{
 		"event_id": ev.ID, "expected_revision": ev2.Revision, "status": "awaiting",
-		"record": map[string]any{"kind": "acceptance", "text": "实现完成，提交待验收。", "sources": []any{}},
+		"record": map[string]any{"kind": "acceptance", "text": "实现完成，提交待验收。", "sources": []any{map[string]any{"session_id": s.ID}}},
 	})
 	if changed, _ := out["changed"].(bool); !changed {
 		t.Fatalf("状态变化应算变化: %v", out)
@@ -269,7 +269,7 @@ func TestProjectEventIdempotencyRevisionAndSingleLine(t *testing.T) {
 	// 记录幂等：同 client_key 同正文不重复追加，revision 不动。
 	add := map[string]any{
 		"event_id": first.ID, "expected_event_revision": 1, "client_key": "r-1",
-		"kind": "milestone", "text": "第一条可重试的事实。", "sources": []any{},
+		"kind": "milestone", "text": "第一条可重试的事实。", "sources": []any{map[string]any{"session_id": s.ID}},
 	}
 	out := mustEventCap(t, a, s, "project_event_record_add", add)
 	evRaw, _ := json.Marshal(out["event"])
@@ -280,7 +280,7 @@ func TestProjectEventIdempotencyRevisionAndSingleLine(t *testing.T) {
 	}
 	add2 := map[string]any{
 		"event_id": first.ID, "expected_event_revision": 2, "client_key": "r-1",
-		"kind": "milestone", "text": "第一条可重试的事实。", "sources": []any{},
+		"kind": "milestone", "text": "第一条可重试的事实。", "sources": []any{map[string]any{"session_id": s.ID}},
 	}
 	out = mustEventCap(t, a, s, "project_event_record_add", add2)
 	if changed, _ := out["changed"].(bool); changed {
@@ -962,6 +962,7 @@ func TestProjectEventBudgetBoundaries(t *testing.T) {
 		out := mustEventCap(t, a, s, "project_event_record_add", map[string]any{
 			"event_id": big.ID, "expected_event_revision": rev, "client_key": "many-" + strconv.Itoa(i),
 			"kind": "milestone", "text": strings.Repeat("a", 960),
+			"sources": []any{map[string]any{"session_id": s.ID}},
 		})
 		rawEv, _ := json.Marshal(out["event"])
 		var next ProjectEvent

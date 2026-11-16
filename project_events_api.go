@@ -108,7 +108,7 @@ func (a *App) handleEventOverview(w http.ResponseWriter, r *http.Request) {
 		ProjectLimit:    limit,
 		ProjectCursor:   q.Get("project_cursor"),
 	}
-	out, err := a.eventOverview(a.userScope(), args, 12)
+	out, err := a.eventOverview(a.userScope(), args, 20)
 	projectEventResponse(w, out, err)
 }
 
@@ -132,7 +132,7 @@ func (a *App) handleEventList(w http.ResponseWriter, r *http.Request) {
 		UpdatedTo:   q.Get("updated_to"),
 		Limit:       limit,
 		Cursor:      q.Get("cursor"),
-	}, 20)
+	}, 12)
 	projectEventResponse(w, out, err)
 }
 
@@ -263,23 +263,8 @@ func (a *App) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 	projectEventResponse(w, map[string]any{"created": created, "event": ev, "project": eventProjectView(p)}, nil)
 }
 
-// userStatusChangeGuard：设置页也要守「状态实际变化必须附一条关键事实」。
-// 只改标题/概况（哪怕当前状态非讨论中）不强制；实际状态跳变则需同次提交 record。
-func (a *App) userStatusChangeGuard(eventID string, status *string, hasRecord bool) error {
-	if status == nil || hasRecord {
-		return nil
-	}
-	ev, err := a.Store.GetProjectEvent(eventID)
-	if err != nil {
-		return err
-	}
-	if *status == ev.Status {
-		return nil
-	}
-	return fmt.Errorf("%w：状态从「%s」变到「%s」必须同时附一条关键事实（record）；只有标题/概况的小幅纠错可以不附",
-		ErrProjectEventRecordNeedsSource, projectEventStatusLabels[ev.Status], projectEventStatusLabels[*status])
-}
-
+// handleEventPatch 设置页改概况/状态：状态实际变化必须同次附一条关键事实。
+// 该判定在写事务内完成（见 mutateProjectEvent），不再事务外预读一次状态再比。
 func (a *App) handleEventPatch(w http.ResponseWriter, r *http.Request) {
 	if !projectEventSettingsGuard(w, r) || !a.projectEventComponentOn(w) {
 		return
@@ -330,16 +315,12 @@ func (a *App) handleEventPatch(w http.ResponseWriter, r *http.Request) {
 		}
 		rec = &prepared
 	}
-	if err := a.userStatusChangeGuard(r.PathValue("id"), patch.Status, rec != nil); err != nil {
-		projectEventResponse(w, nil, err)
-		return
-	}
-	ev, changed, err := a.Store.MutateProjectEventAsUser(r.PathValue("id"), *body.ExpectedRevision, patch, rec)
+	updated, _, changed, err := a.Store.MutateProjectEventAsUser(r.PathValue("id"), *body.ExpectedRevision, patch, rec)
 	if err != nil {
 		projectEventResponse(w, nil, err)
 		return
 	}
-	projectEventResponse(w, map[string]any{"event": ev, "changed": changed}, nil)
+	projectEventResponse(w, map[string]any{"event": updated, "changed": changed}, nil)
 }
 
 func (a *App) handleEventDelete(w http.ResponseWriter, r *http.Request) {

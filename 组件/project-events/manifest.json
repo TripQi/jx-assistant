@@ -92,7 +92,7 @@
     },
     {
       "name": "project_event_create",
-      "description": "在项目里新建大目标。标题、概况、状态各自独立预算（80/240 单元），超限回执指出已用/上限并给精简方向，不静默截断。非讨论中状态必须同事务附一条有依据的关键事实；直接创建非讨论中事件本身也算状态事实。",
+      "description": "在项目里新建大目标。标题、概况、状态各自独立预算（80/240 单元），超限回执指出已用/上限并给精简方向，不静默截断。非讨论中状态必须同事务附一条有依据的关键事实；AI 的事实必须给出实际依据会话（sources 必填），用户设置页录入的可以无来源。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
       "writes": true,
       "parameters": {
@@ -128,7 +128,7 @@
     },
     {
       "name": "project_event_record_add",
-      "description": "向目标时间线追加一条关键事实（一句、单行），可同时显式更新标题/概况/状态；client_key 必填，重试不重复追加。",
+      "description": "向目标时间线追加一条关键事实（一句、单行），可同时显式更新标题/概况/状态；client_key 必填，重试不重复追加（同键同载荷返回已提交结果，父 revision 后来前进也不误判失败）。AI 必须给出至少一条实际依据会话；用户设置页可记录无来源事实。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
       "writes": true,
       "parameters": {
@@ -140,7 +140,7 @@
           "kind": {"type": "string", "enum": ["plan", "milestone", "issue", "validation", "blocker", "acceptance", "other"], "description": "事实类型"},
           "text": {"type": "string", "description": "一句关键事实（单行、不分号拼接）"},
           "occurred_at": {"type": "string", "description": "事实发生时刻（RFC3339 带时区）；不确定就留空"},
-          "sources": {"type": "array", "description": "[{session_id,message_seq}]：绑定本次事实的依据会话与消息位置"},
+          "sources": {"type": "array", "description": "必填（至少一条）：[{session_id,message_seq}] 本次事实的依据会话与消息位置；不能绑未读的转述或编造位置"},
           "event": {"type": "object", "description": "可选：同事务 patch {title?,summary?,status?}"}
         },
         "required": ["event_id", "expected_event_revision", "client_key", "text"]
@@ -148,7 +148,7 @@
     },
     {
       "name": "project_event_record_update",
-      "description": "原位更正一条推进记录（不保留旧正文历史）并可增删来源；记录与父事件 revision 一并递增。",
+      "description": "原位更正一条推进记录（不保留旧正文历史）并可增删来源；记录与父事件 revision 一并递增。AI 记录不能通过移除来源变成无来源记录（要作废请追加新事实或由用户在设置页删除）。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
       "writes": true,
       "parameters": {

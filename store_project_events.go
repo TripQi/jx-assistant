@@ -88,6 +88,7 @@ var (
 	ErrProjectEventDeleteConfirm     = errors.New("永久删除须由用户在设置页明确确认；AI 不提供删除能力")
 	ErrProjectEventSourceInvalid     = errors.New("来源会话不满足项目与调用者资格，已拒绝写入")
 	ErrProjectEventRecordNeedsSource = errors.New("非讨论中状态必须同时附一条有依据的关键事实")
+	ErrProjectEventSourceRequired    = errors.New("AI 关键事实必须给出实际依据会话")
 )
 
 // ---------- 数据结构 ----------
@@ -792,6 +793,22 @@ func (s *Store) MessageFingerprint(sessionID string, seq int64) (int64, string, 
 	return id, messageDigest(role, content.String), nil
 }
 
+// MessageRowExists 只判消息行是否还在（`SELECT id`，不读正文）：来源列表默认不预读
+// 正文，正文指纹只对显式 source_id 定点复核一条才读。
+func (s *Store) MessageRowExists(id int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var got int64
+	err := s.db.QueryRow(`SELECT id FROM messages WHERE id=?`, id).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // MessageRowByID 按行 ID 复核来源：行被删或 seq 复用后行 ID 会变，不能只看 seq。
 func (s *Store) MessageRowByID(id int64) (int64, string, bool, error) {
 	s.mu.Lock()
@@ -864,21 +881,48 @@ func insertEventSource(tx *sql.Tx, recordID string, src ProjectEventSourceInput,
 	return err
 }
 
+// eventRecordByClientKey 判幂等命中：同键同载荷返回此前提交的那一行，
+// 同键异载荷是冲突（不能拿同一个键写两条不同的事实）。
+func eventRecordByClientKey(tx *sql.Tx, eventID, key, digest string) (ProjectEventRecord, bool, error) {
+	var id, stored string
+	err := tx.QueryRow(`SELECT id, request_digest FROM project_event_records WHERE event_id=? AND client_key=?`, eventID, key).Scan(&id, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProjectEventRecord{}, false, nil
+	}
+	if err != nil {
+		return ProjectEventRecord{}, false, err
+	}
+	if stored != digest {
+		return ProjectEventRecord{}, false, ErrProjectEventIdempotent
+	}
+	rec, err := readProjectEventRecordRow(tx, id)
+	return rec, true, err
+}
+
+// eventWithCounts 读当前事件概况并填派生计数（回执用，不展开时间线）。
+func eventWithCounts(tx *sql.Tx, eventID string) (ProjectEvent, error) {
+	ev, err := readProjectEventRow(tx, eventID)
+	if err != nil {
+		return ProjectEvent{}, err
+	}
+	records, sessions, err := eventCountsOf(tx, eventID)
+	if err != nil {
+		return ProjectEvent{}, err
+	}
+	ev.RecordCount, ev.SessionCount = records, sessions
+	return ev, nil
+}
+
 // insertEventRecord 追加一条关键事实；client_key 命中时按请求摘要判幂等。
 // created=false 表示这条事实此前已提交（重试命中），调用方不应再刷新父事件 revision。
 func insertEventRecord(tx *sql.Tx, eventID string, in ProjectEventRecordInput, origin, now string) (ProjectEventRecord, bool, error) {
 	if in.ClientKey != "" {
-		var id, digest string
-		err := tx.QueryRow(`SELECT id, request_digest FROM project_event_records WHERE event_id=? AND client_key=?`, eventID, in.ClientKey).Scan(&id, &digest)
-		if err == nil {
-			if digest != in.RequestDigest {
-				return ProjectEventRecord{}, false, ErrProjectEventIdempotent
-			}
-			rec, err := readProjectEventRecordRow(tx, id)
-			return rec, false, err
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+		rec, hit, err := eventRecordByClientKey(tx, eventID, in.ClientKey, in.RequestDigest)
+		if err != nil {
 			return ProjectEventRecord{}, false, err
+		}
+		if hit {
+			return rec, false, nil
 		}
 	}
 	id, err := newProjectID("rec-")
@@ -1010,42 +1054,63 @@ func (s *Store) createProjectEvent(projectID string, in ProjectEventCreateInput,
 // MutateProjectEventForSession 在一个事务里改概况/状态并可选追加一条关键事实。
 // changed=false 表示没有任何有效内容变化（相同值保存、幂等重试、重复来源），
 // 此时不刷新 revision 与 updated_at。
-func (s *Store) MutateProjectEventForSession(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput, sessionID string, authorize eventWriteAuth) (ProjectEvent, bool, error) {
+func (s *Store) MutateProjectEventForSession(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput, sessionID string, authorize eventWriteAuth) (ProjectEvent, ProjectEventRecord, bool, error) {
 	return s.mutateProjectEvent(eventID, expectedRevision, patch, rec, eventWriteCtx{sessionID: sessionID, authorize: authorize, origin: eventOriginAI})
 }
 
 // MutateProjectEventAsUser 是设置页用户的概况/状态编辑（用户的显式更正不需要附事实）。
-func (s *Store) MutateProjectEventAsUser(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput) (ProjectEvent, bool, error) {
+func (s *Store) MutateProjectEventAsUser(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput) (ProjectEvent, ProjectEventRecord, bool, error) {
 	return s.mutateProjectEvent(eventID, expectedRevision, patch, rec, eventWriteCtx{origin: eventOriginUser})
 }
 
-func (s *Store) mutateProjectEvent(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput, wc eventWriteCtx) (ProjectEvent, bool, error) {
+// mutateProjectEvent 在一个事务里改概况/状态并可选追加一条关键事实。
+// 返回的 ProjectEventRecord 就是本次提交（或幂等命中）的那一行：调用方不得在提交后
+// 再按「最新一条」重读——晚到的旧事实会让「最新一条」指向别的记录（设计 §9.2）。
+// changed=false 表示没有任何有效内容变化（相同值保存、幂等重试、重复来源），
+// 此时不刷新 revision 与 updated_at。
+func (s *Store) mutateProjectEvent(eventID string, expectedRevision int64, patch ProjectEventPatchInput, rec *ProjectEventRecordInput, wc eventWriteCtx) (ProjectEvent, ProjectEventRecord, bool, error) {
+	none := ProjectEventRecord{}
 	if wc.authorize != nil && wc.sessionID == "" {
-		return ProjectEvent{}, false, ErrProjectAuthorizationRequired
+		return ProjectEvent{}, none, false, ErrProjectAuthorizationRequired
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
 	defer tx.Rollback()
 	ev, err := readProjectEventRow(tx, eventID)
 	if err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
 	p, err := readProject(tx, ev.ProjectID)
 	if err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
 	if err := wc.check(tx, p); err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
 	if p.Archived {
-		return ProjectEvent{}, false, ErrProjectEventArchived
+		return ProjectEvent{}, none, false, ErrProjectEventArchived
+	}
+	// 幂等命中先于父 revision 校验：同键同载荷是「已提交请求的重发」，父事件后来前进
+	// 不能把它误判成新请求（设计 §7.1）；授权、项目状态与幂等仍先核。
+	if rec != nil && rec.ClientKey != "" {
+		committed, hit, err := eventRecordByClientKey(tx, eventID, rec.ClientKey, rec.RequestDigest)
+		if err != nil {
+			return ProjectEvent{}, none, false, err
+		}
+		if hit {
+			current, err := eventWithCounts(tx, eventID)
+			if err != nil {
+				return ProjectEvent{}, none, false, err
+			}
+			return current, committed, false, nil
+		}
 	}
 	if ev.Revision != expectedRevision {
-		return ProjectEvent{}, false, ErrProjectEventRevisionConflict
+		return ProjectEvent{}, none, false, ErrProjectEventRevisionConflict
 	}
 	title, summary, status := ev.Title, ev.Summary, ev.Status
 	if patch.Title != nil {
@@ -1057,40 +1122,43 @@ func (s *Store) mutateProjectEvent(eventID string, expectedRevision int64, patch
 	if patch.Status != nil {
 		status = *patch.Status
 	}
+	// 状态实际变化必须同事务附一条关键事实；在事务里判，避免事务外读到旧状态。
+	if status != ev.Status && rec == nil {
+		return ProjectEvent{}, none, false, fmt.Errorf("%w：状态从「%s」变到「%s」必须同时提交一条有依据的关键事实",
+			ErrProjectEventRecordNeedsSource, projectEventStatusLabels[ev.Status], projectEventStatusLabels[status])
+	}
 	changed := title != ev.Title || summary != ev.Summary || status != ev.Status
+	var recRow ProjectEventRecord
 	if rec != nil {
-		if _, created, err := insertEventRecord(tx, eventID, *rec, wc.origin, projectEventNow()); err != nil {
-			return ProjectEvent{}, false, err
-		} else if created {
+		created := false
+		recRow, created, err = insertEventRecord(tx, eventID, *rec, wc.origin, projectEventNow())
+		if err != nil {
+			return ProjectEvent{}, none, false, err
+		}
+		if created {
 			changed = true
 		}
 	}
 	if !changed {
-		records, sessions, err := eventCountsOf(tx, eventID)
+		current, err := eventWithCounts(tx, eventID)
 		if err != nil {
-			return ProjectEvent{}, false, err
+			return ProjectEvent{}, none, false, err
 		}
-		ev.RecordCount, ev.SessionCount = records, sessions
-		return ev, false, nil
+		return current, recRow, false, nil
 	}
 	now := projectEventNow()
 	if _, err := tx.Exec(`UPDATE project_events SET title=?, summary=?, status=?, revision=revision+1, updated_at=? WHERE id=? AND revision=?`,
 		title, summary, status, now, eventID, expectedRevision); err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
-	ev, err = readProjectEventRow(tx, eventID)
+	current, err := eventWithCounts(tx, eventID)
 	if err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
-	records, sessions, err := eventCountsOf(tx, eventID)
-	if err != nil {
-		return ProjectEvent{}, false, err
-	}
-	ev.RecordCount, ev.SessionCount = records, sessions
 	if err := tx.Commit(); err != nil {
-		return ProjectEvent{}, false, err
+		return ProjectEvent{}, none, false, err
 	}
-	return ev, true, nil
+	return current, recRow, true, nil
 }
 
 // PatchProjectEventRecordForSession 更正一条记录（原位纠错，不建旧正文历史）并增删来源。
@@ -1151,6 +1219,7 @@ func (s *Store) patchProjectEventRecord(recordID string, expectedRecordRevision,
 		occurred = *patch.OccurredAt
 	}
 	changed := text != rec.Text || kind != rec.Kind || occurred != rec.OccurredAt
+	removed := 0
 	for _, sid := range patch.SourcesRemove {
 		res, err := tx.Exec(`DELETE FROM project_event_sources WHERE id=? AND record_id=?`, sid, recordID)
 		if err != nil {
@@ -1158,6 +1227,7 @@ func (s *Store) patchProjectEventRecord(recordID string, expectedRecordRevision,
 		}
 		if n, err := res.RowsAffected(); err == nil && n > 0 {
 			changed = true
+			removed += int(n)
 		}
 	}
 	for _, src := range patch.SourcesAdd {
@@ -1174,6 +1244,16 @@ func (s *Store) patchProjectEventRecord(recordID string, expectedRecordRevision,
 		}
 		if after > before {
 			changed = true
+		}
+	}
+	// 设计 §4.4：显式移除来源不能把原 AI 事实变成无来源记录（用户录入的无来源事实不受此限）。
+	if removed > 0 && rec.Origin == eventOriginAI {
+		var left int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM project_event_sources WHERE record_id=?`, recordID).Scan(&left); err != nil {
+			return ProjectEvent{}, ProjectEventRecord{}, false, err
+		}
+		if left == 0 {
+			return ProjectEvent{}, ProjectEventRecord{}, false, fmt.Errorf("%w：AI 记录的来源不能删空；请补上相应依据，误录记录请由用户在设置页确认删除", ErrProjectEventSourceRequired)
 		}
 	}
 	if !changed {
@@ -1236,44 +1316,9 @@ func (s *Store) AddProjectEventRecordAsUser(eventID string, expectedEventRevisio
 }
 
 func (s *Store) addProjectEventRecord(eventID string, expectedEventRevision int64, patch ProjectEventPatchInput, rec ProjectEventRecordInput, wc eventWriteCtx) (ProjectEvent, ProjectEventRecord, bool, error) {
-	ev, changed, err := s.mutateProjectEvent(eventID, expectedEventRevision, patch, &rec, wc)
-	if err != nil {
-		return ev, ProjectEventRecord{}, false, err
-	}
-	// 事务内已落库的记录由 client_key 或最近一条定位：重读一次拿到稳定回执。
-	recRow := ProjectEventRecord{}
-	if rec.ClientKey != "" {
-		recRow, err = s.ProjectEventRecordByClientKey(eventID, rec.ClientKey)
-	} else {
-		recRow, err = s.LatestProjectEventRecord(eventID)
-	}
-	if err != nil {
-		return ev, ProjectEventRecord{}, false, err
-	}
-	return ev, recRow, changed, nil
-}
-
-// ProjectEventRecordByClientKey 取事件内某幂等键对应的记录（重试回执用）。
-func (s *Store) ProjectEventRecordByClientKey(eventID, key string) (ProjectEventRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, err := scanProjectEventRecord(s.db.QueryRow(`SELECT `+projectEventRecordCols+` FROM project_event_records WHERE event_id=? AND client_key=?`, eventID, key))
-	if errors.Is(err, sql.ErrNoRows) {
-		return ProjectEventRecord{}, ErrProjectEventRecordNotFound
-	}
-	return rec, err
-}
-
-// LatestProjectEventRecord 取事件时间线上最新一条记录（事实时间优先，未知回退记录时间）。
-func (s *Store) LatestProjectEventRecord(eventID string) (ProjectEventRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, err := scanProjectEventRecord(s.db.QueryRow(`SELECT `+projectEventRecordCols+` FROM project_event_records
-		WHERE event_id=? ORDER BY COALESCE(occurred_at, created_at) DESC, id DESC LIMIT 1`, eventID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return ProjectEventRecord{}, ErrProjectEventRecordNotFound
-	}
-	return rec, err
+	// 回执直接用事务内落库（或幂等命中）的那一行：提交后按「最新一条」重读会把
+	// 晚到的旧事实说成别的事实，调用方拿着错的 record_id 去更正/查来源就会打空。
+	return s.mutateProjectEvent(eventID, expectedEventRevision, patch, &rec, wc)
 }
 
 // DeleteProjectEvent 永久删除一个大事件（仅用户设置页确认后调用）：级联删记录与来源，

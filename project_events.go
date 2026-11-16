@@ -462,7 +462,8 @@ func (a *App) eventOverview(sc eventScope, args eventOverviewArgs, defLimit int)
 	pkw := strings.ToLower(strings.TrimSpace(args.ProjectKeyword))
 	filtered := make([]Project, 0, len(projects))
 	for _, p := range projects {
-		if p.Archived && !args.IncludeArchived && !(!sc.assistant && p.ID == sc.own.ID) {
+		// 默认不含归档项目（设计 §6.2）：归档是另一维度，显式开启才可只读查看。
+		if p.Archived && !args.IncludeArchived {
 			continue
 		}
 		if pkw != "" {
@@ -527,6 +528,18 @@ func (a *App) eventOverview(sc eventScope, args eventOverviewArgs, defLimit int)
 		if remaining < 0 {
 			remaining = 0
 		}
+		// 每组的续读游标指向该事件列表的下一页，可直接交给 project_events_query
+		// （同一筛选与排序）；不把「本组还有几条」丢给调用方去猜怎么接着读。
+		eventsNext := ""
+		if remaining > 0 && len(g.Events) > 0 {
+			last := g.Events[len(g.Events)-1]
+			eventsNext = encodeEventCursor(eventCursor{
+				Kind: "ev",
+				Sig:  eventFilterSignature("ev", p.ID, scope, status, filter.Keyword, "", "", ""),
+				Time: last.UpdatedAt,
+				ID:   last.ID,
+			})
+		}
 		outGroups = append(outGroups, map[string]any{
 			"project_id":          p.ID,
 			"name":                p.Name,
@@ -538,6 +551,7 @@ func (a *App) eventOverview(sc eventScope, args eventOverviewArgs, defLimit int)
 			"events_shown":        len(g.Events),
 			"events_remaining":    remaining,
 			"events_has_more":     remaining > 0,
+			"events_next_cursor":  eventsNext,
 			"events_preview_size": projectEventPreviewLimit,
 		})
 	}
@@ -550,12 +564,19 @@ func (a *App) eventOverview(sc eventScope, args eventOverviewArgs, defLimit int)
 	}
 	note := "首页不是全量：每组最多 " + strconv.Itoa(projectEventPreviewLimit) + " 个目标；更多事件请用 project_events_query 按项目翻页，不要把首页当全部"
 	if len(filtered) == 0 {
-		// 无结果分三种，不能笼统一句「没有事件」：没登记 / 当前工作区未绑定 / 筛选没匹配。
+		// 无结果要分清「没登记 / 已登记但都归档（默认不列）/ 筛选没命中」，
+		// 不能笼统一句「没有事件」。
+		archived := 0
+		for _, p := range projects {
+			if p.Archived {
+				archived++
+			}
+		}
 		switch {
-		case !sc.assistant && sc.own == nil:
-			note = "当前会话的工作区尚未绑定任何已登记项目：请到 设置 → 项目事件（或项目知识库）新建项目并绑定工作区；不要擅自登记、写进其他项目或创建收件箱"
 		case len(projects) == 0:
 			note = "尚无已登记项目：请到 设置 → 项目事件 新建项目并绑定工作区（本页即可完成，不依赖项目知识库组件）"
+		case archived == len(projects):
+			note = "已登记的项目都已归档（只读）：默认不列入总览；需要时用 include_archived 按只读查看，恢复由用户在设置页执行"
 		default:
 			note = "筛选无匹配项目：已登记 " + strconv.Itoa(len(projects)) + " 个，但当前项目关键词/范围/状态都没命中；放宽筛选后再查，勿据此认为项目不存在"
 		}
@@ -943,7 +964,8 @@ func (a *App) eventSourceViews(sc eventScope, projectID string, sources []Projec
 				view["session_mode"] = sess.Mode
 				state := "available"
 				if src.MessageID > 0 {
-					_, _, found, err := a.Store.MessageRowByID(src.MessageID)
+					// 存在性只用行 ID 判定，不读正文；正文指纹只对显式指定的那条定点读。
+					found, err := a.Store.MessageRowExists(src.MessageID)
 					if err != nil {
 						return nil, err
 					}
@@ -1029,6 +1051,11 @@ func (a *App) prepareRecord(t *toolContext, target *Project, args eventRecordArg
 		sources, err = a.eventSourceInputs(t, target, args.Sources, t.sess.ID)
 		if err != nil {
 			return ProjectEventRecordInput{}, err
+		}
+		if len(sources) == 0 {
+			// 设计 §4.4：AI 新增关键事实须给出实际依据会话；只有用户设置页直接记录
+			// 事实允许无会话来源（标注用户更新）。
+			return ProjectEventRecordInput{}, fmt.Errorf("%w：AI 新增关键事实须给出至少一条实际依据会话（sources: [{\"session_id\":\"...\"}]），不能把未读的转述冒充已核实原文；用户可在设置页记录无来源事实", ErrProjectEventSourceRequired)
 		}
 	} else {
 		sources, err = a.userSourceInputs(args.Sources)
@@ -1247,7 +1274,7 @@ func runProjectEventUpdate(t *toolContext, raw json.RawMessage) (string, error) 
 	if statusChanged && rec == nil {
 		return "", fmt.Errorf("%w：状态从「%s」变到「%s」必须同时提交一条有依据的关键事实", ErrProjectEventRecordNeedsSource, projectEventStatusLabels[ev.Status], projectEventStatusLabels[*patch.Status])
 	}
-	updated, changed, err := t.app.Store.MutateProjectEventForSession(ev.ID, *args.ExpectedRevision, patch, rec, t.sess.ID, t.app.eventWriteAuthorize(t, &p))
+	updated, _, changed, err := t.app.Store.MutateProjectEventForSession(ev.ID, *args.ExpectedRevision, patch, rec, t.sess.ID, t.app.eventWriteAuthorize(t, &p))
 	if err != nil {
 		return "", err
 	}

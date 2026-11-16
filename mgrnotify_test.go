@@ -573,24 +573,26 @@ func TestMgrNotifyHeldQuestionQuiet(t *testing.T) {
 	_ = a.resolveQuestion(q.ID, "甲")
 }
 
-// 代批来源判定：直调请求带调用者会话头，只有当前经理主对话自己才算代选；
-// 没有头（前端按钮/远程转发）与非经理会话一律算用户。
+// 代批来源判定：直调请求按调用者身份三分类——不带调用者头（前端按钮/远程
+// 转发）是真用户；当前经理主对话自己算经理；带头的其它会话是认不出身份的 AI
+// 调用方（foreign，决议入口 403），绝不能回落成用户语义（旧实现只分「经理 /
+// 非经理」，经理派发的子对话因此被当成用户）。
 func TestManagerResolveCaller(t *testing.T) {
-	a, mgr, _, _ := newMgrNotifyTestApp(t)
+	a, mgr, task, _ := newMgrNotifyTestApp(t)
 	if cur := a.currentAssistant(); cur == nil || cur.ID != mgr.ID {
 		t.Fatalf("currentAssistant 应认到测试建的经理主对话，实际 %+v", cur)
 	}
 	r, _ := http.NewRequest(http.MethodPost, "/api/questions/q-1", nil)
-	if managerResolveCaller(a, r) {
-		t.Fatal("不带调用者头的请求是用户（前端按钮/远程转发），不算经理代选")
+	if k := a.resolveCallerOf(r); k != resolveCallerUser {
+		t.Fatalf("不带调用者头的请求是用户（前端按钮/远程转发），实际 %v", k)
 	}
-	r.Header.Set("X-JX-Caller-Session", "task-disp")
-	if managerResolveCaller(a, r) {
-		t.Fatal("非经理会话的调用不算经理代选")
+	r.Header.Set("X-JX-Caller-Session", task.ID)
+	if k := a.resolveCallerOf(r); k != resolveCallerForeign {
+		t.Fatalf("非经理派生的 AI 会话（普通工作任务会话 task-disp）必须判为 foreign（403），不得回落成用户，实际 %v", k)
 	}
 	r.Header.Set("X-JX-Caller-Session", mgr.ID)
-	if !managerResolveCaller(a, r) {
-		t.Fatal("当前经理主对话自己的 call_api 直调应算经理代选")
+	if k := a.resolveCallerOf(r); k != resolveCallerManager {
+		t.Fatalf("当前经理主对话自己的 call_api 直调应走经理授权路径，实际 %v", k)
 	}
 }
 

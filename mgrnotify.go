@@ -12,6 +12,11 @@ package main
 // 代批资格是**轮次级授权**（mgrTurnGrant），不是会话级永久标记：只有
 // dispatch_task / send_to_session 把需求注入会话、投递**开出的那一轮**才授予；
 // 该轮收口（正常完成/失败/停止，含看门狗硬终结）或用户亲发消息（接管）即撤销。
+// 谁能来代决也按身份卡：请求带 X-JX-Caller-Session 就是某个 AI 会话在调
+//（有头即 AI），只有主对话自己、以及 parent 链落到主对话的派生子对话走这套
+// 轮次授权；其余 AI 会话一律 403，绝不回落成「用户语义」放行（2026-11 踩坑：
+// 旧判定只认与主对话逐字相等的调用者，经理派发的子对话带自己的会话 id 被当成
+// 用户，可代决任意会话的卡）；不带头的才是真用户（界面按钮直连），照常可用。
 // 用户自己发起的轮、经理发过话之后用户接手的会话，卡片一律不通知经理，经理
 // 代决请求在决议入口被拒——绝不代决不属经理那一轮的卡片。（2026-11 踩坑：曾按
 // 「会话级永久标记」实现——dispatch_task 派生记 DispatchedBy、send_to_session
@@ -256,21 +261,76 @@ func (a *App) deliverManagerReport(text string) {
 
 // ---------- 决议来源标注（谁点的，回告里说清） ----------
 
-// managerResolveCaller 判断这条决定请求是否长期助理自己经 call_api 代批的：
-// 直调请求带调用者会话头（runCallAPI 注入），与当前经理主对话相符才算。
-// 前端按钮与远程转发都不带这个头，一律算用户。这只是回告的来源标注，不是
-// 鉴权——call_api 自己已过目录/权限/危险三道闸。
-func managerResolveCaller(a *App, r *http.Request) bool {
-	sid := r.Header.Get("X-JX-Caller-Session")
+// resolveCallerKind 是决议请求的调用者身份三分类（server.go 两处决议入口据此
+// 选授权路径）。
+type resolveCallerKind int
+
+const (
+	// resolveCallerUser 不带调用者头：界面按钮、远程转发——真用户。用户永远有权
+	// 决定任何一张卡，这条路必须保持照常可用。
+	resolveCallerUser resolveCallerKind = iota
+	// resolveCallerManager 长期助理主对话自己，或它派生的子对话（parent 链落到
+	// 主对话，见 managerLineage）：走与经理完全相同的轮次级授权
+	//（managerResolveAllowed 预检 + commitManagerDecisionLocked 原子提交），
+	// 既不因「我是子对话」免掉轮次校验，也不能代批别的轮次的卡。
+	resolveCallerManager
+	// resolveCallerForeign 认不出身份的 AI 会话：既不是主对话、也不在它派生的
+	// parent 链上（普通工作任务会话、aux、父会话已删除的孤儿等）——一律 403，
+	// 绝不回落成用户语义。
+	resolveCallerForeign
+)
+
+// errResolveCallerForeign 认不出身份的 AI 会话代决时给的可读原因。
+var errResolveCallerForeign = errors.New("这条决议请求的调用者不是长期助理主对话、也不在它派生的子对话链上：AI 会话只能代决经理自己那一轮（经理经 call_api 代决）的卡，其它卡请留给用户处理")
+
+// resolveCallerOf 给一条决议请求的调用者分身份：**有头即 AI**（runCallAPI 给
+// 每个 AI 会话的直调请求注入 X-JX-Caller-Session=它自己的会话 id，子对话注入的
+// 就是子会话 id；与 projects_api.go 的 projectSettingsRequest 同一惯例），带上
+// 头却认不出身份时报 foreign 而不是 user——回落成用户语义等于任何 AI 会话都能
+// 经 call_api 跳过全部经理授权校验。无头的才是真用户。
+func (a *App) resolveCallerOf(r *http.Request) resolveCallerKind {
+	sid := strings.TrimSpace(r.Header.Get("X-JX-Caller-Session"))
 	if sid == "" {
+		return resolveCallerUser
+	}
+	if a.managerLineage(sid) {
+		return resolveCallerManager
+	}
+	return resolveCallerForeign
+}
+
+// managerLineage 判断 sid 是不是「经理本级，或经理派生的子对话」：主对话
+//（currentAssistant，当前版本指针）自己算；其余沿 parent 链往上走，链落到主
+// 对话才算——dispatch_sub 建子对话时 ParentID 就是派发者，经理派出去的子对话
+// 天然在链上，经理才可能认得它、也才谈得上「子对话权力不超过经理本级」。
+//
+// 认不出的情形全按不认（调用方 403）：链上任一环取不到会话（父会话已删除的
+// 孤儿）、链走空停在非主对话的顶层会话（普通工作任务 / aux，及它们派生的子
+// 对话）。子对话只有一级，seen 只是脏数据成环的兜底（正常数据走不到下一级）。
+func (a *App) managerLineage(sid string) bool {
+	mgr := a.currentAssistant()
+	if mgr == nil {
 		return false
 	}
-	cur := a.currentAssistant()
-	return cur != nil && cur.ID == sid
+	seen := map[string]bool{}
+	for sid != "" && !seen[sid] {
+		if sid == mgr.ID {
+			return true
+		}
+		seen[sid] = true
+		m, err := a.Store.Get(sid)
+		if err != nil || m == nil {
+			return false
+		}
+		sid = strings.TrimSpace(m.ParentID)
+	}
+	return false
 }
 
 // markQuestionByManager 供回告链路的独立测试标注来源；实际 HTTP 代决必须走
 // resolveManagerQuestion，把来源与决定提交放在同一授权边界内。
+// （身份三分类的地基是 resolveCallerOf / managerLineage：旧实现里只认「与主对话
+// 逐字相等」的 managerResolveCaller 已并入三分类，不再单独存在。）
 func (a *App) markQuestionByManager(id string) {
 	a.permMu.Lock()
 	if q, ok := a.questions[id]; ok && !q.decided {

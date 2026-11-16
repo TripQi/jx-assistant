@@ -3997,6 +3997,12 @@ func (a *App) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 	// 经理的授权检查、来源标记与决定提交必须与用户撤销共享原子边界。
 	var err error
 	if managerResolveCaller(a, r) {
+		// 代批是轮次级授权：卡片不属于经理投递开启且正在执行的那一轮就直接 403——
+		// 窗口外的卡通知本就不投，经理经 call_api 翻清单主动代批也不能放行。
+		if !a.managerResolveAllowed(true, r.PathValue("id")) {
+			writeErr(w, http.StatusForbidden, errManagerDecisionForbidden.Error())
+			return
+		}
 		err = a.resolveManagerApproval(r.PathValue("id"), body.Approved, body.Always)
 	} else {
 		err = a.resolveApproval(r.PathValue("id"), body.Approved, body.Always)
@@ -4033,6 +4039,11 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	if managerResolveCaller(a, r) {
+		// 代答与代批同一个口径（轮次级授权，拒绝时 403）：窗口外的卡留给用户。
+		if !a.managerResolveAllowed(false, r.PathValue("id")) {
+			writeErr(w, http.StatusForbidden, errManagerDecisionForbidden.Error())
+			return
+		}
 		err = a.resolveManagerQuestion(r.PathValue("id"), body.Answer)
 	} else {
 		err = a.resolveQuestion(r.PathValue("id"), body.Answer)

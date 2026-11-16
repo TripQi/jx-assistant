@@ -104,6 +104,36 @@ func (a *App) managerTurnActiveLocked(sid string) bool {
 	return running && cur == g.run
 }
 
+// cardSession 取一张等待中的卡所属的会话 id（审批/提问共用；卡片不在等待
+// 清单返回空串——已收卡，代决无从谈起）。
+func (a *App) cardSession(isApproval bool, id string) string {
+	a.permMu.Lock()
+	defer a.permMu.Unlock()
+	if isApproval {
+		if ap, ok := a.approvals[id]; ok {
+			return ap.SessionID
+		}
+		return ""
+	}
+	if q, ok := a.questions[id]; ok {
+		return q.SessionID
+	}
+	return ""
+}
+
+// managerResolveAllowed 经理此刻是否有权代决这张卡：卡片所属会话的经理轮授权
+// 仍有效（同一轮还在执行）。
+//
+// 决议入口的第一道门（server.go 的 handleResolveApproval / handleResolveQuestion）：
+// 通知已按降噪口径不投窗口外的卡，经理经 call_api 翻到清单主动代决同样不能
+// 放行——越权的代价是替用户批准一次它没看见的越权操作。真正生效的裁决仍是
+// commitManagerDecisionLocked（授权复核与提交同在一个撤销边界内，无 TOCTOU 窗口）；
+// 这道门只是先一步把明显的越权挡在决议之前，并给出明确的 403 语义。
+func (a *App) managerResolveAllowed(isApproval bool, id string) bool {
+	sid := a.cardSession(isApproval, id)
+	return sid != "" && a.managerTurnActive(sid)
+}
+
 // errManagerDecisionForbidden 保持经理窗口外的 HTTP 403 语义。
 var errManagerDecisionForbidden = errors.New("这张卡不属于经理投递开启且正在执行的那一轮（经理代批是轮次级授权），请留给用户处理")
 

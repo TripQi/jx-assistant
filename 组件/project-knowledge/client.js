@@ -61,14 +61,21 @@
     var list = node('div', box); list.hidden = true;
     list.style.cssText = 'max-height:240px;overflow:auto;border:1px solid var(--border);border-radius:8px';
     var value = '', options = [], control = { onchange: null };
+    // 触发器文案只由 value 决定：没有匹配项就退回 label 占位，占位文案不进选项列表——
+    // 否则「请选择项目」会被当成一个可点条目再渲染一遍，看起来像第二个同名按钮。
     function caption() {
       trigger.replaceChildren(); var o = options.find(function (x) { return x.value === value; });
       icon(trigger, o && o.remote); var text = node('span', trigger, o ? o.label : label);
       text.style.cssText = 'min-width:0;overflow-wrap:anywhere'; node('span', trigger, '⌄', 'pop-check');
     }
     Object.defineProperty(control, 'value', { get: function () { return value; }, set: function (v) { value = v; caption(); } });
-    control.setOptions = function (items) {
+    control.setOptions = function (items, emptyText) {
       options = items; list.replaceChildren();
+      if (!items.length && emptyText) { // 空面板给空状态提示，不留一块空白也不重复触发器
+        var hint = node('div', list, emptyText);
+        hint.style.cssText = 'padding:8px 10px;color:var(--text-3);font-size:12px;line-height:1.5;white-space:normal';
+        hint.setAttribute('role', 'status');
+      }
       items.forEach(function (o) {
         var b = button(list, '', function () { control.value = o.value; list.hidden = true; trigger.setAttribute('aria-expanded', 'false'); if (control.onchange) control.onchange(); });
         b.className = 'pop-item'; icon(b, o.remote);
@@ -217,7 +224,7 @@
       finally { busy = false; if (alive()) lock(); }
     }
     function renderOptions(id) {
-      select.setOptions([{ value: '', label: '请选择项目' }].concat(projects.map(function (p) { return { value: p.id, label: p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id }; })));
+      select.setOptions(projects.map(function (p) { return { value: p.id, label: p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id }; }), '还没有项目，可在下方「新项目名称」处新建。');
       select.value = id || '';
     }
     async function refresh(id) {
@@ -429,7 +436,12 @@
       disposed = false;
       CX.registerSettings({
         id: 'project-knowledge', title: '项目知识库',
-        pane: { label: '项目知识库' },
+        // 图标规格照抄设置页静态导航项（.set-nav-item svg：16px、取 currentColor）：
+        // 同一 viewBox / stroke-width / 圆角端点，纯描边线框，无填充无底色。
+        pane: {
+          label: '项目知识库',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.6A3 3 0 0 0 7.4 3.4 3 3 0 0 0 4.2 7.7 3 3 0 0 0 3.3 13.4 3 3 0 0 0 6.5 18.5 3 3 0 0 0 12 19.5Z"/><path d="M12 4.6A3 3 0 0 1 16.6 3.4 3 3 0 0 1 19.8 7.7 3 3 0 0 1 20.7 13.4 3 3 0 0 1 17.5 18.5 3 3 0 0 1 12 19.5Z"/><path d="M8.4 9.6h1.5M8.4 13.4h1.5M14.1 9.6h1.5M14.1 13.4h1.5"/></svg>'
+        },
         mount: mount
         // 本页项目按钮保存；不接全局 save，防止结构管理与正文重复提交。
       });

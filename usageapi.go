@@ -307,6 +307,9 @@ func (a *App) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 			"model": r.Model, "protocol": r.Protocol, "thinking": r.Thinking,
 			"input": r.Input, "output": r.Output, "cacheRead": r.CacheRead, "cacheWrite": r.CacheWrite,
 			"total": r.Total, "ttftMs": r.TTFTMs, "durationMs": r.DurationMs,
+			// 速度：生成耗时（首末输出事件之间）与由它现算的 t/s；算不出来时
+			// tokensPerSec 为 null（页面写「—」），前端不自己算、也不凭空补
+			"outMs": r.OutMs, "tokensPerSec": r.TokensPerSec,
 			"ok": r.OK, "error": r.Error, "stream": r.Stream,
 			// 这次调用命中峰值价还是空闲价（按明细 ts 判定），页面 hover 显示
 			"peak": pricing.peakAt(r.Model, r.TS),

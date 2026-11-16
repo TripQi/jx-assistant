@@ -461,6 +461,17 @@ var storeMigrations = []migration{
 			)`,
 		},
 	},
+	{
+		// 明细补「生成耗时」列（首个输出事件 → 最后一个输出事件，毫秒）：用量页
+		// 要显示这次调用吐字有多快（t/s）。总耗时混着排队等待与工具往返，拿它当
+		// 分母会把速度算歪，所以只存「模型真在生成」那一段，速度读时现算。
+		// 老数据没有这一段（落 0）：页面写「—」，不回填、不猜。
+		id:       "0022_usage_out_ms",
+		tolerant: true,
+		sql: []string{
+			`ALTER TABLE usage_events ADD COLUMN out_ms INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

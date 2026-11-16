@@ -21,6 +21,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"strings"
 	"time"
 )
@@ -80,6 +81,7 @@ type usageRow struct {
 	Thinking   string // 本次调用实际使用的思考档位；空串＝没指定（跟随服务端默认）
 	TTFTMs     int64  // 首字延迟（请求发出 → 首个正文/思考增量）
 	DurationMs int64  // 总耗时
+	OutMs      int64  // 生成耗时（首个 → 最后一个输出事件，毫秒；0＝无数据：工具调用步/老记录）
 	OK         bool
 	Error      string
 	Stream     bool
@@ -176,8 +178,13 @@ func (a *App) recordUsage(r usageRow) {
 	}
 }
 
+// usageClock 是记账用的时间源（生产就是 time.Now）。抽成变量只为一件事：测试要
+// 把「首字延迟 / 生成耗时」钉成确定值，才能逐位比对速度算得对不对——真流式的
+// 毫秒级抖动没法定期望值。
+var usageClock = time.Now
+
 // usageCall 是一次模型调用的采集器：包住调用方原有的 StreamCallbacks，只额外
-// 记录首字延迟、流尾 usage 与成败，流结束调一次 finish 落库。
+// 记录首字延迟、输出窗口、流尾 usage 与成败，流结束调一次 finish 落库。
 type usageCall struct {
 	app      *App
 	purpose  string
@@ -185,7 +192,8 @@ type usageCall struct {
 	target   LLMTarget
 	thinking string // 本次调用实际落到请求上的档位（空串＝跟随服务端默认）
 	start    time.Time
-	ttft     time.Duration
+	firstOut time.Time // 首个输出事件（正文/思考增量）：首字延迟的终点
+	lastOut  time.Time // 最后一个输出事件：生成耗时的终点
 	usage    *Usage
 	done     bool
 }
@@ -196,7 +204,7 @@ type usageCall struct {
 // effort，不吃档位的辅助调用（标题/摘要/插件 mods）传空——记会话的档位会把
 // 没生效的档位算到辅助调用头上，明细就不可信了。
 func (a *App) meterUsage(purpose string, sess *SessionMeta, target LLMTarget, thinking string, cb StreamCallbacks) (StreamCallbacks, func(error)) {
-	m := &usageCall{app: a, purpose: purpose, target: target, start: time.Now()}
+	m := &usageCall{app: a, purpose: purpose, target: target, start: usageClock()}
 	if lv, ok := normalizeThinkingLevel(thinking); ok {
 		m.thinking = lv
 	}
@@ -204,9 +212,11 @@ func (a *App) meterUsage(purpose string, sess *SessionMeta, target LLMTarget, th
 		m.sessID = sess.ID
 	}
 	mark := func() {
-		if m.ttft == 0 {
-			m.ttft = time.Since(m.start)
+		t := usageClock()
+		if m.firstOut.IsZero() {
+			m.firstOut = t
 		}
+		m.lastOut = t
 	}
 	wrapped := StreamCallbacks{
 		OnBody:     cb.OnBody,
@@ -241,6 +251,10 @@ func (m *usageCall) finish(err error) {
 		return
 	}
 	m.done = true
+	var ttft time.Duration
+	if !m.firstOut.IsZero() {
+		ttft = m.firstOut.Sub(m.start)
+	}
 	row := usageRow{
 		TS:         now(),
 		SessionID:  m.sessID,
@@ -250,8 +264,9 @@ func (m *usageCall) finish(err error) {
 		Model:      m.target.Model,
 		Protocol:   usageProtocolLabel(m.target.Protocol),
 		Thinking:   m.thinking,
-		TTFTMs:     m.ttft.Milliseconds(),
-		DurationMs: time.Since(m.start).Milliseconds(),
+		TTFTMs:     ttft.Milliseconds(),
+		DurationMs: usageClock().Sub(m.start).Milliseconds(),
+		OutMs:      usageOutWindowMs(m.firstOut, m.lastOut),
 		OK:         err == nil,
 		Stream:     true,
 		Kind:       usageKindLLM,
@@ -270,6 +285,28 @@ func (m *usageCall) finish(err error) {
 
 // ---------- 存储：明细表读写 ----------
 
+// usageOutWindowMs 是生成耗时（毫秒）：首个输出事件 → 最后一个输出事件之间。
+// 只数正文与思考增量——首字前的排队等待、工具往返、流尾收尾都不算（与上下文
+// 面板的输出速度同一口径，两处数字对得上）。没有输出事件或只有一个事件（窗口为
+// 0）时返回 0，速度记为「无」（页面写「—」），不拿总耗时充数。
+func usageOutWindowMs(first, last time.Time) int64 {
+	if first.IsZero() || !last.After(first) {
+		return 0
+	}
+	return last.Sub(first).Milliseconds()
+}
+
+// usageTokensPerSec 是明细里的输出速度（t/s）：输出 token ÷ 生成耗时（秒），保留
+// 1 位小数。生成耗时 ≤ 0 或没有输出 token（工具调用步、失败调用、升级前的老记录）
+// 时返回 nil——页面写「—」；不写 0（那是「很慢」）也不写 Infinity/NaN（那是算错）。
+func usageTokensPerSec(output, outMs int64) *float64 {
+	if output <= 0 || outMs <= 0 {
+		return nil
+	}
+	v := math.Round(float64(output)*10000/float64(outMs)) / 10
+	return &v
+}
+
 // AppendUsageRows 批量写入明细（落库协程专用；单条写入也走它）。
 func (s *Store) AppendUsageRows(rows []usageRow) error {
 	if len(rows) == 0 {
@@ -283,9 +320,9 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	}
 	stmt, err := tx.Prepare(`INSERT INTO usage_events
 		(ts, session_id, purpose, provider_id, key_id, model, protocol,
-		 input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream,
+		 input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, out_ms, ok, error, stream,
 		 kind, detail, err_kind, provider_rank)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -293,7 +330,8 @@ func (s *Store) AppendUsageRows(rows []usageRow) error {
 	defer stmt.Close()
 	for _, r := range rows {
 		if _, err := stmt.Exec(r.TS, r.SessionID, r.Purpose, r.ProviderID, r.KeyID, r.Model, r.Protocol,
-			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.Thinking, r.TTFTMs, r.DurationMs, boolInt(r.OK), r.Error, boolInt(r.Stream),
+			r.Input, r.CacheRead, r.CacheWrite, r.Output, r.Thinking, r.TTFTMs, r.DurationMs, r.OutMs,
+			boolInt(r.OK), r.Error, boolInt(r.Stream),
 			r.Kind, r.Detail, r.ErrKind, r.Rank); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -522,9 +560,15 @@ type usageRecord struct {
 	Total      int64  `json:"total"`
 	TTFTMs     int64  `json:"ttftMs"`
 	DurationMs int64  `json:"durationMs"`
-	OK         bool   `json:"ok"`
-	Error      string `json:"error,omitempty"`
-	Stream     bool   `json:"stream"`
+	// OutMs 是生成耗时（首个 → 最后一个输出事件，毫秒；0＝没有这段数据：工具调用步、
+	// 失败调用、升级前的老记录）。
+	OutMs int64 `json:"outMs"`
+	// TokensPerSec 是输出速度（t/s，1 位小数）：输出 token ÷ 生成耗时，读时现算。
+	// nil（JSON null）＝算不出来（没有生成耗时或没有输出 token），页面写「—」。
+	TokensPerSec *float64 `json:"tokensPerSec"`
+	OK           bool     `json:"ok"`
+	Error        string   `json:"error,omitempty"`
+	Stream       bool     `json:"stream"`
 	// Peak 这次调用落在高峰（按峰值价计费）还是空闲（按空闲价）；页面 hover 显示。
 	// 由 handler 按该模型的时段规则填（Store 不认价格配置，见 usageapi.go）。
 	Peak bool `json:"peak"`
@@ -566,7 +610,7 @@ func (s *Store) scanUsageRecords(where string, args []any, limit, offset int) ([
 		return nil, 0, err
 	}
 	q := `SELECT ts, session_id, purpose, provider_id, key_id, model, protocol,
-			input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, ok, error, stream,
+			input_tokens, cache_read, cache_write, output_tokens, thinking, ttft_ms, duration_ms, out_ms, ok, error, stream,
 			kind, detail, err_kind, provider_rank
 		FROM usage_events` + where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.Query(q, append(append([]any{}, args...), limit, offset)...)
@@ -579,13 +623,14 @@ func (s *Store) scanUsageRecords(where string, args []any, limit, offset int) ([
 		var r usageRecord
 		var ok, stream int
 		if err := rows.Scan(&r.TS, &r.SessionID, &r.Purpose, &r.ProviderID, &r.KeyID, &r.Model, &r.Protocol,
-			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.Thinking, &r.TTFTMs, &r.DurationMs, &ok, &r.Error, &stream,
+			&r.Input, &r.CacheRead, &r.CacheWrite, &r.Output, &r.Thinking, &r.TTFTMs, &r.DurationMs, &r.OutMs, &ok, &r.Error, &stream,
 			&r.Kind, &r.Detail, &r.ErrKind, &r.Rank); err != nil {
 			return nil, 0, err
 		}
 		r.OK = ok != 0
 		r.Stream = stream != 0
 		r.Total = r.Input + r.Output
+		r.TokensPerSec = usageTokensPerSec(r.Output, r.OutMs)
 		out = append(out, r)
 	}
 	return out, total, rows.Err()

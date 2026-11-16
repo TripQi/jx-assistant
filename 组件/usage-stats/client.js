@@ -750,8 +750,9 @@
       var t = el('table', 'us-table us-records-table');
       var thead = el('thead');
       var htr = el('tr');
-      ['时间', '模型', '类型', '推理强度', '渠道 · Key', '输入', '输出', '缓存写', '缓存读', '总计', '首字延迟', '耗时', '状态']
-        .forEach(function (h) { htr.appendChild(el('th', '', h)); });
+      // 「速度」列紧跟「耗时」（两个时间量的解释挨在一起），窄屏可隐藏（见 client.css）
+      ['时间', '模型', '类型', '推理强度', '渠道 · Key', '输入', '输出', '缓存写', '缓存读', '总计', '首字延迟', '耗时', '速度', '状态']
+        .forEach(function (h) { htr.appendChild(el('th', h === '速度' ? 'us-speed' : '', h)); });
       thead.appendChild(htr);
       t.appendChild(thead);
       var tb = el('tbody');
@@ -784,6 +785,17 @@
         r.appendChild(el('td', 'num', fmtInt(it.total)));
         r.appendChild(el('td', 'num', fmtMs(it.ttftMs)));
         r.appendChild(el('td', 'num', fmtMs(it.durationMs)));
+        // 速度：输出 token ÷ 生成耗时（首末输出事件之间，不含首字前的排队等待），
+        // 服务端算好给数值（老记录与工具调用步为 null）——前端只格式化，不自己算，
+        // 两边口径永远只有一处。数值保持 number（将来加排序就按数值排，别按字符串）。
+        var tps = it.tokensPerSec;
+        var hasTps = typeof tps === 'number' && isFinite(tps) && tps > 0;
+        var spd = el('td', 'num us-speed' + (hasTps ? '' : ' muted'), hasTps ? tps.toFixed(1) + ' t/s' : '—');
+        spd.title = hasTps
+          ? ('输出 ' + fmtInt(it.output) + ' tok ÷ 生成耗时 ' + fmtMs(it.outMs) +
+            '（首末输出事件之间；首字延迟 ' + fmtMs(it.ttftMs) + ' 不计入）')
+          : '这次调用没有生成耗时或没有输出 token（工具调用步 / 失败调用 / 升级前的旧记录），速度无意义';
+        r.appendChild(spd);
         var st = el('td', it.ok ? 'ok' : 'bad', it.ok ? '成功' : '失败');
         if (!it.ok && it.error) st.title = it.error;
         r.appendChild(st);

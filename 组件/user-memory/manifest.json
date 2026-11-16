@@ -2,7 +2,7 @@
   "id": "user-memory",
   "name": "AI 记忆与拟人化",
   "version": "1.2.0",
-  "description": "用户称呼、身份与喜好、AI 助理名字与身份的长期记忆：设置 → AI 记忆与拟人化 独立设置页维护，内容注入各会话的环境提示词（组件关闭即移除）；任务对话经 component_call 调本组件的 memory_query / memory_update 能力读写记忆段，长期助理可经 call_api 读写整个记忆文件。附带 AI 对话气泡颜色选择。全部内容存一个 md 文档（data/user-memory.md），完整保存可手工编辑。",
+  "description": "用户称呼、身份与喜好、AI 助理名字与身份的长期记忆：设置 → AI 记忆与拟人化 独立设置页维护，内容注入各会话的环境提示词（组件关闭即移除）；任务对话经 component_call 调本组件的 memory_query / memory_update 能力读写记忆段，长期助理可经 call_api 读写整个记忆文件。信息边界：只记用户身份、习惯、喜好与跨项目偏好；项目背景与项目约束归项目知识库，不写进记忆。附带 AI 对话气泡颜色选择。全部内容存一个 md 文档（data/user-memory.md），完整保存可手工编辑。",
   "client": {
     "js": "client.js"
   },
@@ -16,7 +16,7 @@
     },
     {
       "name": "memory_update",
-      "description": "把「用户身份与喜好」记忆段整体替换为给定内容（先查再改，别丢已有记忆；称呼与 AI 名字/身份是用户的自我设定，本能力不改）",
+      "description": "把「用户身份与喜好」记忆段整体替换为给定内容（先查再改，别丢已有记忆；称呼与 AI 名字/身份是用户的自我设定，本能力不改）。信息边界：只写用户身份、习惯、喜好与跨项目偏好，项目背景与项目约束归项目知识库、不要写进记忆",
       "parameters": {
         "type": "object",
         "properties": {

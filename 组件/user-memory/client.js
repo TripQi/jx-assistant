@@ -212,7 +212,7 @@
 
     var fields = {};
     textField('用户称呼（想 AI 怎么称呼你？）', 'userName', false);
-    textField('用户身份与喜好（记忆：身份、偏好、习惯、项目背景，AI 可在对话中更新这一栏）', 'userMemory', true);
+    textField('用户身份与喜好（记忆：身份、偏好、习惯、跨项目偏好；项目背景与项目约束请到 设置 → 项目知识库）', 'userMemory', true);
     textField('AI 助理名字（你想怎么称呼 AI）', 'aiName', false);
     textField('AI 助理身份（AI 的定位与人设）', 'aiIdentity', true);
 

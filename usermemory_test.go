@@ -197,9 +197,12 @@ func TestUserMemoryEnvPromptToggle(t *testing.T) {
 			t.Fatalf("%s 模式的环境快照不应出现记忆能力声明:\n%s", mode, e)
 		}
 	}
-	// 经理模式的环境快照说明整文件通道与文件路径
+	// 经理模式的环境快照说明整文件通道与文件路径；项目背景职责已移交项目知识库，
+	// 边界与处理流程逐字钉住（文案同步，非放宽）
 	mgrEnv := a.envPrompt(&SessionMeta{Mode: "assistant", Permission: permWorkspace, Workspace: a.Cfg.Workspace})
-	for _, want := range []string{"长期助理专属", "GET /api/user-memory", "POST /api/user-memory", "user-memory.md"} {
+	for _, want := range []string{"长期助理专属", "GET /api/user-memory", "POST /api/user-memory", "user-memory.md",
+		"信息边界：项目背景与有效约束写项目知识库、不要写进用户记忆",
+		"按「先列出 → 确认绑定 → 写入项目知识库并验证 → 经用户确认后移除」处理"} {
 		if !strings.Contains(mgrEnv, want) {
 			t.Fatalf("经理环境快照应含 %q:\n%s", want, mgrEnv)
 		}

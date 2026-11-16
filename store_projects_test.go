@@ -269,8 +269,12 @@ func TestProjectMigrationAppendAndChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := storeMigrations[len(storeMigrations)-1]
-	if last.id != "0021_project_knowledge" {
-		t.Fatalf("project migration must append after old history, got %s", last.id)
+	// 绊线：新迁移只能追加在尾部。每加一条就把这里的期望 id 往下挑一次
+	//（历史：0020 → 0021_project_knowledge → 0022_usage_out_ms），
+	// 旧条目的 checksum 一个都不许变——下面循环会把它们原样应用并记账，
+	// 再让当前入口跑一遍，变了就在这里报 checksum 不一致。
+	if last.id != "0022_usage_out_ms" {
+		t.Fatalf("newcomer migration must append at the tail, got %s", last.id)
 	}
 	oldSums := map[string]string{}
 	for _, m := range storeMigrations[:len(storeMigrations)-1] {

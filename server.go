@@ -3994,17 +3994,26 @@ func (a *App) handleResolveApproval(w http.ResponseWriter, r *http.Request) {
 		Always   bool `json:"always"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	// 先定位调用者身份（mgrnotify.go 的 resolveCallerOf）：带调用者头就是某个
+	// AI 会话在代决——只能走经理的轮次级授权；认不出身份的 AI 会话直接 403，
+	// 绝不回落成「用户语义」放行。不带头的是真用户（界面按钮/远程转发），
+	// 决定任何卡片都照常生效。
 	// 经理的授权检查、来源标记与决定提交必须与用户撤销共享原子边界。
 	var err error
-	if managerResolveCaller(a, r) {
+	switch a.resolveCallerOf(r) {
+	case resolveCallerForeign:
+		writeErr(w, http.StatusForbidden, errResolveCallerForeign.Error())
+		return
+	case resolveCallerManager:
 		// 代批是轮次级授权：卡片不属于经理投递开启且正在执行的那一轮就直接 403——
-		// 窗口外的卡通知本就不投，经理经 call_api 翻清单主动代批也不能放行。
+		// 窗口外的卡通知本就不投，经理（或它派生的子对话，权力不超过经理本级）
+		// 经 call_api 翻清单主动代批也不能放行。
 		if !a.managerResolveAllowed(true, r.PathValue("id")) {
 			writeErr(w, http.StatusForbidden, errManagerDecisionForbidden.Error())
 			return
 		}
 		err = a.resolveManagerApproval(r.PathValue("id"), body.Approved, body.Always)
-	} else {
+	default:
 		err = a.resolveApproval(r.PathValue("id"), body.Approved, body.Always)
 	}
 	if err != nil {
@@ -4038,14 +4047,21 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	if managerResolveCaller(a, r) {
-		// 代答与代批同一个口径（轮次级授权，拒绝时 403）：窗口外的卡留给用户。
+	// 代答与代批同一个口径：带调用者头的 AI 会话只能代答经理自己那一轮的卡
+	//（经理本身或它派生的子对话，同一套轮次级授权），认不出身份的一律 403；
+	// 不带头的真用户照常作答。
+	switch a.resolveCallerOf(r) {
+	case resolveCallerForeign:
+		writeErr(w, http.StatusForbidden, errResolveCallerForeign.Error())
+		return
+	case resolveCallerManager:
+		// 窗口外的卡留给用户。
 		if !a.managerResolveAllowed(false, r.PathValue("id")) {
 			writeErr(w, http.StatusForbidden, errManagerDecisionForbidden.Error())
 			return
 		}
 		err = a.resolveManagerQuestion(r.PathValue("id"), body.Answer)
-	} else {
+	default:
 		err = a.resolveQuestion(r.PathValue("id"), body.Answer)
 	}
 	if err != nil {

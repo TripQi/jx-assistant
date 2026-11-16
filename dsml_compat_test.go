@@ -113,6 +113,21 @@ func dsmlRunAgent(t *testing.T, a *App, sess *SessionMeta) error {
 	return a.RunAgent(ctx, sess, func(Event) {})
 }
 
+// dsmlRunAgentCollect 同上，但同时收下推给前端的全部正文增量（delta）——
+// 「边流边把标记显示给用户」这类问题只能从这条通道上看出来。
+func dsmlRunAgentCollect(t *testing.T, a *App, sess *SessionMeta) (error, string) {
+	t.Helper()
+	var shown strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := a.RunAgent(ctx, sess, func(e Event) {
+		if e.Type == "delta" {
+			shown.WriteString(e.Delta)
+		}
+	})
+	return err, shown.String()
+}
+
 func dsmlRows(t *testing.T, a *App, id string) []*StoredMessage {
 	t.Helper()
 	rows, err := a.Store.RawMessagesAll(id)
@@ -238,8 +253,16 @@ func TestDsmlLeakExecutesAfterCompat(t *testing.T) {
 		t.Run(c.variant, func(t *testing.T) {
 			block := dsmlWriteBlock(c.variant, "out.txt", c.want)
 			a, sess, fake, dir := dsmlEnv(t, [][]string{dsmlChunks(block, 7), dsmlChunks("已完成。", 3)})
-			if err := dsmlRunAgent(t, a, sess); err != nil {
+			err, shown := dsmlRunAgentCollect(t, a, sess)
+			if err != nil {
 				t.Fatalf("RunAgent 失败: %v", err)
+			}
+			// ⓪ 流式通道上不能出现任何标记（hold-back 保证不漏显、不重复）
+			if strings.Contains(shown, "DSML") {
+				t.Fatalf("标记被流式显示给用户了：%q", shown)
+			}
+			if shown != "已完成。" {
+				t.Fatalf("流式正文有丢字或重复：%q", shown)
 			}
 			// ① 工具真的执行了（文件真被写出来）
 			data, ferr := os.ReadFile(filepath.Join(dir, "out.txt"))
@@ -323,8 +346,13 @@ func TestDsmlNegativeDiscussionUntouched(t *testing.T) {
 		"第三，V4.1 之后标签变成了带空格形态，老正则不认，所以整块会当普通正文透传。" +
 		"如果客户端看到这种正文，正确做法是归一化后解析，或者剥掉标记并告警，绝不能直接当回答展示给用户。"
 	a, sess, fake, dir := dsmlEnv(t, [][]string{dsmlChunks(discussion, 13)})
-	if err := dsmlRunAgent(t, a, sess); err != nil {
+	err, shown := dsmlRunAgentCollect(t, a, sess)
+	if err != nil {
 		t.Fatalf("RunAgent 失败: %v", err)
+	}
+	// ⓪ 流式通道上不丢字、不重复（hold-back 只影响显示时机，不改内容）
+	if shown != discussion {
+		t.Fatalf("流式正文被改了：\n得到 %q\n期望 %q", shown, discussion)
 	}
 	// ① 一个字都不许执行
 	if _, err := os.Stat(filepath.Join(dir, "out.txt")); err == nil {

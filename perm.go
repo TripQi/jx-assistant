@@ -247,18 +247,26 @@ func mergeCapDefaults(tools []string, mode, perm string) []string {
 	return out
 }
 
-// syncRunPerms 把库里最新的权限模式与能力开关合并进运行指针：用户在流式
-// 执行中改权限芯片（PATCH 处理器写的是自己的副本并落库），运行中的会话每步
-// 从这里取新值——下一步的 authorize、环境快照、【权限变更】公告三者即时一致。
-// 只合并权限两字段：用量计数等运行态在指针上持续累加，不能用库里的旧值覆盖。
-// 运行指针由执行体单协程持有（PATCH/审批写的是各自副本），无数据竞态。
+// syncRunPerms 合并库中最新的授权与项目身份：PATCH 使用独立副本，运行指针
+// 每次组装请求前刷新。计数及其他执行体累加状态绝不能被库中旧值覆盖。
+// 运行指针由执行体单协程持有（PATCH/审批写的是各自副本）。
 func (a *App) syncRunPerms(sess *SessionMeta) {
 	fresh, err := a.Store.Get(sess.ID)
 	if err != nil || fresh == nil {
 		return // 读失败保持现权（维持现状，不阻断执行）
 	}
+	mergeRunAuthorization(sess, fresh)
+}
+
+func mergeRunAuthorization(sess, fresh *SessionMeta) {
 	sess.Permission = fresh.Permission
 	sess.Tools = fresh.Tools
+	sess.Workspace = fresh.Workspace
+	sess.Remote = fresh.Remote
+	sess.PlanMode = fresh.PlanMode
+	sess.Mode = fresh.Mode
+	sess.ParentID = fresh.ParentID
+	sess.DispatchedBy = fresh.DispatchedBy
 }
 
 // switchToFullAccess 把会话权限切到完全访问并点亮捆绑能力（工作区外写入

@@ -789,6 +789,12 @@ func (a *App) envPrompt(sess *SessionMeta) string {
 	if block := a.userMemoryEnvBlock(sess); block != "" {
 		b.WriteString(block + "\n")
 	}
+	// 项目知识按目标会话自己的工作区加载，整体变化由环境差分完整替换。
+	if block, err := a.projectKnowledgeEnv(sess); err != nil {
+		b.WriteString("- 项目知识加载失败：" + err.Error() + "\n")
+	} else if block != "" {
+		b.WriteString(block + "\n")
+	}
 	// 组件能力块（componentcall.go）：组件 manifest 里声明的可分发能力——组件
 	// 开关与当前模式只影响这一块，工具定义（component_call 等基础工具）恒定。
 	// 模型从这里知道「有这些能力、怎么调」，不必为每个组件能力占一个工具定义。
@@ -1316,6 +1322,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	a.repairDanglingToolCalls(sess, emit)
 	// 开轮留痕：本轮拼装快照（系统提示词/环境快照/工具定义）由上下文引擎
 	// 组装并落 kind=prompt 行（OpenRound），主循环不再亲手拼这条行
+	a.syncRunPerms(sess) // 开轮展示快照也须按面板当前身份组装。
 	a.ctxEngine().OpenRound(sess, emit)
 	// Claude Code 插件：SessionStart hook（只在会话首轮发，对齐 Claude 的
 	// startup 语义；additionalContext 忽略——首条环境快照已定）
@@ -1342,6 +1349,9 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 		interjectsBefore(emit)
 		// 上下文引擎组装本步全部请求材料与测量口径（系统提示词/环境快照/工具
 		// 目录/消息视图/视觉内联/env 快照留痕/token 估算/前缀指纹都归引擎）
+		if err := a.validateProjectKnowledgeContext(sess, target); err != nil {
+			return err
+		}
 		pack := a.ctxEngine().Assemble(sess, emit)
 		msgs := pack.Msgs
 		// 自动压缩（双阈值、规则通道优先；规则路径带按轮冷却）：压缩改写了历史
@@ -1357,8 +1367,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			if !cp {
 				break
 			}
+			a.syncRunPerms(sess) // 压缩期间可能发生 PATCH，重组前再次刷新。
 			pack = a.ctxEngine().Assemble(sess, emit)
 			msgs = pack.Msgs
+		}
+		if projectKnowledgeAutoMode(sess.Mode) && target.ContextWindow > 0 && pack.EstTokens >= target.ContextWindow {
+			return fmt.Errorf("上下文仍超出当前模型窗口（估算 %d / %d）；项目知识正文未截断，未切换模型或渠道。请整理内容或由用户调整配置", pack.EstTokens, target.ContextWindow)
 		}
 		req := ChatRequest{Model: target.Model, Messages: msgs, Tools: pack.Tools}
 		req.ApplyThinking(sess.Thinking) // 会话级思考档位（空串=服务端默认）

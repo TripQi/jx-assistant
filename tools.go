@@ -73,13 +73,7 @@ func (t *toolContext) isRemote() bool {
 
 // workspace 返回会话的工作区根目录（远程会话 = 远程目录）。
 func (t *toolContext) workspace() string {
-	if t.isRemote() {
-		return t.sess.Remote.Dir
-	}
-	if t.sess.Workspace != "" {
-		return t.sess.Workspace
-	}
-	return t.app.Cfg.Workspace
+	return t.app.workspaceOf(t.sess)
 }
 
 // resolve 把（可能相对的）路径解析为绝对路径；相对路径基于会话工作区。

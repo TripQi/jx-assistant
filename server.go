@@ -285,6 +285,7 @@ func (a *App) Routes() http.Handler {
 // 进程内直调（apiMuxOf，缓存复用）共用同一份注册，行为完全一致；对 AI 开放
 // 的接口用 a.apiRoute 带元数据注册（目录即注册的副产品，见 callapi.go）。
 func (a *App) registerRoutes(mux *http.ServeMux) {
+	a.registerProjectRoutes(mux) // 用户项目设置不开放 call_api；AI 统一走组件能力。
 	// mux 由调用方传入：前端 Routes() 与 call_api 的 apiMuxOf() 共用本注册
 	a.apiRoute(mux, "GET /api/status", a.handleStatus, apiMeta{Summary: "服务状态（版本、运行形态、远程接入、更新等）", Perm: permReadOnly})
 	mux.HandleFunc("GET /api/display-mode", a.handleGetDisplayMode)
@@ -3029,10 +3030,7 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func wsOr(a *App, m *SessionMeta) string {
-	if m.Workspace != "" {
-		return m.Workspace
-	}
-	return a.Cfg.Workspace
+	return a.workspaceOf(m)
 }
 
 // handleUpload 接收文件上传：保存进会话工作区，注记文本随响应返回——由调用方

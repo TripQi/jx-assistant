@@ -332,6 +332,11 @@ const envFullResendAfter = 5
 // 纯注记行（非 "- " 条目，如技能变更说明）过期后静默消失不进变更清单，
 // 新出现的注记行按新增进补充消息。
 func envUpdateMessage(prev, cur string) string {
+	// 项目正文可以是任意多行 Markdown，逐行差分会把非列表旧约束留成有效。
+	// 整份替换沿用现有快照语义，也保证撤销发生在压缩前后都不依赖旧正文。
+	if projectKnowledgeEnvPart(prev) != projectKnowledgeEnvPart(cur) {
+		return fullResendEnv(cur) + "\n（项目知识块已整体替换或撤销；此前项目知识及摘要中的旧约束不再作为当前有效知识。）"
+	}
 	prevCount := map[string]int{}
 	for _, l := range strings.Split(prev, "\n") {
 		prevCount[l]++
@@ -484,6 +489,17 @@ func trimOpenToolGroup(rows []*StoredMessage) []*StoredMessage {
 // 同一套规则压缩视图），DeepSeek 的前缀缓存才能命中整段父上下文。
 // 首行写一条 kind=inherit 标记行（前端折叠显示、组装时跳过），返回复制的行数。
 func (a *App) copyInheritedContext(parentID, childID string) (int, error) {
+	parent, err := a.Store.Get(parentID)
+	if err != nil {
+		return 0, err
+	}
+	child, err := a.Store.Get(childID)
+	if err != nil {
+		return 0, err
+	}
+	if err := a.checkProjectHistoryInheritance(parent, child); err != nil {
+		return 0, err
+	}
 	all, err := a.Store.RawMessagesAll(parentID)
 	if err != nil {
 		return 0, err
@@ -1819,6 +1835,7 @@ func (a *App) summarizeDirective(sess *SessionMeta, origin string, boundary, seg
 		b.WriteString("\n【先前的自动摘要（请合并进新摘要，保留仍成立的事实、丢弃过时的）】\n" + prevAuto.Text() + "\n")
 	}
 	b.WriteString("\n" + summarizeSectionsFor(sess))
+	b.WriteString("\n项目知识正文不要重复写入摘要；确需引用时标明项目 ID 和来源版本。当前有效知识块优先于旧快照或摘要；已撤销的旧项目知识不能凭摘要恢复效力。")
 	b.WriteString("\n\n这是一次性压缩任务：不允许调用任何工具。思考后直接输出摘要正文，不要输出其他任何内容。")
 	return b.String()
 }

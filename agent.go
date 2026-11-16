@@ -1297,6 +1297,11 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	overflowRetried := false // 上下文超限强制压缩重发只兜一次
 	modelFallback := false   // 专家预设模型不可用 → 切全局默认重试过一次（防循环）
 	autoSwitched := false    // 公司通道连接失败 → 自动停用并切可用提供方（每轮执行体一次）
+	// DSML 泄漏兜底（见 dsml.go）：dsmlRetries 是回喂纠正重发的次数（跨步累计，
+	// 上限 dsmlMaxRetries）；dsmlFeedback 是纠正材料——只拼进**下一次**请求，
+	// 不落库（泄漏原文与合成调用都不进历史）。
+	dsmlRetries := 0
+	var dsmlFeedback []Message
 
 	// interjectsBefore 在下一次调用模型前落库插话，返回是否注入了消息。落库即可
 	// ——上下文每步从存储重建，自然带上。模型调用中来的插话已由 pushPending 里的
@@ -1375,6 +1380,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			return fmt.Errorf("上下文仍超出当前模型窗口（估算 %d / %d）；项目知识正文未截断，未切换模型或渠道。请整理内容或由用户调整配置", pack.EstTokens, target.ContextWindow)
 		}
 		req := ChatRequest{Model: target.Model, Messages: msgs, Tools: pack.Tools}
+		if len(dsmlFeedback) > 0 {
+			// DSML 纠正材料只喂一次：本次请求已带上，随后按真实历史继续（免得
+			// 每步都往尾巴上叠一段合成调用，既无意义又断前缀缓存）
+			req.Messages = append(append([]Message(nil), msgs...), dsmlFeedback...)
+			dsmlFeedback = nil
+		}
 		req.ApplyThinking(sess.Thinking) // 会话级思考档位（空串=服务端默认）
 		// 本步模型调用的步级 ctx：插话到达时 kickModelStream 取消它——当前模型流
 		// 立即中断，主循环 continue 到下一步带着插话重组重调（见下方 steered
@@ -1386,7 +1397,9 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 		var text strings.Builder
 		var reasoning strings.Builder
 		var calls []ToolCall
-		var usage *Usage // 本步流尾用量（审计行用；网关不带 usage 则为 nil）
+		var usage *Usage                // 本步流尾用量（审计行用；网关不带 usage 则为 nil）
+		var completion StreamCompletion // 本步流尾结束状态（DSML 审计要记 finish_reason）
+		var dsmlHold dsmlStreamFilter   // 正文尾部 hold-back（见 dsml.go）
 		// 模型调用（含网络自动重试）：同一请求最多尝试 modelTries 次，失败间隔
 		// 1s/2s/3s/4s 递增；等待可用停止按钮打断。瞬态业务错误（流中途断开、
 		// 网关 5xx/限流 429）自动重试；**连接类失败（connFailure）不在这一层
@@ -1404,6 +1417,8 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			reasoning.Reset()
 			calls = nil
 			usage = nil
+			completion = StreamCompletion{}
+			dsmlHold.Reset() // 上次尝试扣下的尾巴作废（半截流本来就丢）
 			callStart := time.Now()
 			// 输出窗口计时（吐字速度口径）：首个输出事件（正文或思考）到末个
 			// 输出事件之间的时长。整次调用耗时里混着排队与思考启动等待，直接
@@ -1435,8 +1450,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				},
 				OnText: func(s string) {
 					markOut()
-					text.WriteString(s)
-					emit(Event{Type: "delta", Delta: s})
+					// 疑似 DSML 标记的尾巴先扣住不显示（dsml.go 的 dsmlStreamFilter）：
+					// 标记被切在多个 chunk 里时，用户看不到半截标记，也不会重复吐字
+					if out := dsmlHold.Feed(s); out != "" {
+						text.WriteString(out)
+						emit(Event{Type: "delta", Delta: out})
+					}
 				},
 				OnReasoning: func(s string) {
 					markOut()
@@ -1457,6 +1476,8 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 					a.noteCompactUsage(sess.ID, target.Model, u.PromptTokens)
 				},
 			})
+			// 流尾结束状态（DSML 审计的 finish_reason 来源；meterUsage 不设这个回调）
+			meterCb.OnCompletion = func(c StreamCompletion) { completion = c }
 			err = StreamChat(stepCtx, target, req, meterCb)
 			finishUsage(err)
 			// 真实用量推给前端（输入框下方的实时速度条用它对账定格）：流式过程中
@@ -1597,6 +1618,73 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				a.appendMessageThinking(sess, TextMessage("assistant", ""), reasoning.String())
 			}
 			return a.modelErrWithChannelHint(target, err)
+		}
+		// ——— DSML 泄漏兜底（四道闸见 dsml.go 文件头）———
+		// 服务端没把 DSML 标记翻译成 tool_calls 时，整块会当普通正文透传：工具没
+		// 执行、会话看起来中断，泄漏原文还会被当正常回答落库。这里把本步正文
+		// （含 hold-back 扣下的尾巴）过一遍判定：确实是「没有结构化调用的泄漏块」，
+		// 解析+校验通过就当 tool_call 继续执行；不是就原文照旧（防误吞正常回答）。
+		held := dsmlHold.Flush()
+		if raw := text.String() + held; raw != "" {
+			if !dsmlLeakLikely(raw, len(calls)) {
+				// 不是泄漏（含「模型在正文里讨论 DSML 语法」）：尾巴原样放行
+				if held != "" {
+					text.WriteString(held)
+					emit(Event{Type: "delta", Delta: held})
+				}
+			} else {
+				res := dsmlInterpret(raw, pack.Tools, fmt.Sprintf("call_dsml_%d", step+1))
+				// 泄漏原文一律不上屏、不入库：正文换成剥离标记后的剩余正文
+				visible := text.String()
+				tail := ""
+				if strings.HasPrefix(res.Rest, visible) {
+					tail = res.Rest[len(visible):]
+				}
+				text.Reset()
+				text.WriteString(res.Rest)
+				if tail != "" {
+					emit(Event{Type: "delta", Delta: tail})
+				}
+				reason := ""
+				switch {
+				case res.Err != nil:
+					reason = res.Err.Error()
+				case len(res.Calls) == 0 && strings.TrimSpace(res.Rest) == "":
+					reason = "只有 DSML 标记残渣，没有可执行的调用"
+				}
+				auditBase := map[string]any{
+					"type": "dsml", "provider": target.ProviderID, "model": target.AuditModel(),
+					"step": step + 1, "finish_reason": completion.Reason, "raw_len": len([]rune(raw)),
+					"noise": res.Noise, "orphan": res.Orphan, "retry": dsmlRetries,
+					"before": truncateRunes(raw, 240), "after": truncateRunes(res.Rest, 240),
+				}
+				if reason != "" {
+					// ④ 失败不静默：剥标记 + 审计 + 回喂重发（上限 dsmlMaxRetries）
+					action := "retry"
+					if dsmlRetries >= dsmlMaxRetries {
+						action = "giveup"
+					}
+					auditBase["action"], auditBase["reason"] = action, reason
+					a.auditWrite(sess, auditBase)
+					if action == "giveup" {
+						return fmt.Errorf("模型连续 %d 次输出的工具调用都不合法（最后一次：%s）；泄漏的 DSML 标记已剥离、未执行，可点重试",
+							dsmlMaxRetries+1, truncateRunes(reason, 180))
+					}
+					dsmlRetries++
+					dsmlFeedback = append(dsmlFeedback, dsmlCorrection(res, reason)...)
+					emit(Event{Type: "retry"}) // 前端本步半截输出作废（标记绝不上屏）
+					continue
+				}
+				if len(res.Calls) > 0 {
+					// 解析 + schema 校验都过：当结构化 tool_call 继续执行
+					calls = res.Calls
+					auditBase["action"], auditBase["tools"] = "executed", toolNamesOf(res.Calls)
+				} else {
+					// 只剩孤立闭标签之类的残渣：剥掉 + 审计，正文按正常回答走
+					auditBase["action"] = "noise"
+				}
+				a.auditWrite(sess, auditBase)
+			}
 		}
 		if len(calls) == 0 {
 			if strings.TrimSpace(text.String()) != "" {

@@ -2673,6 +2673,8 @@ body.set-resizing { user-select: none; cursor: nwse-resize; }
 .set-field { margin-bottom: 16px; max-width: 420px; }
 .sf-label { font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
 .sf-desc { font-size: 12px; color: var(--text-3); margin: 6px 0 0; line-height: 1.5; }
+/* 同一行说明兼作行内提示：出错时只换颜色，不弹模态框（提示音路径等中间态多的控件） */
+.sf-desc.bad { color: var(--danger); }
 .gen-section { margin-top: 18px; }
 .gen-section > h4 { font-size: 13px; margin: 0 0 8px; color: var(--text-2); }
 /* 背景色预览卡片：三张迷你窗口图，一眼看出页面配色 */

@@ -140,8 +140,13 @@ type alertSoundPlan struct {
 	times   int           // 播放次数（双响＝2）
 	gap     time.Duration // 多次播放之间的间隔
 	why     string        // 非空＝必须回落 MessageBeep 的原因（写日志，不静默）
-	invalid bool          // 配置本身非法（自定义路径不可用）→ 保存/试听要明确报错
+	invalid bool          // 配置本身非法（填了不可用的自定义路径）→ 保存/试听要明确报错
+	unset   bool          // custom 档但还没填路径（未配置，不是填错）→ 允许保存、回落播放
 }
+
+// alertSoundUnsetWhy custom 档还没填路径时的回落原因：日志、试听回执与设置页行内
+// 提示共用这一句（用户要能看懂「现在响的是系统音，因为还没填」）。
+const alertSoundUnsetWhy = "未填写自定义 WAV 路径（暂用系统提示音）"
 
 // resolveAlertSound 把设置解析成播放计划（不播放、不动真实设备）。
 func (c *Config) resolveAlertSound() alertSoundPlan {
@@ -151,6 +156,12 @@ func (c *Config) resolveAlertSound() alertSoundPlan {
 		return alertSoundPlan{mode: mode, times: 1}
 	case alertSoundCustom:
 		p := alertSoundPlan{mode: mode, wav: c.askAlertWav(), times: 1, gap: alertSoundGap}
+		if strings.TrimSpace(p.wav) == "" {
+			// 选了自定义档但还没填路径＝「未配置」，不是「填错了」：保存要放行
+			//（切档这个动作本身不该被当成填错），播放回落系统提示音并记日志。
+			p.why, p.unset = alertSoundUnsetWhy, true
+			return p
+		}
 		if why := alertWavProblem(p.wav); why != "" {
 			p.why, p.invalid = "自定义 WAV 不可用："+why, true
 		}
@@ -238,8 +249,10 @@ func beepNTimes(times int, gap time.Duration) {
 //	POST /api/alert/sound {"sound":"notify|chimes|double|system|custom","wav":"D:\\x.wav"}
 //
 // 不读也不写配置：用户还没点保存、或正想换一档听听效果，都该能试。自定义路径
-// 不可用一律 400 并把原因原样给设置页（不静默换成别的音）。返回 played（实际播
-// 的方式）与 fallback（回落原因，设置页把它显示在路径框下方）。
+// 填了但不可用一律 400 并把原因原样给设置页（不静默换成别的音）；**还没填路径**
+// 则是正常中间态：200 + 回落系统提示音 + fallback 说明，设置页把它显示成行内提示
+//（400/500 在前端会变成弹窗，用户连路径都填不进去）。返回 played（实际播的方式）、
+// fallback（回落原因）与 unset（是否只是还没填路径）。
 func (a *App) handleAlertSoundPreview(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Sound string `json:"sound"`
@@ -261,12 +274,17 @@ func (a *App) handleAlertSoundPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	played, fallback := playAlertSound(plan)
-	writeJSON(w, 200, map[string]any{"played": played, "fallback": fallback, "mode": plan.mode})
+	writeJSON(w, 200, map[string]any{"played": played, "fallback": fallback, "mode": plan.mode, "unset": plan.unset})
 }
 
 // saveAlertSound 保存提示音方案（handleSetConfig 的 askAlert 分支调）：未知方案
-// 与自定义路径不可用一律返回 error（HTTP 层转 400 原样告诉用户），不做「静默改成
-// 别的音」——用户设了自定义却听到系统叮，比报错更让人困惑。
+// 与「填了但不可用」的自定义路径一律返回 error（HTTP 层转 400 原样告诉用户），不做
+// 「静默改成别的音」——用户设了自定义却听到系统叮，比报错更让人困惑。
+//
+// 唯独「custom 档 + 路径为空」要放行：切档是一次独立的保存（设置页选完下拉就提交），
+// 那一刻路径必然是空的。把「还没填」当成「填错了」会让用户连路径都填不进去
+//（400 → 前端弹「保存失败」）。此时存下来的是「已选自定义、尚未填路径」，播放回落
+// 系统提示音（见 resolveAlertSound 的 unset 分支）。
 func saveAlertSound(c *Config, haveMode bool, mode string, haveWav bool, wav string) error {
 	nextMode := c.askAlertSoundMode()
 	if haveMode {
@@ -279,8 +297,9 @@ func saveAlertSound(c *Config, haveMode bool, mode string, haveWav bool, wav str
 	if haveWav {
 		nextWav = strings.TrimSpace(wav)
 	}
-	// custom 档必须当场校验：路径非法就不许保存（试听同样会被拒，原因一致）
-	if nextMode == alertSoundCustom {
+	// custom 档：路径填了就必须当场校验（非法不许保存，试听同样被拒，原因一致）；
+	// 路径为空则放行＝「还没填」这个中间态本身合法（切档不该被当成填错）。
+	if nextMode == alertSoundCustom && nextWav != "" {
 		if why := alertWavProblem(nextWav); why != "" {
 			return fmt.Errorf("自定义 WAV 路径不可用：%s", why)
 		}

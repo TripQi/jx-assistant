@@ -1797,9 +1797,25 @@ function ensureAskAlertSoundSelect(options) {
 }
 
 // 自定义 wav 路径框只在选「自定义 WAV 文件」时出现（其余档位用系统音效）。
+// 路径框下方那行说明是这一块唯一的结果/错误出口：切档、路径没填、保存被拒、
+// 试听结果都往这里写，不弹模态框——用户正对着这个输入框改，弹窗只会打断他；
+// 而「切档那一刻路径必然为空」，弹窗等于把用户堵在门外。
+const ASKALERT_WAV_HINT = '只支持 .wav 文件的绝对路径（Windows 提示音接口只认 wav）；还没填路径时暂时使用系统提示音';
+const ASKALERT_WAV_EMPTY = '请填写 .wav 文件的绝对路径（或用右侧「选择…」挑一个）；未填写时暂时使用系统提示音';
+
+function setAskAlertHint(msg, bad) {
+  const el = $('set-askalert-wav-state');
+  if (!el) return;
+  el.textContent = msg || ASKALERT_WAV_HINT;
+  el.classList.toggle('bad', !!bad);
+}
+
 function syncAskAlertSoundUI() {
   const v = (selRefs.askalertSound && selRefs.askalertSound.get()) || 'notify';
-  $('set-askalert-wav-field').style.display = v === 'custom' ? '' : 'none';
+  const custom = v === 'custom';
+  $('set-askalert-wav-field').style.display = custom ? '' : 'none';
+  // 刚切到这一档时路径通常还是空的：那是正常的中间态，给提示而不是报错
+  setAskAlertHint(custom && !$('set-askalert-wav').value.trim() ? ASKALERT_WAV_EMPTY : '', false);
 }
 
 async function saveAskAlertCfg(patch) {
@@ -1807,9 +1823,13 @@ async function saveAskAlertCfg(patch) {
     const c = await api('/api/config', { method: 'POST', body: JSON.stringify({ askAlert: patch }) });
     applyAskAlertView(c.askAlert || {});
   } catch (e) {
-    alert('保存失败：' + e.message); // 服务端 400 的原因（如 WAV 路径无效）原样给用户
+    // 保存被拒（典型：填了 .wav 路径但它不可用）：原因写在路径框下方，不弹模态框。
+    const typedWav = $('set-askalert-wav').value;
     // 回显以服务端实际值为准：拒绝保存时界面不能留着一个没生效的假值
     try { applyAskAlertView((await api('/api/config')).askAlert || {}); } catch (_) { /* 拉取也失败：保持现状 */ }
+    $('set-askalert-wav').value = typedWav; // 但别清掉用户刚填的路径——他要改的正是它
+    if ($('set-askalert-wav-field').style.display === 'none') $('set-askalert-wav-field').style.display = ''; // 错误得看得见
+    setAskAlertHint('保存失败：' + e.message, true);
   }
 }
 $('set-askalert-on').onchange = () => saveAskAlertCfg({ enabled: $('set-askalert-on').checked });
@@ -1824,26 +1844,33 @@ $('set-askalert-sec').onchange = () => {
   saveAskAlertCfg({ afterSec: v });
 };
 $('set-askalert-text').onchange = () => saveAskAlertCfg({ text: $('set-askalert-text').value.trim() });
-// 试听：按当前选择（含还没保存的自定义路径）真播一次；服务端回落了就把原因
-// 写在路径框下方——「听见的不对」当场能看出为什么
+// 试听：按当前选择（含还没保存的自定义路径）真播一次；结果与回落原因都写在
+// 路径框下方——「听见的不对」当场能看出为什么，且从不弹模态框（路径还没填时
+// 用户本来就要接着填，弹框只会打断他）。
 $('set-askalert-sound-try').onclick = async () => {
   const v = (selRefs.askalertSound && selRefs.askalertSound.get()) || 'notify';
+  const wav = $('set-askalert-wav').value.trim();
   const body = { sound: v };
-  if (v === 'custom') body.wav = $('set-askalert-wav').value.trim();
+  if (v === 'custom') body.wav = wav;
   try {
     const r = await api('/api/alert/sound', { method: 'POST', body: JSON.stringify(body) });
-    $('set-askalert-wav-state').textContent = r.played === 'beep' && r.mode !== 'system'
-      ? '已回落系统提示音：' + (r.fallback || '音效文件不可用') + '（日志里也记了一条）'
-      : '已播放：' + (r.mode || v);
+    if (v === 'custom' && !wav) {
+      setAskAlertHint('还没填 .wav 路径，刚才响的是系统提示音：' + (r.fallback || ASKALERT_WAV_EMPTY), false);
+    } else if (r.played === 'beep' && r.mode !== 'system') {
+      setAskAlertHint('已回落系统提示音：' + (r.fallback || '音效文件不可用') + '（日志里也记了一条）', true);
+    } else {
+      setAskAlertHint('已播放：' + (r.mode || v), false);
+    }
   } catch (e) {
-    alert('试听失败：' + e.message); // 自定义路径不可用等，服务端 400 原因原样给出
+    setAskAlertHint('试听失败：' + e.message, true); // 自定义路径不可用等，行内给原因
   }
 };
-// 自定义 wav 路径：失焦保存（服务端校验；非法就 400 并把原因弹出来，不静默改音）
+// 自定义 wav 路径：失焦/回车才保存（不在每字输入时提交）；空串也允许保存
+//（＝「已选自定义、还没填」）；填了但不可用仍是 400，原因落在路径框下方
 $('set-askalert-wav').onchange = () => saveAskAlertCfg({ onAppearWav: $('set-askalert-wav').value.trim() });
 // 「选择…」弹系统原生文件框（手机端选不了：对话框弹在宿主机屏幕上）
 $('set-askalert-wav-pick').onclick = async () => {
-  if (isNarrow()) { alert('手机端不支持选择文件：请在电脑端（宽屏）设置里选 WAV 文件。'); return; }
+  if (isNarrow()) { setAskAlertHint('手机端不支持选择文件：请在电脑端（宽屏）设置里选 WAV 文件', true); return; }
   try {
     const picked = await api('/api/pick-file?filter=all&title=' + encodeURIComponent('选择提示音 WAV 文件'));
     const p = (picked && picked.path) || '';
@@ -1851,7 +1878,7 @@ $('set-askalert-wav-pick').onclick = async () => {
     $('set-askalert-wav').value = p;
     saveAskAlertCfg({ onAppearWav: p });
   } catch (e) {
-    alert('无法打开选择框：' + e.message);
+    setAskAlertHint('无法打开选择框：' + e.message, true);
   }
 };
 

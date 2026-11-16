@@ -88,10 +88,27 @@ func TestGatePure(t *testing.T) {
 			want: vtGateUiaRichEditor,
 		},
 		{
-			name: "Chromium 里键盘可聚焦的分组（富文本编辑器）→ 乐观放行",
+			name: "Chromium 里键盘可聚焦的分组（contenteditable 富文本，带 TextPattern）→ 乐观放行",
 			tgt: vtTarget{Hwnd: 1, Pid: 999999, WindowClass: "Chrome_WidgetWin_1", ProcName: "feishu.exe",
-				Uia: vtUiaInfo{OK: true, ControlType: uiaCtGroup, Enabled: true, KeyboardFocusable: true}},
+				Uia: vtUiaInfo{OK: true, ControlType: uiaCtGroup, Enabled: true, KeyboardFocusable: true,
+					HasTextPattern: true}},
 			want: vtGateChromiumOptimistic,
+		},
+		{
+			// 2026-11-11 回归：DeepSeek 页点空白处，焦点落在滚动容器 Group 上
+			//（ds-virtual-list，无 ValuePattern 无 TextPattern，键盘可聚焦）——被
+			// 乐观放行注入，Ctrl+V 落空还显示"已输入"。TextPattern 是它与
+			// contenteditable 的唯一区分度（同机同页实测）。
+			name: "Chromium 里键盘可聚焦但无 TextPattern 的分组（滚动容器）→ 只复制",
+			tgt: vtTarget{Hwnd: 1, Pid: 999999, WindowClass: "Chrome_WidgetWin_1", ProcName: "msedge.exe",
+				Uia: vtUiaInfo{OK: true, ControlType: uiaCtGroup, Enabled: true, KeyboardFocusable: true}},
+			want: vtGateNoSignal,
+		},
+		{
+			name: "Chromium 里无 TextPattern 的 Pane（滚动区）→ 只复制",
+			tgt: vtTarget{Hwnd: 1, Pid: 999999, WindowClass: "Chrome_WidgetWin_1", ProcName: "msedge.exe",
+				Uia: vtUiaInfo{OK: true, ControlType: uiaCtPane, Enabled: true, KeyboardFocusable: true}},
+			want: vtGateNoSignal,
 		},
 		{
 			name: "Chromium 里聚焦的是按钮 → 不放行",

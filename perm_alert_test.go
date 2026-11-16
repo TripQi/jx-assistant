@@ -45,18 +45,18 @@ type approvalAlertSpy struct {
 func newApprovalAlertSpy(t *testing.T) *approvalAlertSpy {
 	t.Helper()
 	spy := &approvalAlertSpy{}
-	oldFront, oldBeep := alertFrontHook, askAlertBeep
+	oldFront, oldBeep := alertFrontHook, askAlertSound
 	alertFrontHook = func(title, text string) {
 		spy.mu.Lock()
 		spy.front = append(spy.front, text)
 		spy.mu.Unlock()
 	}
-	askAlertBeep = func() {
+	askAlertSound = func(*Config) {
 		spy.mu.Lock()
 		spy.beeps++
 		spy.mu.Unlock()
 	}
-	t.Cleanup(func() { alertFrontHook, askAlertBeep = oldFront, oldBeep })
+	t.Cleanup(func() { alertFrontHook, askAlertSound = oldFront, oldBeep })
 	return spy
 }
 

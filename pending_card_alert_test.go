@@ -22,7 +22,7 @@ import (
 )
 
 // cardAlertSpy 换掉两个副作用入口（叮声 / 任务栏闪烁）并计数：跑测试不真响、
-// 不动用户真实窗口。叮声用的是久等提醒同一个 askAlertBeep（即时提示复用它）。
+// 不动用户真实窗口。提示音用的是久等提醒同一个 askAlertSound（即时提示复用它）。
 type cardAlertSpy struct {
 	mu      sync.Mutex
 	beeps   int
@@ -31,11 +31,11 @@ type cardAlertSpy struct {
 
 func newCardAlertSpy(t *testing.T) *cardAlertSpy {
 	t.Helper()
-	oldBeep, oldFlash := askAlertBeep, pendingCardFlashHook
+	oldBeep, oldFlash := askAlertSound, pendingCardFlashHook
 	s := &cardAlertSpy{}
-	askAlertBeep = func() { s.mu.Lock(); s.beeps++; s.mu.Unlock() }
+	askAlertSound = func(*Config) { s.mu.Lock(); s.beeps++; s.mu.Unlock() }
 	pendingCardFlashHook = func() { s.mu.Lock(); s.flashes++; s.mu.Unlock() }
-	t.Cleanup(func() { askAlertBeep, pendingCardFlashHook = oldBeep, oldFlash })
+	t.Cleanup(func() { askAlertSound, pendingCardFlashHook = oldBeep, oldFlash })
 	return s
 }
 

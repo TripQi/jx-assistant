@@ -416,14 +416,12 @@ async function openSettings(pane) {
   $('set-snapshot-days').value = c.snapshotDays != null ? c.snapshotDays : 7;
   // 常规页：会话浏览器数据保留天数（服务端配置，改动即时保存；缺省 3 天，0=不清理）
   $('set-browserprofile-days').value = c.browserProfileDays != null ? c.browserProfileDays : 3;
-  // 常规页：询问提醒（服务端配置，改动即时保存；四键嵌套部分提交）
+  // 常规页：询问提醒（服务端配置，改动即时保存；嵌套部分提交）
   const aa = c.askAlert || {};
-  $('set-askalert-on').checked = aa.enabled !== false;
-  $('set-askalert-appear-on').checked = aa.onAppear !== false;
-  $('set-askalert-sec').value = aa.afterSec || 240;
+  ensureAskAlertSoundSelect(c.askAlertSounds);
+  applyAskAlertView(aa);
   // 发送页：排队消息自动续发（服务端配置，改动即时保存；缺省＝开）
   $('set-queueauto-on').checked = c.queueAutoSend !== false;
-  $('set-askalert-text').value = aa.text || '';
   // 常规页：任务最大步数（服务端配置，改动即时保存；0=不限制，是新装默认）
   syncMaxSteps(c.maxSteps);
   // 常规页：关闭窗口驻留后台（服务端配置，改动即时保存，缺省＝开；仅桌面版显示）
@@ -1777,16 +1775,41 @@ $('set-browserprofile-days').onchange = () => {
 
 /* ---------- 常规页：询问提醒（服务端配置，改动即时保存；嵌套部分提交，
    只传变的键，服务端按键合并并钳制 30-600） ---------- */
+// applyAskAlertView 按服务端回的 askAlert 段回显整块（打开设置页与每次保存后
+// 共用一份口径，避免两处各写一遍四五个字段的 set）。
+function applyAskAlertView(aa) {
+  $('set-askalert-on').checked = aa.enabled !== false;
+  $('set-askalert-appear-on').checked = aa.onAppear !== false;
+  $('set-askalert-sec').value = aa.afterSec || 240;
+  if (aa.text !== undefined) $('set-askalert-text').value = aa.text; // 空串=默认文案，回显留空
+  if (selRefs.askalertSound) selRefs.askalertSound.set(aa.onAppearSound || 'notify');
+  if (aa.onAppearWav !== undefined) $('set-askalert-wav').value = aa.onAppearWav || '';
+  syncAskAlertSoundUI();
+}
+
+// 提示音方案下拉：选项由后端下发（/api/config 的 askAlertSounds，档位增删只改
+// 后端一处），首次打开设置页时才建；建好后跟着页面一直在。
+function ensureAskAlertSoundSelect(options) {
+  if (selRefs.askalertSound || !options || !options.length) return;
+  makeSelect('sel-askalert-sound', 'askalertSound',
+    options.map((o) => ({ v: o.v, label: o.label })),
+    (v) => { syncAskAlertSoundUI(); saveAskAlertCfg({ onAppearSound: v }); });
+}
+
+// 自定义 wav 路径框只在选「自定义 WAV 文件」时出现（其余档位用系统音效）。
+function syncAskAlertSoundUI() {
+  const v = (selRefs.askalertSound && selRefs.askalertSound.get()) || 'notify';
+  $('set-askalert-wav-field').style.display = v === 'custom' ? '' : 'none';
+}
+
 async function saveAskAlertCfg(patch) {
   try {
     const c = await api('/api/config', { method: 'POST', body: JSON.stringify({ askAlert: patch }) });
-    const aa = c.askAlert || {};
-    $('set-askalert-on').checked = aa.enabled !== false;
-    $('set-askalert-appear-on').checked = aa.onAppear !== false;
-    if (aa.afterSec) $('set-askalert-sec').value = aa.afterSec;
-    if (aa.text !== undefined) $('set-askalert-text').value = aa.text; // 空串=默认文案，回显留空
+    applyAskAlertView(c.askAlert || {});
   } catch (e) {
-    alert('保存失败：' + e.message);
+    alert('保存失败：' + e.message); // 服务端 400 的原因（如 WAV 路径无效）原样给用户
+    // 回显以服务端实际值为准：拒绝保存时界面不能留着一个没生效的假值
+    try { applyAskAlertView((await api('/api/config')).askAlert || {}); } catch (_) { /* 拉取也失败：保持现状 */ }
   }
 }
 $('set-askalert-on').onchange = () => saveAskAlertCfg({ enabled: $('set-askalert-on').checked });
@@ -1801,6 +1824,36 @@ $('set-askalert-sec').onchange = () => {
   saveAskAlertCfg({ afterSec: v });
 };
 $('set-askalert-text').onchange = () => saveAskAlertCfg({ text: $('set-askalert-text').value.trim() });
+// 试听：按当前选择（含还没保存的自定义路径）真播一次；服务端回落了就把原因
+// 写在路径框下方——「听见的不对」当场能看出为什么
+$('set-askalert-sound-try').onclick = async () => {
+  const v = (selRefs.askalertSound && selRefs.askalertSound.get()) || 'notify';
+  const body = { sound: v };
+  if (v === 'custom') body.wav = $('set-askalert-wav').value.trim();
+  try {
+    const r = await api('/api/alert/sound', { method: 'POST', body: JSON.stringify(body) });
+    $('set-askalert-wav-state').textContent = r.played === 'beep' && r.mode !== 'system'
+      ? '已回落系统提示音：' + (r.fallback || '音效文件不可用') + '（日志里也记了一条）'
+      : '已播放：' + (r.mode || v);
+  } catch (e) {
+    alert('试听失败：' + e.message); // 自定义路径不可用等，服务端 400 原因原样给出
+  }
+};
+// 自定义 wav 路径：失焦保存（服务端校验；非法就 400 并把原因弹出来，不静默改音）
+$('set-askalert-wav').onchange = () => saveAskAlertCfg({ onAppearWav: $('set-askalert-wav').value.trim() });
+// 「选择…」弹系统原生文件框（手机端选不了：对话框弹在宿主机屏幕上）
+$('set-askalert-wav-pick').onclick = async () => {
+  if (isNarrow()) { alert('手机端不支持选择文件：请在电脑端（宽屏）设置里选 WAV 文件。'); return; }
+  try {
+    const picked = await api('/api/pick-file?filter=all&title=' + encodeURIComponent('选择提示音 WAV 文件'));
+    const p = (picked && picked.path) || '';
+    if (!p) return; // 用户取消了选择框
+    $('set-askalert-wav').value = p;
+    saveAskAlertCfg({ onAppearWav: p });
+  } catch (e) {
+    alert('无法打开选择框：' + e.message);
+  }
+};
 
 /* ---------- 发送页：排队消息自动续发（服务端配置，改动即时保存） ----------
    默认开：本轮回复完成后，队列里的待发消息（不分来源）自动逐条发出；关掉后

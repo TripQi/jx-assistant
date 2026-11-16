@@ -7,8 +7,8 @@ package main
 // 仍未处理」才叮一声 + 盖全屏蒙层，卡片刚出现那一刻一点动静都没有。
 //
 // 口径（用户定调）：
-//   - 凡必须由用户决定的卡 → 一出现就轻量提示：叮一声（复用久等提醒的
-//     MessageBeep 通道）+ 任务栏按钮闪一下（复用 FlashWindowEx 那套）；
+//   - 凡必须由用户决定的卡 → 一出现就轻量提示：响一声（设置里选的音效方案，
+//     alertsound.go；默认 Windows 通知音）+ 任务栏按钮闪一下（复用 FlashWindowEx 那套）；
 //   - 长期助理此刻可代批的卡不打扰用户：卡所属会话的经理轮授权仍在
 //     （managerResolveAllowed 为真、主对话也在）＝ 那张卡经理那一轮自己会处置，
 //     用户不必被叫醒；该轮随后收口/用户接管、代批资格没了，这时才转成通知用户；
@@ -68,7 +68,7 @@ func (a *App) alertPendingCardOnAppear(id string) {
 	a.firePendingCardAlert(id, title, summary)
 }
 
-// firePendingCardAlert 真的响一次：叮一声 + 任务栏闪一下。已经响过的卡直接跳过
+// firePendingCardAlert 真的响一次：响一声 + 任务栏闪一下。已经响过的卡直接跳过
 // （deferred 转通知也走这里，保证同一张卡只响一次）。
 func (a *App) firePendingCardAlert(id, title, summary string) {
 	a.permMu.Lock()
@@ -79,7 +79,7 @@ func (a *App) firePendingCardAlert(id, title, summary string) {
 	}
 	st.alerted, st.deferred = true, false
 	a.permMu.Unlock()
-	askAlertBeep()         // 复用久等提醒的叮声通道（MessageBeep，无新玩法）
+	askAlertSound(a.Cfg)  // 按设置选的音效方案（默认 Windows 通知音，alertsound.go）
 	pendingCardFlashHook() // 轻量唤起：任务栏按钮闪一下，不抢前台
 	log.Printf("[提醒] 卡片刚出现，已即时提示用户：%s", alertFrontText(title, summary))
 }

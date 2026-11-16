@@ -372,6 +372,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// 前端/自测用，flashOnly=true 只走任务栏闪烁 + 托盘通知那条兜底路径）
 	mux.HandleFunc("POST /api/desktop/front", a.handleDesktopFront)
 	mux.HandleFunc("POST /api/alert/screen", a.handleAlertScreenHide)
+	// 设置·常规·询问提醒的「试听」：按当前选的那档真播一次（不读也不写配置，
+	// 用户可以换一档先听听再保存；自定义路径非法就 400 把原因说清楚）
+	mux.HandleFunc("POST /api/alert/sound", a.handleAlertSoundPreview)
 	mux.HandleFunc("GET /api/pick-folder", a.handlePickFolder)
 	mux.HandleFunc("GET /api/pick-file", a.handlePickFile)
 	a.apiRoute(mux, "POST /api/sessions/{id}/fork", a.handleFork, apiMeta{Summary: "从某条消息分支新会话", Params: "seq=分支点", Perm: permWorkspace})
@@ -1573,11 +1576,15 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"accentColor":        a.Cfg.AccentColor,
 		// 询问提醒（设置·常规）：下发解析后的生效值（enabled 已按 nil=开解析）
 		"askAlert": map[string]any{
-			"enabled":  a.Cfg.askAlertOn(),
-			"afterSec": a.Cfg.askAlertAfterSec(),
-			"text":     a.Cfg.askAlertText(),
-			"onAppear": a.Cfg.askAlertOnAppear(),
+			"enabled":       a.Cfg.askAlertOn(),
+			"afterSec":      a.Cfg.askAlertAfterSec(),
+			"text":          a.Cfg.askAlertText(),
+			"onAppear":      a.Cfg.askAlertOnAppear(),
+			"onAppearSound": a.Cfg.askAlertSoundMode(), // 提示音方案（空归默认档，alertsound.go）
+			"onAppearWav":   a.Cfg.askAlertWav(),       // custom 档的 wav 绝对路径
 		},
+		// 提示音方案的可选项（设置页下拉直接渲染它：档位增删只改后端一处）
+		"askAlertSounds": alertSoundOptions(),
 		// 排队消息自动续发（设置·常规）：下发解析后的生效值（nil=开）
 		"queueAutoSend": a.Cfg.queueAutoSendOn(),
 		// 关闭窗口驻留托盘（设置·常规，仅桌面版消费）：下发解析后的生效值（nil=开）
@@ -1627,7 +1634,11 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			AfterSec *int    `json:"afterSec"` // 触发秒数（30-600，钳制后存）
 			Text     *string `json:"text"`     // 朗读文案（空串=恢复默认）
 			OnAppear *bool   `json:"onAppear"` // 卡片刚出现时的即时提示音（nil=不改；false=关闭，回到「等满 N 秒才提醒」）
-		} `json:"askAlert"` // 询问提醒四键，嵌套部分合并：只传变的键
+			// 提示音方案与自定义 wav（alertsound.go）：空/未知方案归默认档；
+			// custom 档保存时校验路径，非法就 400，不静默换音。
+			OnAppearSound *string `json:"onAppearSound"`
+			OnAppearWav   *string `json:"onAppearWav"`
+		} `json:"askAlert"` // 询问提醒配置：嵌套部分合并，只传变的键
 		QueueAutoSend *bool `json:"queueAutoSend"` // 排队消息自动续发（nil=不改；false=本轮结束后不自动发队列，排队坞给「继续发送」）
 		CloseToTray   *bool `json:"closeToTray"`   // 关闭窗口驻留托盘（nil=不改；false=关窗即退出。仅桌面版消费，见 desktop_windows.go 关窗分支）
 		Providers     *[]struct {
@@ -1918,6 +1929,20 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	// 询问提醒四键合并（只传变的键）：afterSec 钳 30-600；text 去空白，空串
 	// 存空（askAlertText 读取时回默认）。开关原样存（nil=默认开的语义在读取侧）。
 	if body.AskAlert != nil {
+		// 提示音方案先校验再落（自定义路径非法 / 未知方案 → 400 原样告知，
+		// 整段都不落：不让用户存进一个「设了却发不出声」的配置）
+		soundMode, soundModeSet := "", false
+		if body.AskAlert.OnAppearSound != nil {
+			soundMode, soundModeSet = *body.AskAlert.OnAppearSound, true
+		}
+		soundWav, soundWavSet := "", false
+		if body.AskAlert.OnAppearWav != nil {
+			soundWav, soundWavSet = *body.AskAlert.OnAppearWav, true
+		}
+		if err := saveAlertSound(a.Cfg, soundModeSet, soundMode, soundWavSet, soundWav); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		if body.AskAlert.Enabled != nil {
 			a.Cfg.AskAlert.Enabled = body.AskAlert.Enabled
 		}

@@ -219,12 +219,16 @@ type CompanyQuotaCfg struct {
 
 // AskAlertCfg 询问提醒配置段：Enabled=nil＝默认开启；AfterSec 触发秒数
 // （默认 240=4 分钟，钳 30-600）；Text 朗读文案（空＝默认那句）；
-// OnAppear＝卡片刚出现时的即时提示音（nil＝默认开，见 pendingalert.go）。
+// OnAppear＝卡片刚出现时的即时提示音（nil＝默认开，见 pendingalert.go）；
+// OnAppearSound＝提示音用哪一档（空＝默认档 notify，可选值见 alertsound.go；
+// 久等提醒与卡片即时提示共用这一档）；OnAppearWav＝custom 档的 wav 绝对路径。
 type AskAlertCfg struct {
-	Enabled  *bool  `json:"enabled,omitempty"`
-	AfterSec int    `json:"afterSec,omitempty"`
-	Text     string `json:"text,omitempty"`
-	OnAppear *bool  `json:"onAppear,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
+	AfterSec      int    `json:"afterSec,omitempty"`
+	Text          string `json:"text,omitempty"`
+	OnAppear      *bool  `json:"onAppear,omitempty"`
+	OnAppearSound string `json:"onAppearSound,omitempty"`
+	OnAppearWav   string `json:"onAppearWav,omitempty"`
 }
 
 // MgrNotifyCfg 经理代理通知配置段：Enabled=nil＝默认开启（false=关闭）；
@@ -277,6 +281,23 @@ func (c *Config) askAlertOnAppear() bool {
 		return false
 	}
 	return c.AskAlert.OnAppear == nil || *c.AskAlert.OnAppear
+}
+
+// askAlertSoundMode 提示音方案的生效值（空/未知一律落到默认档 notify——宁可
+// 吵一点，也别让用户「明明设了却没声」）。
+func (c *Config) askAlertSoundMode() string {
+	if c == nil {
+		return alertSoundNotify
+	}
+	return canonicalAlertSound(c.AskAlert.OnAppearSound)
+}
+
+// askAlertWav 自定义 wav 路径（去空白；只有 custom 档会用到）。
+func (c *Config) askAlertWav() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.AskAlert.OnAppearWav)
 }
 
 // askAlertAfterSec 触发秒数（解析后的生效值，30-600）。

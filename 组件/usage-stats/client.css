@@ -259,6 +259,39 @@
   text-overflow: ellipsis;
 }
 
+/* 明细表顶部的横向滚动条：14 列很宽，容器自己的滚动条在表格底部，得先滚到最下面
+   才拖得到。上面这条与它双向同步（client.js 的 bindTopScroll），做成一条细线：
+   10px 高、透明轨道，不压出灰底块。默认 display:none——只有表格真需要横向滚动
+   时才由 JS 打开，不需要时完全不占位。 */
+.us-hscroll {
+  display: none;
+  height: 10px;
+  margin: 0 0 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.us-hscroll-in {
+  height: 1px; /* 只负责把宽度撑到与表格内容同宽 */
+}
+
+.us-hscroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.us-hscroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.us-hscroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+.us-hscroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+}
+
 /* 分页 */
 .us-pager {
   display: flex;

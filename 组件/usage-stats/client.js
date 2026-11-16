@@ -259,6 +259,13 @@
     var hRec = el('h4', '', '用量记录');
     hRec.appendChild(el('span', 'h-sub', '每次模型调用一条，最新在前'));
     cardRecords.appendChild(hRec);
+    // 明细表 14 列，窄屏时靠 .us-table-wrap 自己横向滚动；可那条滚动条长在表格底部，
+    // 用户得先滚到最下面才拖得到。所以在表格正上方也放一条（更薄的）横向滚动条：
+    // 内部占位元素由 JS 撑到表格内容宽，两条 scrollLeft 双向同步（见 bindTopScroll）。
+    var recScroll = el('div', 'us-hscroll');
+    var recScrollIn = el('div', 'us-hscroll-in');
+    recScroll.appendChild(recScrollIn);
+    cardRecords.appendChild(recScroll);
     var recTable = el('div', 'us-table-wrap');
     cardRecords.appendChild(recTable);
     var pager = el('div', 'us-pager');
@@ -393,6 +400,8 @@
     ctx.donutBox = donutBox;
     ctx.modelTable = modelTable;
     ctx.recTable = recTable;
+    ctx.recScroll = recScroll;
+    ctx.recScrollIn = recScrollIn;
     ctx.pager = pager;
     ctx.searchKpis = searchKpis;
     ctx.searchProviderTable = searchProviderTable;
@@ -401,6 +410,7 @@
     ctx.priceGrid = priceGrid;
     ctx.statusLine = statusLine;
 
+    bindTopScroll(ctx);
     refreshAll(ctx);
   }
 
@@ -737,6 +747,80 @@
     box.appendChild(t);
   }
 
+  /* ---------- 明细表顶部的横向滚动条 ---------- */
+
+  // 明细表 14 列，容器 .us-table-wrap 自己横向滚动，可滚动条只长在容器底部——
+  // 所以表格正上方再放一条（更薄的）横向滚动条，内部占位元素撑到表格内容宽，
+  // 拖它就是拖表格。两边 scrollLeft 双向同步，防抖靠两道：
+  //   1) 程序写 scrollLeft 期间置 syncing，自己写出来的 scroll 事件直接早退；
+  //   2) 事件多半是异步派发的（那时 syncing 已复位），所以还要比一次值——
+  //      两边已在同一位置就不再写回。
+  // 两道一起，一次拖动最多各写一次，不会来回抖。
+  var topScrollCtx = null; // 最近一次 mount 的 ctx（resize 时要重算）
+  var topScrollBound = false;
+  var topScrollRO = null;  // 观察表格容器尺寸（切分区页/窗口变宽都靠它）
+
+  function bindTopScroll(ctx) {
+    var box = ctx.recTable;
+    var top = ctx.recScroll;
+    if (!box || !top) return;
+    var st = { syncing: false };
+    ctx.mirrorScroll = function (from, to) {
+      if (st.syncing) return;
+      var x = Number(from.scrollLeft) || 0;
+      if ((Number(to.scrollLeft) || 0) === x) return;
+      st.syncing = true;
+      try {
+        to.scrollLeft = x;
+      } finally {
+        st.syncing = false;
+      }
+    };
+    top.onscroll = function () { ctx.mirrorScroll(top, box); };
+    box.onscroll = function () { ctx.mirrorScroll(box, top); };
+
+    // 窗口宽度变了（窄屏还会隐藏「速度」列）可滚动与否会跟着变：resize 要重算。
+    // 设置页每次打开都会重建 DOM，监听器只装一次，处理的是最近一次 mount 的 ctx。
+    topScrollCtx = ctx;
+    if (!topScrollBound) {
+      topScrollBound = true;
+      window.addEventListener('resize', function () {
+        if (topScrollCtx) syncTopScroll(topScrollCtx);
+      });
+    }
+
+    // 光靠 resize 不够：设置页各分区是「先挂进 DOM、切到才显示」（.set-pane 默认
+    // display:none），挂载那一刻表格量出来的宽是 0，切到「用量」页才有真实宽度——
+    // 这期间窗口没 resize。ResizeObserver 正好在这一刻触发，把显示与否补上。
+    // 每次 mount 都重建 DOM，旧观察器先断开（否则每开一次设置就攒一个）。
+    if (typeof ResizeObserver === 'function') {
+      if (topScrollRO) topScrollRO.disconnect();
+      topScrollRO = new ResizeObserver(function () { syncTopScroll(ctx); });
+      topScrollRO.observe(box);
+    }
+    syncTopScroll(ctx);
+  }
+
+  // syncTopScroll 按表格当前尺寸决定顶部条露不露：真需要横向滚动（内容宽 >
+  // 视口宽）才显示，否则 display:none——不占位、不留空条。占位元素宽度取容器
+  // scrollWidth，使两条滚动条的可滚动范围完全一致（拖动时不错位）。
+  function syncTopScroll(ctx) {
+    if (!ctx || !ctx.recTable || !ctx.recScroll || !ctx.recScrollIn) return;
+    var box = ctx.recTable;
+    var contentW = Number(box.scrollWidth) || 0;
+    var viewW = Number(box.clientWidth) || 0;
+    var need = contentW > viewW + 1; // 1px 内视作不需要（亚像素取整的余量）
+    if (!need) {
+      ctx.recScroll.style.display = 'none';
+      ctx.recScrollIn.style.width = '0px';
+      return;
+    }
+    ctx.recScroll.style.display = 'block';
+    ctx.recScrollIn.style.width = contentW + 'px';
+    // 翻页/改筛选后容器可能已经滚过一段：顶部条先对齐过去
+    if (ctx.mirrorScroll) ctx.mirrorScroll(box, ctx.recScroll);
+  }
+
   /* ---------- 用量记录（分页） ---------- */
 
   function renderRecords(ctx, d) {
@@ -804,6 +888,9 @@
       t.appendChild(tb);
       ctx.recTable.appendChild(t);
     }
+
+    // 表格换了内容，宽度可能变了：顶部横向滚动条的显隐与占位宽重算一次
+    syncTopScroll(ctx);
 
     ctx.pager.innerHTML = '';
     ctx.pager.appendChild(el('span', '', '共 ' + fmtInt(total) + ' 条 · 第 ' + (state.page + 1) + '/' + pages + ' 页'));

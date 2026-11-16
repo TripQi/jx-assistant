@@ -416,9 +416,10 @@ async function openSettings(pane) {
   $('set-snapshot-days').value = c.snapshotDays != null ? c.snapshotDays : 7;
   // 常规页：会话浏览器数据保留天数（服务端配置，改动即时保存；缺省 3 天，0=不清理）
   $('set-browserprofile-days').value = c.browserProfileDays != null ? c.browserProfileDays : 3;
-  // 常规页：询问提醒（服务端配置，改动即时保存；三键嵌套部分提交）
+  // 常规页：询问提醒（服务端配置，改动即时保存；四键嵌套部分提交）
   const aa = c.askAlert || {};
   $('set-askalert-on').checked = aa.enabled !== false;
+  $('set-askalert-appear-on').checked = aa.onAppear !== false;
   $('set-askalert-sec').value = aa.afterSec || 240;
   // 发送页：排队消息自动续发（服务端配置，改动即时保存；缺省＝开）
   $('set-queueauto-on').checked = c.queueAutoSend !== false;
@@ -1781,6 +1782,7 @@ async function saveAskAlertCfg(patch) {
     const c = await api('/api/config', { method: 'POST', body: JSON.stringify({ askAlert: patch }) });
     const aa = c.askAlert || {};
     $('set-askalert-on').checked = aa.enabled !== false;
+    $('set-askalert-appear-on').checked = aa.onAppear !== false;
     if (aa.afterSec) $('set-askalert-sec').value = aa.afterSec;
     if (aa.text !== undefined) $('set-askalert-text').value = aa.text; // 空串=默认文案，回显留空
   } catch (e) {
@@ -1788,6 +1790,9 @@ async function saveAskAlertCfg(patch) {
   }
 }
 $('set-askalert-on').onchange = () => saveAskAlertCfg({ enabled: $('set-askalert-on').checked });
+// 卡片刚出现时的即时提示（默认开）：关掉后回到「等满触发时长才提醒」的旧行为；
+// 长期助理当前可代批的卡不受这个开关影响——那种卡本来就不打扰用户。
+$('set-askalert-appear-on').onchange = () => saveAskAlertCfg({ onAppear: $('set-askalert-appear-on').checked });
 $('set-askalert-sec').onchange = () => {
   let v = parseInt($('set-askalert-sec').value, 10);
   if (isNaN(v)) v = 240;

@@ -62,12 +62,13 @@ type App struct {
 	mgrTurns            map[string]mgrTurnGrant // 经理代批的轮次级授权（mgrnotify.go）：会话id → 授权的那一轮；runMu 保护
 	mgrTurnGen          map[string]int64        // 经理代批授权的撤销代数（mgrnotify.go）：用户亲发消息递增，晚到的旧授权作废；runMu 保护
 	permMu              sync.Mutex
-	grants              map[string]*Grant        // 授权凭证（perm.go）
-	approvals           map[string]*Approval     // 等待用户决定的越权审批（perm.go）
-	permNotes           map[string]string        // 待落快照的「权限变更」注记（perm.go，env 通道）
-	observedFiles       sync.Map                 // 会话内已观察文件集（观察策略，perm.go）
-	skillGuideOnce      sync.Map                 // 会话内已随工具结果附带过 SKILL.md 指南的技能（key: 会话id\x00技能id，tool_docs.go 的 appendSkillGuide）
-	questions           map[string]*UserQuestion // 等待用户回答的提问/计划审批（interact.go）
+	grants              map[string]*Grant                 // 授权凭证（perm.go）
+	approvals           map[string]*Approval              // 等待用户决定的越权审批（perm.go）
+	permNotes           map[string]string                 // 待落快照的「权限变更」注记（perm.go，env 通道）
+	observedFiles       sync.Map                          // 会话内已观察文件集（观察策略，perm.go）
+	skillGuideOnce      sync.Map                          // 会话内已随工具结果附带过 SKILL.md 指南的技能（key: 会话id\x00技能id，tool_docs.go 的 appendSkillGuide）
+	questions           map[string]*UserQuestion          // 等待用户回答的提问/计划审批（interact.go）
+	pendingAlert        map[string]*pendingCardAlertState // 卡片刚出现时的即时提示状态（pendingalert.go）：卡片id → 状态；permMu 保护
 	jobsMu              sync.Mutex
 	jobs                map[string]*jobRun // 会话内后台作业（jobs.go）
 	bridgeMu            sync.Mutex
@@ -1575,6 +1576,7 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"enabled":  a.Cfg.askAlertOn(),
 			"afterSec": a.Cfg.askAlertAfterSec(),
 			"text":     a.Cfg.askAlertText(),
+			"onAppear": a.Cfg.askAlertOnAppear(),
 		},
 		// 排队消息自动续发（设置·常规）：下发解析后的生效值（nil=开）
 		"queueAutoSend": a.Cfg.queueAutoSendOn(),
@@ -1624,7 +1626,8 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			Enabled  *bool   `json:"enabled"`  // 询问提醒开关（nil=不改；存 nil 时表示默认开）
 			AfterSec *int    `json:"afterSec"` // 触发秒数（30-600，钳制后存）
 			Text     *string `json:"text"`     // 朗读文案（空串=恢复默认）
-		} `json:"askAlert"` // 询问提醒三键，嵌套部分合并：只传变的键
+			OnAppear *bool   `json:"onAppear"` // 卡片刚出现时的即时提示音（nil=不改；false=关闭，回到「等满 N 秒才提醒」）
+		} `json:"askAlert"` // 询问提醒四键，嵌套部分合并：只传变的键
 		QueueAutoSend *bool `json:"queueAutoSend"` // 排队消息自动续发（nil=不改；false=本轮结束后不自动发队列，排队坞给「继续发送」）
 		CloseToTray   *bool `json:"closeToTray"`   // 关闭窗口驻留托盘（nil=不改；false=关窗即退出。仅桌面版消费，见 desktop_windows.go 关窗分支）
 		Providers     *[]struct {
@@ -1912,7 +1915,7 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 			a.Cfg.CompactLlmPct = clampPct(*body.Compact.LlmPct)
 		}
 	}
-	// 询问提醒三键合并（只传变的键）：afterSec 钳 30-600；text 去空白，空串
+	// 询问提醒四键合并（只传变的键）：afterSec 钳 30-600；text 去空白，空串
 	// 存空（askAlertText 读取时回默认）。开关原样存（nil=默认开的语义在读取侧）。
 	if body.AskAlert != nil {
 		if body.AskAlert.Enabled != nil {
@@ -1930,6 +1933,11 @@ func (a *App) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.AskAlert.Text != nil {
 			a.Cfg.AskAlert.Text = strings.TrimSpace(*body.AskAlert.Text)
+		}
+		// 卡片出现即提示音（pendingalert.go）：原样存，读侧按「nil=默认开」解析。
+		if body.AskAlert.OnAppear != nil {
+			v := *body.AskAlert.OnAppear
+			a.Cfg.AskAlert.OnAppear = &v
 		}
 	}
 	// 排队消息自动续发开关：原样存（读侧按「nil=默认开」解析，见 queueAutoSendOn）。

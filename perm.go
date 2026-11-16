@@ -598,6 +598,9 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 	a.permMu.Unlock()
 	a.broadcast(Event{Type: "approval_required", ApprovalID: ap.ID, SessionID: sess.ID, Title: sess.Title,
 		Name: tool, Summary: summary, Reason: reason})
+	// 卡片出现即提示（pendingalert.go，与提问卡同一入口、同一个设置项）：必须由
+	// 用户决定的审批卡一出现就叮一声 + 任务栏闪一下；经理此刻可代批的不打扰用户。
+	a.alertPendingCardOnAppear(ap.ID)
 	// 久等声光提醒（与提问卡/计划审批共用同一套机制与同一个设置项——设置·常规
 	// ·询问提醒的 askAlertAfterSec，默认 4 分钟）：到点还没人决定就唤起窗口 +
 	// 叮一声 + 广播 ask_alert（浮窗文案带审批内容摘要）。提醒赶在超时之前
@@ -629,6 +632,7 @@ func (a *App) requestApproval(ctx context.Context, sess *SessionMeta, tool, summ
 		a.permMu.Lock()
 		delete(a.approvals, ap.ID)
 		a.permMu.Unlock()
+		a.forgetPendingCardAlert(ap.ID) // 卡收走：即时提示状态一并清掉（pendingalert.go）
 		a.broadcast(Event{Type: "approval_resolved", ApprovalID: ap.ID, SessionID: sess.ID})
 	}()
 	timer := time.NewTimer(approvalTTL)

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newDispatchTestApp 建一个带临时库与临时工作区的 App。刻意不配模型提供方：
@@ -38,7 +39,34 @@ func newDispatchTestApp(t *testing.T) (*App, *SessionMeta) {
 	if err := a.Store.Create(main); err != nil {
 		t.Fatalf("建主对话失败: %v", err)
 	}
+	// 后台派发出去的子会话在 mock 渠道下会真的跑起来（流式输出、还读记账时钟）：
+	// 不等它们收尾，遗留 goroutine 会串到后面的用例里——usage 速度用例用假钟，
+	// 读数必须只属于它自己（实测：早先 TestUsageSpeedThreeProtocols 在整组里
+	// 必然红，元凶就是这里没落的跑动）。cancel + 等 done，不会真执行演示工具。
+	t.Cleanup(func() { stopBackgroundRuns(a) })
 	return a, main
+}
+
+// stopBackgroundRuns 取消并等掉本 App 里仍在跑的后台会话（派发出去的子会话），
+// 最多等 5 秒：取消后执行体在下一个检查点收口，正常是毫秒级。
+func stopBackgroundRuns(a *App) {
+	a.runMu.Lock()
+	runs := make([]*sessionRun, 0, len(a.runners))
+	for _, r := range a.runners {
+		runs = append(runs, r)
+	}
+	a.runMu.Unlock()
+	for _, r := range runs {
+		r.cancel()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for _, r := range runs {
+		select {
+		case <-r.done:
+		case <-time.After(time.Until(deadline)):
+			return // 超时就不等了：不让清理把用例拖挂，问题由日志如实留着
+		}
+	}
 }
 
 // dispatchCtx 造一个派发用的 toolContext（emit 必须有值：deliverSub 会推派发确认）。

@@ -1376,8 +1376,20 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			pack = a.ctxEngine().Assemble(sess, emit)
 			msgs = pack.Msgs
 		}
+		// 组装完就已越过当前模型窗口（项目知识模式额外守住「正文不截断、不换
+		// 模型或渠道」的原则）：**不在这里硬退**。硬退会把可行动的救援结论丢掉
+		// ——用户只看得到「请整理内容」，看不到超了多少、该删什么、该换什么
+		// 模型；而本地估算是启发式，供应商的答复才权威（估高的请求本来能正常
+		// 跑完）。所以这里只把预检结论记下来（落审计行，可复盘「为什么发了
+		// 一个明显超窗的请求」），请求照常发出：真超限时走 context_rescue.go
+		// 的同一套救援（overflowCompact），救援也失败就把「超了多少」和救援的
+		// 可行动作一起交给上层。
+		overWindowNote := ""
 		if projectKnowledgeAutoMode(sess.Mode) && target.ContextWindow > 0 && pack.EstTokens >= target.ContextWindow {
-			return fmt.Errorf("上下文仍超出当前模型窗口（估算 %d / %d）；项目知识正文未截断，未切换模型或渠道。请整理内容或由用户调整配置", pack.EstTokens, target.ContextWindow)
+			overWindowNote = fmt.Sprintf("上下文仍超出当前模型窗口（估算 %d / %d）", pack.EstTokens, target.ContextWindow)
+			a.auditWrite(sess, map[string]any{"type": "overflow", "scope": "preflight",
+				"estimate": pack.EstTokens, "window": target.ContextWindow,
+				"detail": overWindowNote + "；本地估算为启发式，仍以供应商答复为准（项目知识正文不截断、不换渠道）"})
 		}
 		req := ChatRequest{Model: target.Model, Messages: msgs, Tools: pack.Tools}
 		if len(dsmlFeedback) > 0 {
@@ -1574,6 +1586,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 					continue
 				} else {
 					// 救援失败不能丢掉其预算原因和用户可行动作，也不进入模型兜底换渠道。
+					// 预检已算过的「超了多少」一并带上：救援错误只说预算/材料，用户要看的是
+					// 「估算 / 窗口 + 该删什么 / 该换什么模型」一条完整的话（文案复用救援
+					// 自身的口径，不另造一套）。
+					if overWindowNote != "" {
+						return fmt.Errorf("%s，且超限救援没能把上下文降到窗口内；请手动精简会话历史与提示词/工具目录，或改用窗口更大的模型后重试（原文已保留、历史未改写）。救援结论：%w", overWindowNote, cerr)
+					}
 					return fmt.Errorf("上下文超限，救援未完成：%w", cerr)
 				}
 			}

@@ -242,8 +242,13 @@ func (a *App) buildContext(sess *SessionMeta, sys string, upTo int64) []Message 
 	if foldSeen {
 		out = append(out, TextMessage("user", foldBoundaryNote))
 	}
-	// 全序列修复工具调用配对（协议硬要求；残缺可能出现在任何位置，见函数注释）
-	return repairToolPairing(out)
+	// 出口只做两件事，顺序固定：
+	//  1. 归一化：带 tool_calls 的历史行里，调用名不在本轮工具目录里的（模式切换 /
+	//     子对话继承 / 组件开关变化）降级为可读的文本引用——只改组装出来的请求，
+	//     库里的历史一个字不动（见 historytoolref.go）。
+	//  2. 全序列修复工具调用配对（协议硬要求；残缺可能出现在任何位置，见函数
+	//     注释）——降级摘掉配对关系的 tool 结果也在这里按「孤儿结果」剔除。
+	return repairToolPairing(normalizeHistoryToolCalls(out, toolDefsOf(a.toolsFor(sess.Mode))))
 }
 
 // timeAfter 是时间提示词通道的组装形态：用户侧对话消息（chat 真人发言与
@@ -649,6 +654,8 @@ type ctxStats struct {
 
 // contextStats 按与 buildContext 完全相同的组装规则，把下一次请求的上下文
 // 拆成分类 token 估算（同一启发式）。注意：buildContext 的组装规则改动时需同步此处。
+// 已知差异（保守方向）：buildContext 出口的历史工具引用归一化（historytoolref.go）
+// 不计——这里按落库原文估算，降级后实际发出去的可能更少。
 func (a *App) contextStats(sess *SessionMeta) ctxStats {
 	cats := map[string]int{}
 	add := func(name string, msgs ...Message) {

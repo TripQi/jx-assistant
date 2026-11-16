@@ -4034,7 +4034,8 @@ func (a *App) handleListQuestions(w http.ResponseWriter, r *http.Request) {
 
 // handleResolveQuestion 接收用户对提问的回答（计划批准用 __approve__）；
 // stop_timer=true 则是「停止倒计时」（悬停/触碰提问卡或点停止按钮）：该提问
-// 转为无限等待，直到作答或本轮被停止。
+// 转为无限等待，直到作答或本轮被停止。带调用者头的即 AI 会话，stop_timer
+// 一律 403——停表是用户在场信号，AI 会话不能替用户表态。
 func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Answer    string `json:"answer"`
@@ -4042,6 +4043,15 @@ func (a *App) handleResolveQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.StopTimer {
+		// 停表是「用户正在看着这条请求」的在场信号（悬停/触碰卡片或点停止按钮），
+		// 只有界面上的真用户能发。带调用者头的就是某个 AI 会话在替用户表态——
+		// 经理、子对话、任务会话、aux 一律不设例外：放行等于任何会话都能把任意
+		// 一张卡的倒计时无限冻结（卡永远挂着，用户那边还看不出异常）。
+		// 这里不落任何决定、不动卡片状态与倒计时规则，卡继续按原倒计时等用户。
+		if _, aiCaller := callerSessionHeader(r); aiCaller {
+			writeErr(w, http.StatusForbidden, errStopTimerByCaller.Error())
+			return
+		}
 		a.holdQuestion(r.PathValue("id"))
 		writeJSON(w, 200, map[string]string{"ok": "1"})
 		return

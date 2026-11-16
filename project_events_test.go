@@ -734,6 +734,32 @@ func TestProjectEventSettingsAPIAndUserWrites(t *testing.T) {
 		}
 	}
 
+	// 设置页也守「实际状态变化必须附一条关键事实」；仅改概况不强制。
+	// 先读回当前 revision（上面刚有一条被 409 拒的请求，不能拿它的响应体当基线）。
+	w = eventAPIRequest(a, "GET", "/api/project-events/"+ev.ID, nil, false)
+	if w.Code != 200 {
+		t.Fatalf("读回目标失败: %d %s", w.Code, w.Body.String())
+	}
+	var summarySaved struct {
+		Event ProjectEvent `json:"event"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &summarySaved); err != nil {
+		t.Fatal(err)
+	}
+	w = eventAPIRequest(a, "PATCH", "/api/project-events/"+ev.ID, map[string]any{
+		"expected_revision": summarySaved.Event.Revision, "status": "awaiting",
+	}, false)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("用户改状态不附事实应被拒: %d %s", w.Code, w.Body.String())
+	}
+	w = eventAPIRequest(a, "PATCH", "/api/project-events/"+ev.ID, map[string]any{
+		"expected_revision": summarySaved.Event.Revision, "status": "awaiting",
+		"record": map[string]any{"kind": "acceptance", "text": "设置页补的事实，随状态一起提交。", "sources": []any{}},
+	}, false)
+	if w.Code != 200 {
+		t.Fatalf("用户改状态并附事实应允许: %d %s", w.Code, w.Body.String())
+	}
+
 	// 删除必须显式确认。
 	if w := eventAPIRequest(a, "DELETE", "/api/project-events/"+ev.ID, map[string]any{"confirm": false}, false); w.Code == 200 {
 		t.Fatalf("未确认不应删除: %s", w.Body.String())

@@ -263,6 +263,23 @@ func (a *App) handleEventCreate(w http.ResponseWriter, r *http.Request) {
 	projectEventResponse(w, map[string]any{"created": created, "event": ev, "project": eventProjectView(p)}, nil)
 }
 
+// userStatusChangeGuard：设置页也要守「状态实际变化必须附一条关键事实」。
+// 只改标题/概况（哪怕当前状态非讨论中）不强制；实际状态跳变则需同次提交 record。
+func (a *App) userStatusChangeGuard(eventID string, status *string, hasRecord bool) error {
+	if status == nil || hasRecord {
+		return nil
+	}
+	ev, err := a.Store.GetProjectEvent(eventID)
+	if err != nil {
+		return err
+	}
+	if *status == ev.Status {
+		return nil
+	}
+	return fmt.Errorf("%w：状态从「%s」变到「%s」必须同时附一条关键事实（record）；只有标题/概况的小幅纠错可以不附",
+		ErrProjectEventRecordNeedsSource, projectEventStatusLabels[ev.Status], projectEventStatusLabels[*status])
+}
+
 func (a *App) handleEventPatch(w http.ResponseWriter, r *http.Request) {
 	if !projectEventSettingsGuard(w, r) || !a.projectEventComponentOn(w) {
 		return
@@ -312,6 +329,10 @@ func (a *App) handleEventPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rec = &prepared
+	}
+	if err := a.userStatusChangeGuard(r.PathValue("id"), patch.Status, rec != nil); err != nil {
+		projectEventResponse(w, nil, err)
+		return
 	}
 	ev, changed, err := a.Store.MutateProjectEventAsUser(r.PathValue("id"), *body.ExpectedRevision, patch, rec)
 	if err != nil {

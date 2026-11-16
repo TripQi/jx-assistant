@@ -472,6 +472,63 @@ var storeMigrations = []migration{
 			`ALTER TABLE usage_events ADD COLUMN out_ms INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	{
+		// 项目事件（跨项目大目标索引 → 关键推进时间线 → 来源会话/消息）：
+		// 只存索引与一句关键事实，绝不复制会话正文或旧正文快照——协议全文、
+		// 代码、日志仍由原载体保存。项目身份、多工作区绑定与生命周期复用
+		// 0021 建的三张项目表（外键只向事件子表级联，删项目不删会话）。
+		//
+		// 来源不设指向 sessions/messages 的外键：既不能用 RESTRICT 拦住用户删
+		// 会话，也不能级联把事实抹掉。失效来源保留标识，读时报告状态；
+		// message_id/message_digest 用来识别「seq 被编辑重发复用」与「原正文被改」
+		// （只存行 ID 与摘要哈希，不存正文）。
+		id: "0023_project_events",
+		sql: []string{
+			`CREATE TABLE project_events (
+				id TEXT PRIMARY KEY,
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+				title TEXT NOT NULL,
+				summary TEXT NOT NULL,
+				status TEXT NOT NULL CHECK(status IN ('discussing','processing','awaiting','paused','done','cancelled')),
+				revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+				create_key TEXT NOT NULL DEFAULT '',
+				create_digest TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			`CREATE UNIQUE INDEX idx_project_events_create_key ON project_events(project_id, create_key) WHERE create_key <> ''`,
+			`CREATE INDEX idx_project_events_project ON project_events(project_id, status, updated_at DESC, id DESC)`,
+			`CREATE TABLE project_event_records (
+				id TEXT PRIMARY KEY,
+				event_id TEXT NOT NULL REFERENCES project_events(id) ON DELETE CASCADE,
+				kind TEXT NOT NULL CHECK(kind IN ('plan','milestone','issue','validation','blocker','acceptance','other')),
+				text TEXT NOT NULL,
+				occurred_at TEXT,
+				origin TEXT NOT NULL DEFAULT 'ai',
+				revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+				client_key TEXT NOT NULL DEFAULT '',
+				request_digest TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			`CREATE UNIQUE INDEX idx_project_event_records_client ON project_event_records(event_id, client_key) WHERE client_key <> ''`,
+			`CREATE INDEX idx_project_event_records_time ON project_event_records(event_id, COALESCE(occurred_at, created_at), id)`,
+			`CREATE TABLE project_event_sources (
+				id TEXT PRIMARY KEY,
+				record_id TEXT NOT NULL REFERENCES project_event_records(id) ON DELETE CASCADE,
+				session_id TEXT NOT NULL,
+				message_id INTEGER NOT NULL DEFAULT 0,
+				message_seq INTEGER NOT NULL DEFAULT 0,
+				message_digest TEXT NOT NULL DEFAULT '',
+				source_key TEXT NOT NULL,
+				origin TEXT NOT NULL DEFAULT 'ai',
+				linked_at TEXT NOT NULL
+			)`,
+			`CREATE UNIQUE INDEX idx_project_event_sources_key ON project_event_sources(record_id, session_id, source_key)`,
+			`CREATE INDEX idx_project_event_sources_record ON project_event_sources(record_id, linked_at DESC, id DESC)`,
+			`CREATE INDEX idx_project_event_sources_session ON project_event_sources(session_id, record_id)`,
+		},
+	},
 }
 
 // createSchema 用迁移账本驱动建库：账本表自举，逐条执行未应用的迁移，

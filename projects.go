@@ -156,40 +156,88 @@ func projectWorkspaceContains(root, target ProjectWorkspace) bool {
 	return strings.HasPrefix(target.WorkspaceKey, strings.TrimRight(root.WorkspaceKey, "/")+"/")
 }
 
-func (a *App) resolveProjectWorkspace(target ProjectWorkspace) (*Project, error) {
-	projects, err := a.Store.ListProjects(true)
+// resolveProjectWorkspaceReader 是「最长目录匹配」的唯一实现：既可走 Store 读锁，
+// 也可在同一写事务里用 tx 查询复核——Store 是单连接，写事务内再调 Store 会重入死锁，
+// 所以归属复核必须能在这个 reader 上做（见 store_project_events.go）。
+func resolveProjectWorkspaceReader(q projectReader, target ProjectWorkspace) (*Project, error) {
+	rows, err := q.Query(`SELECT p.id,p.name,p.archived,p.created_at,p.updated_at,w.workspace_kind,w.workspace_key,w.display_path
+		FROM projects p JOIN project_workspaces w ON w.project_id=p.id`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+	byID := map[string]*Project{}
 	var best *Project
 	longest := -1
-	for i := range projects {
-		for _, w := range projects[i].Workspaces {
-			if projectWorkspaceContains(w, target) && len(w.WorkspaceKey) > longest {
-				p := projects[i]
-				best = &p
-				longest = len(w.WorkspaceKey)
-			}
+	for rows.Next() {
+		var p Project
+		var w ProjectWorkspace
+		if err := rows.Scan(&p.ID, &p.Name, &p.Archived, &p.CreatedAt, &p.UpdatedAt, &w.WorkspaceKind, &w.WorkspaceKey, &w.DisplayPath); err != nil {
+			return nil, err
 		}
+		w.ProjectID = p.ID
+		cur := byID[p.ID]
+		if cur == nil {
+			p.Workspaces = []ProjectWorkspace{}
+			cur = &p
+			byID[p.ID] = cur
+		}
+		cur.Workspaces = append(cur.Workspaces, w)
+		if projectWorkspaceContains(w, target) && len(w.WorkspaceKey) > longest {
+			best = cur
+			longest = len(w.WorkspaceKey)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	// 归档绑定也参与最长匹配，绝不回退外层项目。
 	return best, nil
 }
 
+func (s *Store) ResolveProjectForWorkspace(target ProjectWorkspace) (*Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return resolveProjectWorkspaceReader(s.db, target)
+}
+
+func (a *App) resolveProjectWorkspace(target ProjectWorkspace) (*Project, error) {
+	return a.Store.ResolveProjectForWorkspace(target)
+}
+
 func (a *App) resolveSessionProject(sess *SessionMeta) (*Project, error) {
+	w, ok, err := a.sessionProjectTarget(sess)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return a.resolveProjectWorkspace(w)
+}
+
+// resolveSessionProjectIn 是归属解析的事务内形态：只用传入的 reader 查询，
+// 供写事务复核「授权/归属是否在事务内仍然成立」（不能持 Store 锁重入 Store）。
+func (a *App) resolveSessionProjectIn(q projectReader, sess *SessionMeta) (*Project, error) {
+	w, ok, err := a.sessionProjectTarget(sess)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return resolveProjectWorkspaceReader(q, w)
+}
+
+// sessionProjectTarget 取会话的归属目标工作区；ok=false 表示无法确认（默认工作区无效）。
+func (a *App) sessionProjectTarget(sess *SessionMeta) (ProjectWorkspace, bool, error) {
 	if sess == nil {
-		return nil, nil
+		return ProjectWorkspace{}, false, nil
 	}
 	// 默认工作区必须有效才能参与归属；不将空值或相对路径猜成进程当前目录。
 	usingDefault := sess.Remote == nil && sess.Workspace == ""
 	if usingDefault && (a.Cfg == nil || strings.ContainsRune(a.Cfg.Workspace, 0) || !filepath.IsAbs(strings.TrimSpace(a.Cfg.Workspace))) {
-		return nil, nil
+		return ProjectWorkspace{}, false, nil
 	}
 	w, err := a.sessionProjectWorkspace(sess)
 	if err != nil {
-		return nil, err
+		return ProjectWorkspace{}, false, err
 	}
-	return a.resolveProjectWorkspace(w)
+	return w, true, nil
 }
 
 func (a *App) projectKnowledgeEnabled(sess *SessionMeta) bool {

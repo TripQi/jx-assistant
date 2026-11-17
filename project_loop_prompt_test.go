@@ -39,6 +39,9 @@ func TestProjectLoopPromptWiring(t *testing.T) {
 			"不越级联系经理", "不要声称已通知经理",
 			"没有候选就不填模板", "任务完成不等于用户验收",
 			"## 找经理帮忙")
+		if n := strings.Count(sys, projectLoopExecHeading); n != 1 {
+			t.Fatalf("模式 %s 的共用短段应恰好出现一次，实际 %d 次", mode, n)
+		}
 		if strings.Contains(sys, projectLoopMgrHeading) {
 			t.Fatalf("模式 %s 不该拿到经理侧的「项目知识库与项目事件」段", mode)
 		}
@@ -48,7 +51,11 @@ func TestProjectLoopPromptWiring(t *testing.T) {
 	wantAll(t, as, "长期助理", projectLoopMgrHeading,
 		"正文始终只有你能写", "晚到旧事实不倒退当前概况", "任务完成不等于用户验收",
 		"安排项目工作前先读可用的最新知识与相关事件", "任务书里一句提醒它遵循可用的项目知识约束即可",
+		"用户明确要求与任务修订建议均须核实", "任务建议不照搬",
 		"不用 request_manager 重复报同一件事")
+	if n := strings.Count(as, projectLoopMgrHeading); n != 1 {
+		t.Fatalf("经理段标题应恰好出现一次，实际 %d 次", n)
+	}
 	// 经理侧与执行侧口径不混：执行侧的两条判据不该出现在经理段里
 	for _, gone := range []string{"随派发回报交给经理", "知识只提建议"} {
 		if strings.Contains(as, gone) {
@@ -84,7 +91,7 @@ func TestProjectLoopPromptSurvivesOverride(t *testing.T) {
 	}
 
 	as := a.systemPrompt(&SessionMeta{ID: "ov-assistant", Mode: "assistant"})
-	wantAll(t, as, "覆盖后的长期助理", "自定义长期助理正文", projectLoopMgrHeading, "系统提示词：引用文件")
+	wantAll(t, as, "覆盖后的长期助理", "自定义长期助理正文", projectLoopMgrHeading, "任务建议不照搬", "系统提示词：引用文件")
 
 	tk := a.systemPrompt(&SessionMeta{ID: "ov-task", Mode: "task"})
 	wantAll(t, tk, "覆盖后的任务", "自定义任务正文", projectLoopExecHeading,

@@ -1335,6 +1335,12 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 	// 不落库（泄漏原文与合成调用都不进历史）。
 	dsmlRetries := 0
 	var dsmlFeedback []Message
+	var thinkingNext thinkingContinuation
+	defer func() {
+		if thinkingNext.used > 0 {
+			emit(Event{Type: "thinking_continue"})
+		}
+	}()
 
 	// interjectsBefore 在下一次调用模型前落库插话，返回是否注入了消息。落库即可
 	// ——上下文每步从存储重建，自然带上。模型调用中来的插话已由 pushPending 里的
@@ -1383,19 +1389,30 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 		if n := a.Cfg.MaxSteps; n > 0 && step >= n {
 			return errMaxSteps{n: n}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		a.syncRunPerms(sess) // 面板中途改权限：每步从库合并，下一步即按新权限执行
-		interjectsBefore(emit)
+		if interjectsBefore(emit) {
+			thinkingNext.pending = false
+			emit(Event{Type: "thinking_continue"})
+		}
+		isContinuation := thinkingNext.pending
+		// 续接材料出现后不再自动改写历史压缩；超窗交给服务端如实报错。
 		// 上下文引擎组装本步全部请求材料与测量口径（系统提示词/环境快照/工具
 		// 目录/消息视图/视觉内联/env 快照留痕/token 估算/前缀指纹都归引擎）
 		if err := a.validateProjectKnowledgeContext(sess, target); err != nil {
 			return err
 		}
-		pack := a.ctxEngine().Assemble(sess, emit)
+		pack := a.ctxEngine().assembleThinking(sess, emit, thinkingNext.rows, isContinuation)
 		msgs := pack.Msgs
+		if !thinkingNext.completeMaterials(msgs) {
+			return errors.New("本轮续接思考材料已被压缩或不可完整回传，未继续请求，可手动继续")
+		}
 		// 自动压缩（双阈值、规则通道优先；规则路径带按轮冷却）：压缩改写了历史
 		// 视图，重新组装后再查一次——最多两遍（先规则折叠，降下来后仍达模型
 		// 阈值再摘要），避免带着超限前的旧消息撞网关，也避免两通道同时触发
-		for pass := 0; pass < 2; pass++ {
+		for pass := 0; pass < 2 && len(thinkingNext.rows) == 0; pass++ {
 			cp, cerr := a.maybeAutoCompact(sess, msgs, target.ContextWindow, false)
 			if cerr != nil {
 				emit(Event{Type: "error", Error: "自动压缩失败: " + cerr.Error()})
@@ -1424,7 +1441,8 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				"estimate": pack.EstTokens, "window": target.ContextWindow,
 				"detail": overWindowNote + "；本地估算为启发式，仍以供应商答复为准（项目知识正文不截断、不换渠道）"})
 		}
-		req := ChatRequest{Model: target.Model, Messages: msgs, Tools: pack.Tools}
+		req := ChatRequest{Model: target.Model, Messages: msgs, Tools: pack.Tools, AutoContinuation: isContinuation, ContinuationBaseURL: thinkingNext.baseURL}
+		thinkingNext.pending = false
 		if len(dsmlFeedback) > 0 {
 			// DSML 纠正材料只喂一次：本次请求已带上，随后按真实历史继续（免得
 			// 每步都往尾巴上叠一段合成调用，既无意义又断前缀缓存）
@@ -1432,6 +1450,9 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			dsmlFeedback = nil
 		}
 		req.ApplyThinking(sess.Thinking) // 会话级思考档位（空串=服务端默认）
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// 本步模型调用的步级 ctx：插话到达时 kickModelStream 取消它——当前模型流
 		// 立即中断，主循环 continue 到下一步带着插话重组重调（见下方 steered
 		// 分支）。句柄在模型调用结束、进入工具执行段前注销：工具运行中来的插话
@@ -1439,6 +1460,10 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 		// 会传导到 stepCtx，语义不变。
 		stepCtx, stepCancel := context.WithCancel(ctx)
 		modelKick := a.beginModelStream(sess.ID, stepCancel)
+		if isContinuation && len(a.pendingOf(sess.ID).Steer) > 0 {
+			// 补上组装期间、登记打断句柄之前到达的插话窗口。
+			stepCancel()
+		}
 		var text strings.Builder
 		var reasoning strings.Builder
 		var calls []ToolCall
@@ -1491,6 +1516,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				},
 				// 请求发出前捕获全量请求体，经引擎缓存（环形保留最近三轮，「导出原始数据」数据源）
 				OnRequest: func(u string, body []byte) {
+					thinkingNext.baseURL = strings.TrimSuffix(u, "/chat/completions")
 					a.ctxEngine().RecordRequest(sess, u, target.AuditModel(), step+1, len(msgs), pack.EstTokens, pack.SysHash, pack.EnvHash, body)
 				},
 				OnText: func(s string) {
@@ -1523,7 +1549,10 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			})
 			// 流尾结束状态（DSML 审计的 finish_reason 来源；meterUsage 不设这个回调）
 			meterCb.OnCompletion = func(c StreamCompletion) { completion = c }
-			err = StreamChat(stepCtx, target, req, meterCb)
+			err = stepCtx.Err()
+			if err == nil {
+				err = StreamChat(stepCtx, target, req, meterCb)
+			}
 			finishUsage(err)
 			// 真实用量推给前端（输入框下方的实时速度条用它对账定格）：流式过程中
 			// 前端按字符估个数先显示，这里给出这一步的真实输出 tokens 与首字延迟
@@ -1551,6 +1580,10 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				if attempt > 1 {
 					emit(Event{Type: "auto_retry"}) // 重试成功：收掉重试提示条
 				}
+				break
+			}
+			if isContinuation {
+				// 新增请求失败不重放 POST、不走模型/渠道回落；普通调用语义不变。
 				break
 			}
 			// 公司通道连接失败（内网+外网都试过）：立即自动停用并当步切到可用
@@ -1590,6 +1623,9 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			break
 		}
 		steered := stepCtx.Err() != nil && ctx.Err() == nil // 被插话打断的模型调用（非用户停止）
+		if err == nil && stepCtx.Err() != nil {
+			err = stepCtx.Err() // 终止标记与取消竞态：停止/插话仍优先，不能续发。
+		}
 		modelKick.end()
 		stepCancel()
 		if err != nil {
@@ -1611,8 +1647,14 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				}
 				continue
 			}
+			if isContinuation {
+				if strings.TrimSpace(reasoning.String()) != "" || strings.TrimSpace(text.String()) != "" {
+					a.appendMessageThinking(sess, TextMessage("assistant", text.String()), reasoning.String())
+				}
+				return a.modelErrWithChannelHint(target, err)
+			}
 			// 上下文超限兜底：强制压缩一次后重发（DSH 式），每轮最多一次
-			if isOverflowError(err) && !overflowRetried {
+			if isOverflowError(err) && !overflowRetried && len(thinkingNext.rows) == 0 {
 				if cerr := a.overflowCompact(sess); cerr == nil {
 					a.auditWrite(sess, map[string]any{"type": "overflow", "error": err.Error()})
 					overflowRetried = true
@@ -1743,9 +1785,44 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 				sm := a.appendMessageThinking(sess, msg, reasoning.String())
 				emit(Event{Type: "message", Message: &sm.Message, Thinking: reasoning.String(), Seq: sm.Seq, Kind: kindChat})
 			} else if strings.TrimSpace(reasoning.String()) != "" {
-				// 只出了思考没出正文：思考原文落盘（前端折叠展示），本轮按失败收尾
+				// 真实思考先落盘；仅 chat 的可信纯思考终态允许有界新请求。
 				sm := a.appendMessageThinking(sess, TextMessage("assistant", ""), reasoning.String())
 				emit(Event{Type: "message", Message: &sm.Message, Thinking: reasoning.String(), Seq: sm.Seq, Kind: kindChat})
+				if len(pack.Tools) > 0 && thinkingNext.eligible(target.Protocol, completion, text.String(), reasoning.String(), len(calls)) {
+					if thinkingNext.rows == nil {
+						thinkingNext.rows = map[int64]string{}
+					}
+					thinkingNext.rows[sm.Seq] = sm.Thinking
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if interjectsBefore(emit) {
+						thinkingNext.pending = false
+						emit(Event{Type: "thinking_continue"})
+						continue
+					}
+					audit := map[string]any{"type": "thinking_continue", "protocol": target.Protocol,
+						"ended": completion.Ended, "finish_reason": completion.Reason, "seq": sm.Seq,
+						"usage_missing": usage == nil, "used": thinkingNext.used}
+					if usage != nil {
+						audit["usage"] = usage
+						thinkingNext.outputTokens += usage.CompletionTokens
+					} else {
+						thinkingNext.usageMissing = true
+					}
+					if err := thinkingNext.schedule(sm); err != nil {
+						audit["action"] = "limit"
+						a.auditWrite(sess, audit)
+						return fmt.Errorf("%w（结束原因：%s；纯思考响应已知输出 %d tokens，用量缺失：%t）", err, completion.Reason, thinkingNext.outputTokens, thinkingNext.usageMissing)
+					}
+					if n := a.Cfg.MaxSteps; n > 0 && step+1 >= n {
+						return errMaxSteps{n: n}
+					}
+					audit["action"], audit["used"] = "continue", thinkingNext.used
+					a.auditWrite(sess, audit)
+					emit(Event{Type: "thinking_continue", Output: thinkingNext.hint(completion.Reason)})
+					continue
+				}
 				return errors.New("模型本轮只返回了思考内容，没有给出正文，可点重试")
 			} else {
 				return errors.New("模型本轮没有返回任何内容，可点重试")
@@ -1756,7 +1833,7 @@ func (a *App) RunAgent(ctx context.Context, sess *SessionMeta, emit func(Event))
 			// 再摘要。用 buildContext 轻量组装估算（不走 Assemble，避免多落一条
 			// prompt 留痕行）；压缩只改写历史视图，下一轮开始会重新组装。
 			roundEndCompacted := false
-			for pass := 0; pass < 2; pass++ {
+			for pass := 0; pass < 2 && len(thinkingNext.rows) == 0; pass++ {
 				cp, cerr := a.maybeAutoCompact(sess, a.buildContext(sess, "", 0), target.ContextWindow, true)
 				if cerr != nil {
 					emit(Event{Type: "error", Error: "自动压缩失败: " + cerr.Error()})

@@ -5212,8 +5212,27 @@ function runHintOff(view) {
   delete ph.dataset.runPh; delete ph.dataset.idlePh;
 }
 
+// 独立提示节点：续接不是网络重试，清理它不能擦掉 tool_wait/auto_retry 等提示。
+function setThinkingContinueHint(view, text) {
+  let hint = view._thinkingContinueHint;
+  if (!text) {
+    if (hint) hint.remove();
+    view._thinkingContinueHint = null;
+    return;
+  }
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.className = 'composer-hint thinking-continue-hint';
+    hint.setAttribute('role', 'status');
+    view.hint.insertAdjacentElement('afterend', hint);
+    view._thinkingContinueHint = hint;
+  }
+  hint.textContent = text;
+}
+
 function setStreamUI(on, view) {
   view = view || mainView;
+  if (!on) setThinkingContinueHint(view, '');
   // 发送按钮保持可用：执行中发送 = 插话或排队（常规页「对话中途发送行为」）
   view.stopBtn.classList.toggle('hidden', !on);
   if (!on) view.hint.textContent = '';
@@ -5226,6 +5245,9 @@ function setStreamUI(on, view) {
 function handleEvent(ev, view) {
   view = view || mainView;
   if (ev.sessionId && (!view.state.cur || ev.sessionId !== view.state.cur.id)) return;
+  // 正常输出/终态只撤下续接提示，不触碰同一视图里的其他等待提示。
+  if (['delta', 'reasoning', 'tool_start', 'stopped', 'error', 'done', 'retry', 'edited'].includes(ev.type) ||
+      (ev.type === 'message' && ev.kind !== 'env')) setThinkingContinueHint(view, '');
   switch (ev.type) {
     case 'edited': {
       // 编辑重发的截断确认：服务端已删掉 seq 之后的记录并改写正文，
@@ -5352,6 +5374,10 @@ function handleEvent(ev, view) {
       view.state.streamText = '';
       view.state.streamThinking = '';
       removeLive(view);
+      break;
+    case 'thinking_continue':
+      // output 自带 n/2；空事件只撤提示，已落库/正在显示的思考均保留。
+      setThinkingContinueHint(view, ev.output || '');
       break;
     case 'auto_retry':
       // 自动重试提示条：output 非空=显示（几秒后第 X/5 次重试）；空=重试成功，清除
@@ -5849,6 +5875,7 @@ function reconcilePendingSteer(view, pendingId) {
 function applyPending(view, pending) {
   if (!pending) return;
   view.state.pendingSteer = pending.steer || [];
+  if (view.state.pendingSteer.length) setThinkingContinueHint(view, '');
   reconcilePendingSteer(view);
   view.state.pendingQueue = pending.queue || [];
   view.state.queuePaused = !!pending.paused;
@@ -6420,6 +6447,7 @@ async function stopRun(view) {
   view = view || mainView;
   const cur = view.state.cur;
   if (!cur) return;
+  setThinkingContinueHint(view, '');
   view.hint.textContent = '正在停止…';
   try {
     const r = await api('/api/sessions/' + cur.id + '/stop', { method: 'POST' });

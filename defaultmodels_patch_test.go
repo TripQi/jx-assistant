@@ -154,9 +154,8 @@ function select() {
  get innerHTML(){return html}, set innerHTML(x){html=x;this.options=[];for(const m of x.matchAll(/<option value="([^"]*)"/g))this.options.push({value:m[1]});v=''},
  appendChild(o){this.options.push(o)} };
 }
-for(const id of ['set-default-model','set-default-thinking','set-dispatch-thinking','set-dispatch-mode','set-dispatch-model','set-default-model-eff','set-dispatch-model-eff'])nodes[id]=select();
-nodes['set-dispatch-mode'].innerHTML='<option value="follow"></option><option value="custom"></option>';
-const $=id=>nodes[id];
+for(const id of ['set-default-model','set-default-thinking','set-default-model-eff'])nodes[id]=select();
+const $=id=>nodes[id]||(nodes[id]=select());
 const state={models:[{providerId:'p',keyId:'k',modelId:'A'},{providerId:'p',keyId:'k',modelId:'C'},{providerId:'p',keyId:'k',modelId:'D'}]};
 const modelKeyOf=(p,k,m)=>[p,k||'',m].join('|');
 const esc=s=>String(s);
@@ -170,7 +169,10 @@ const api=(path,opts)=>{if(!opts){if(holdGet)return new Promise(resolve=>gets.pu
 const loadModels=()=>Promise.resolve();
 const alert=()=>{};
 function expect(v,s){if(!v)throw new Error(s)}
-function view(g,d){return {global:g,dispatch:{mode:d?'custom':'follow',ref:d||g}}}
+function view(g,d){return {global:g,dispatch:{mode:d?'custom':'follow',ref:d||g},dispatchPurposes:[
+ {purpose:'execute',label:'执行/通用',mode:d?'custom':'follow',thinking:'',ref:d||g},
+ {purpose:'plan',label:'方案设计',mode:'follow',thinking:'',ref:{}},
+ {purpose:'review',label:'审查/审计',mode:'follow',thinking:'',ref:{}}]}}
 const A={provider:'p',providerKey:'k',model:'A'}, B={provider:'gone',providerKey:'lost',model:'B'}, C={provider:'p',providerKey:'k',model:'C'}, D={provider:'p',providerKey:'k',model:'D'};
 `
 	if _, err = vm.RunString(harness + "\n" + src[start:end]); err != nil {
@@ -182,11 +184,11 @@ const A={provider:'p',providerKey:'k',model:'A'}, B={provider:'gone',providerKey
 			t.Fatal(err)
 		}
 	}
-	run(`dmCache=view(A,B);dmReady=true;renderDefaultModels();expect($('set-dispatch-model').value==='gone|lost|B','missing model ref was cleared');holdGet=true;loadDefaultModels();expect(gets.length===1,'delayed GET missing');`)
+	run(`dmCache=view(A,B);dmReady=true;renderDefaultModels();expect($('set-dispatch-execute-model').value==='gone|lost|B','missing model ref was cleared');holdGet=true;loadDefaultModels();expect(gets.length===1,'delayed GET missing');`)
 	run(`$('set-default-model').value='p|k|C';saveDefaultModels('global');expect(requests.length===1,'first request missing');expect(!('dispatch' in requests[0].body),'global request was full replacement');loadDefaultModels();expect(gets.length===1,'GET was started while saving');`)
-	run(`$('set-dispatch-mode').value='follow';saveDefaultModels('dispatch');$('set-default-model').value='p|k|D';saveDefaultModels('global');expect(requests.length===1,'requests were not serialized');requests[0].resolve(view(C,B));`)
+	run(`$('set-dispatch-execute-mode').value='follow';saveDefaultModels('dispatch');$('set-default-model').value='p|k|D';saveDefaultModels('global');expect(requests.length===1,'requests were not serialized');requests[0].resolve(view(C,B));`)
 	run(`expect(requests.length===2,'pending patch not sent');expect(requests[1].body.global.model==='D' && requests[1].body.dispatch.thinking==='' && !requests[1].body.dispatch.provider,'latest intent lost');expect($('set-default-model').value==='p|k|D','old response reset latest UI');requests[1].resolve(view(D,null));`)
 	run(`expect(!dmSaving,'queue did not finish');expect($('set-default-model').value==='p|k|D','last operation did not win');gets[0](view(A,B));`)
 	run(`expect($('set-default-model').value==='p|k|D','delayed old GET rolled back saved choice');holdGet=false;getFail=true;loadDefaultModels();`)
-	run(`expect(!dmReady && $('set-default-model').disabled && $('set-dispatch-mode').disabled,'GET failure left controls editable');saveDefaultModels('global');expect(requests.length===2,'GET failure allowed save');`)
+	run(`expect(!dmReady && $('set-default-model').disabled && $('set-dispatch-execute-mode').disabled,'GET failure left controls editable');saveDefaultModels('global');expect(requests.length===2,'GET failure allowed save');`)
 }

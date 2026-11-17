@@ -113,13 +113,15 @@ func runReadSummary(t *toolContext, args json.RawMessage) (string, error) {
 
 func dispatchTaskTool() Tool {
 	return Tool{
-		Spec: toolSpec("dispatch_task", "新建一个工作任务会话并把需求交给它后台执行（它拥有读写文件与执行命令的全部工具）。本工具立即返回，任务完成后你会自动收到【派发回报】（含它的最终答复全文、轮数/步数、与实际落盘核对过的改动文件清单）。工作任务与我们的聊天记录完全隔离——你就像用户一样只给它发一段自足的消息：说清目标与已知背景（涉及的文件/目录给绝对路径）即可；怎么干、怎么验证交给它自己判断，不要替它列步骤清单和验收矩阵。可选参数与人工在界面新建工作任务一致：mode 选工作模式、plan_mode 让它以计划模式启动、attachments 给它带上现成文件、model 指定模型（providerId/modelId 完整格式）、permission 调它的权限档（只能同等或降权，绝不允许增权）。",
+		Spec: toolSpec("dispatch_task", "新建一个工作任务会话并把需求交给它后台执行（它拥有读写文件与执行命令的全部工具）。本工具立即返回，任务完成后你会自动收到【派发回报】（含它的最终答复全文、轮数/步数、与实际落盘核对过的改动文件清单）。工作任务与我们的聊天记录完全隔离——你就像用户一样只给它发一段自足的消息：说清目标与已知背景（涉及的文件/目录给绝对路径）即可；怎么干、怎么验证交给它自己判断，不要替它列步骤清单和验收矩阵。可选参数与人工在界面新建工作任务一致：mode 选工作模式、plan_mode 让它以计划模式启动、attachments 给它带上现成文件、model 指定模型（providerId/modelId 完整格式）、permission 调它的权限档（只能同等或降权，绝不允许增权）。另有只有派发才有的两个可选参数：purpose 选本次用途（plan=方案设计 / execute=执行·通用 / review=审查·审计，不传＝execute，只决定用哪套默认模型与推理强度，与 mode 正交）、thinking 指定本次会话的推理强度。model / thinking 这类覆盖只在用户明确要求时才传，只影响这次新建的会话，不改任何默认设置。",
 			objSchema(map[string]any{
 				"task":             strProp("自足的任务描述：目标与已知背景（涉及的文件/目录给绝对路径）——工作任务看不到本对话的任何记录；不要替它列步骤清单和验收矩阵"),
 				"title":            strProp("给新任务起的标题，可省略"),
 				"workspace":        strProp("可选：工作任务的工作目录（绝对路径），默认沿用当前工作区；与 remote_workspace 互斥"),
 				"remote_workspace": strProp("可选：工作任务使用的 SSH 远程工作区（本对话的二号工作区），取值照抄环境快照「可派发远程工作区」行里的完整地址（user@host:dir）。与 workspace 互斥；不填＝沿用当前环境（本会话挂了远程则继承同一远程）"),
 				"model":            strProp("可选：任务会话使用的模型，格式 providerId/modelId（如 deepseek/deepseek-v4-pro）或纯 modelId；不填沿用默认"),
+				"purpose":          strProp("可选：本次派发的用途，决定用哪一套默认模型与推理强度。plan=方案设计/调研规划；execute=执行/通用（不传即此项）；review=审查/审计。按这次要干的事的阶段选，不要从标题里猜，不要为了换模型而编造用途。与 mode（工作模式，office/coding 等）正交，互不影响；不传＝execute"),
+				"thinking":         strProp("可选：本次任务会话的推理强度（只作用于这次新建的会话，不改任何默认设置）。取值 none/low/medium/high/xhigh/max；none＝关闭思考（是有效值，不是「不传」）。只有用户明确要求时才传；不传或空串＝按用途配置 → 执行/通用 → 全局默认 → 服务端默认 依次继承"),
 				"mode":             strProp("可选：工作模式，取值与人工新建会话的模式下拉同一份清单（" + chatModesDoc() + "）；按任务性质选——办公文档/表格/资料选 office，改代码/编译排障选 coding，用户不懂编程的编程需求选 beginner-coding，把做法沉淀成技能教程选 skill-create。不填＝通用工作任务（task，与改动前一致）"),
 				"plan_mode":        boolProp("可选：true＝让新任务以计划模式启动（与人工建会话勾选「计划模式」一致）：它先只读调研、提交计划等用户批准后才动手；适合改动面大、跨多文件、有风险的任务"),
 				"attachments":      arrayProp("可选：附件文件路径列表（本机绝对路径，如 D:\\资料\\需求.docx）。文件会复制进新任务的工作区并登记为上传（交付时可在 deliver_result 的文件项填 upload 交回用户原处），与人工建会话上传附件完全一致；路径不存在、是目录，或新任务是远程工作区时，整个派发被拒绝并报错", strProp("本机文件绝对路径，如 D:\\资料\\需求.docx")),
@@ -148,6 +150,29 @@ func (t *toolContext) deliverSub(sub *SessionMeta, text, note string) (string, *
 	go t.app.runSubAgent(t.sess, sub, d.Run)
 	return fmt.Sprintf("已派发后台执行：会话 %s「%s」。%s本工具立即返回，不要等待；"+
 		"被派发的会话完成后系统会自动收到【派发回报】并触发你处理回报。现在可以先回用户一句「已经安排」。", sub.ID, sub.Title, note), d.Run
+}
+
+// dispatchPurposeModel 顶层任务（dispatch_task）的模型链：显式 model 参数 > 本用途
+// 配置 >（plan/review）执行/通用配置 > 跟随主会话 > 全局默认。每一跳只有「未配置」
+// 才继续，配置了但不可用立刻报错（不换用途、不换渠道）。返回 source 供派发注记用。
+func (t *toolContext) dispatchPurposeModel(model, purpose string) (provider, providerKey, mdl, source string, err error) {
+	if m := strings.TrimSpace(model); m != "" {
+		p, k, mm, e := t.explicitDispatchModel(m)
+		return p, k, mm, "本次派发的 model 参数", e
+	}
+	ref, source, where, rerr := t.app.purposeRef(purpose)
+	if rerr != nil {
+		return "", "", "", source, rerr
+	}
+	if ref.Empty() {
+		p, k, mm, e := t.inheritSessionModel()
+		return p, k, mm, source, e
+	}
+	tgt, terr := t.app.resolveModelRef(ref, where)
+	if terr != nil {
+		return "", "", "", source, fmt.Errorf("%s不可用（来自%s）：%w", source, where, terr)
+	}
+	return tgt.ProviderID, tgt.KeyID, tgt.Model, source, nil
 }
 
 // dispatchModelChoice 解析 dispatch_task 的模型参数，返回应落到新顶层任务会话上
@@ -338,6 +363,36 @@ func (a *App) resolveDispatchModelRef(req, preferProvider string) (ModelRef, err
 	return ModelRef{}, fmt.Errorf("model=%q 是裸模型名，而本地有 %d 个渠道都提供它：%s；同一模型名可能在多个渠道提供，请用 providerId/modelId 完整格式指明渠道", m, len(hits), strings.Join(specs, "、"))
 }
 
+// resolveDispatchPurpose 解析 dispatch_task 的 purpose 参数：不传＝执行/通用（与改动前
+// 一致）；只认三个小写 id（大小写与空白归一），**不认中文别名**——别名会把用途变成
+// 自由文本，与「未知用途必须报错」冲突。用途只决定默认模型与推理强度，与工作模式
+// （mode）正交，也不从标题里猜。
+func resolveDispatchPurpose(req string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(req)); v {
+	case "":
+		return "execute", nil
+	case "plan", "execute", "review":
+		return v, nil
+	}
+	return "", fmt.Errorf("purpose=%q 不是可用的派发用途：只能是 plan（方案设计）/ execute（执行/通用，不传即此项）/ review（审查/审计）；用途只决定默认模型与推理强度，与 mode（工作模式）是两回事", req)
+}
+
+// resolveDispatchThinking 解析 dispatch_task 的 thinking 参数：空串/仅空白＝未传
+// （沿用途链继承）；否则必须是六档之一。显式 none 是**有效值**（关闭思考），不等于
+// 未传。这里只认 thinkingLevels() 那份清单，**不用 normalizeThinkingLevel**——那个
+// 会接受老会话库里的 enabled/disabled 并归一成空串，拿它做参数校验会把非法值静默
+// 变成「未传」，正好违背「非法值必须拒绝」。
+func resolveDispatchThinking(req string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(req))
+	if v == "" {
+		return "", nil
+	}
+	if containsStr(thinkingLevels(), v) {
+		return v, nil
+	}
+	return "", fmt.Errorf("thinking=%q 不是有效的推理强度：只能是 none/low/medium/high/xhigh/max（none＝关闭思考），或不传（＝按用途配置 → 执行/通用 → 全局默认 依次继承）；本次派发未创建任务", req)
+}
+
 // resolveDispatchMode 解析 dispatch_task 的 mode 参数：不传＝通用工作任务
 // （task，与改动前的默认一致）；传入的值必须落在「人工新建会话」的模式清单里
 // （chatModes，见 chatmodes.go）——前端模式下拉与它同一份数据源。清单外的值
@@ -404,11 +459,17 @@ func normalizeDispatchAttachments(in []string) []string {
 	return out
 }
 
-// dispatchTaskNote 组织这次派发回给数字助理的一句补充说明（模式、计划模式、
-// 附件、权限档——只讲与默认不同的点）。工具结果里带上它，模型才知道这次派发
-// 实际按什么档跑起来的；都取默认值时返回空串，不啰嗦。
-func dispatchTaskNote(mode, perm, reqPerm string, planMode bool, attached int, remoteDisplay string) string {
+// dispatchTaskNote 组织这次派发回给数字助理的一句补充说明（用途、本次档位、模式、
+// 计划模式、附件、权限档——只讲与默认不同的点）。工具结果里带上它，模型才知道这次
+// 派发实际按什么档跑起来的；都取默认值时返回空串，不啰嗦。
+func dispatchTaskNote(mode, perm, reqPerm string, planMode bool, attached int, remoteDisplay, purpose, ownThinking string) string {
 	var parts []string
+	if purpose != "" && purpose != "execute" {
+		parts = append(parts, "用途：「"+purposeLabel(purpose)+"」（"+purpose+"）")
+	}
+	if ownThinking != "" {
+		parts = append(parts, "档位：「本次指定 "+thinkingLabel(ownThinking)+"」")
+	}
 	if m := chatModeByValue(mode); m != nil {
 		parts = append(parts, "模式：「"+m.Label+"」（"+mode+"）")
 	}
@@ -582,6 +643,8 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 		Workspace       string   `json:"workspace"`
 		RemoteWorkspace string   `json:"remote_workspace"`
 		Model           string   `json:"model"`
+		Purpose         string   `json:"purpose"`
+		Thinking        string   `json:"thinking"`
 		Mode            string   `json:"mode"`
 		PlanMode        bool     `json:"plan_mode"`
 		Attachments     []string `json:"attachments"`
@@ -612,11 +675,26 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 用途与本次档位覆盖：都是可选参数，但值非法就在建会话之前拒绝（不建半会话）。
+	purpose, err := resolveDispatchPurpose(p.Purpose)
+	if err != nil {
+		return "", err
+	}
+	// 所选用途的配置结构在派发前校验（脏 mode 一律拒绝），即使本次给了显式
+	// model/thinking 覆盖——用户配置坏了就该看见。这里只校验结构、不判可用性，
+	// 所以不会因为「本次用不到的默认模型不可用」拦下显式覆盖。
+	if _, _, cerr := t.app.purposeCfg(purpose); cerr != nil {
+		return "", fmt.Errorf("%w；本次派发未创建任务", cerr)
+	}
+	ownThinking, err := resolveDispatchThinking(p.Thinking)
+	if err != nil {
+		return "", err
+	}
 	perm, err := t.dispatchPermission(p.Permission)
 	if err != nil {
 		return "", err
 	}
-	provider, providerKey, mdl, err := t.dispatchModelChoice(p.Model)
+	provider, providerKey, mdl, _, err := t.dispatchPurposeModel(p.Model, purpose)
 	if err != nil {
 		return "", err
 	}
@@ -639,7 +717,7 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if title == "" {
 		title = truncateRunes(p.Task, 20)
 	}
-	thinking, _, err := t.app.defaultThinking("dispatch", "")
+	thinking, _, err := t.app.purposeThinking(purpose, ownThinking)
 	if err != nil {
 		return "", err
 	}
@@ -691,7 +769,7 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if len(attNotes) > 0 {
 		taskMsg = ATTACH_HEAD + "\n" + strings.Join(attNotes, "\n") + "\n\n" + taskMsg
 	}
-	note, run := t.deliverSub(sub, taskMsg, dispatchTaskNote(mode, perm, p.Permission, p.PlanMode, attached, remoteDisp))
+	note, run := t.deliverSub(sub, taskMsg, dispatchTaskNote(mode, perm, p.Permission, p.PlanMode, attached, remoteDisp, purpose, ownThinking))
 	// 经理代批＝轮次级授权（mgrnotify.go）：投递开出的这一轮才可代决，轮收口
 	// 或用户亲发消息即撤销——之后用户在这个会话自己干活的卡不再报给经理。
 	t.app.grantManagerTurn(sub.ID, run)

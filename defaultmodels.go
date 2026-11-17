@@ -1,7 +1,8 @@
 package main
 
 // 默认模型体系：三类默认（全局默认模型 / 派发任务默认模型 / 每条待办的任务模型）
-// 与「不可用就报错、绝不静默回落」的取值链。
+// 与「不可用就报错、绝不静默回落」的取值链；其中派发任务默认模型按用途分三套
+//（执行/通用、方案设计、审查·审计），旧的那个键原位就是「执行/通用」。
 //
 // 设计意图（为什么这么做）：
 //   - 一个模型只有「渠道 + 模型 + Key 归属」三者齐备才真的能调（多 Key 渠道里
@@ -14,11 +15,16 @@ package main
 //
 // 取值链（每一环取到的值不可用就直接报错，不继续往下试）：
 //   - 手动新建任务会话 → 全局默认模型；
-//   - dispatch_task → 派发任务默认模型（未设置＝跟随主会话：
-//     派发者当前的 provider/model/key）→ 派发者也没手选时跟随全局默认模型；
+//   - dispatch_task → 按用途：本次显式 model / 本用途配置 →（plan/review）跟随执行
+//     通用 → 派发者手选的 provider/model/key → 全局默认模型；
 //   - dispatch_sub 不走派发默认，模型链不变；档位继承派发者当前 Thinking；
-//   - 待办 → 待办自选 → 派发任务默认模型 →（派发设置跟随主会话时，待办没有
-//     主会话可跟）→ 全局默认模型。
+//   - 待办 → 待办自选 → 派发任务默认模型（＝执行/通用）→（派发设置跟随主会话时，
+//     待办没有主会话可跟）→ 全局默认模型。
+//
+// 派发用途（purpose）为什么这样设计：任务处在「出方案 / 干活 / 独立审查」哪个阶段，
+// 对模型与推理强度的要求就不同，但用户不想每派一次都手调。所以三套默认各自可配，
+// 方案/审查默认「跟随执行/通用」（推荐用法，也是老配置读出来的零值），要分开时
+// 改成 custom。用途只决定默认模型与强度，与工作模式（mode）正交，也不落库。
 
 import (
 	"encoding/json"
@@ -72,6 +78,70 @@ func (r ModelRef) Spec() string {
 	return r.Provider + "/" + r.Model
 }
 
+// 派发用途（dispatch_task 的 purpose）固定三类：id 供工具参数与配置使用，Label 给
+// 人与模型看。不设中文别名——别名会让用途变成自由文本，与「未知用途必须报错」冲突。
+
+// dispatchPurpose 是一项派发用途的 id 与中文标签。
+// 顺序即设置页三行的顺序，execute 固定第一项（它的视图就是原来那一行）。
+type dispatchPurpose struct{ ID, Label string }
+
+var dispatchPurposes = []dispatchPurpose{
+	{"execute", "执行/通用"},
+	{"plan", "方案设计"},
+	{"review", "审查/审计"},
+}
+
+// dispatchPurposeCfg 是「方案设计 / 审查·审计」两套用途的配置。
+// Mode：""/"follow"＝模型跟随「执行/通用」（推荐默认，也是老配置读出来的零值）；
+// "custom"＝用下面的渠道/模型；其它值一律是**脏配置**，读写两处都必须报错，
+// 不得降级成 follow（跟错了模型比报错更难查）。Thinking 与 Mode 无关：模型跟随
+// 时档位仍可独立设置（空＝沿档位链继承）。
+type DispatchPurposeCfg struct {
+	Mode string `json:"mode,omitempty"`
+	ModelRef
+}
+
+// 用途配置的 mode 取值（只认这两个 + 空）。
+const (
+	purposeModeFollow = "follow"
+	purposeModeCustom = "custom"
+)
+
+// purposeLabel 用途的中文标签（报错与注记都用它说清是哪个用途）。
+func purposeLabel(p string) string {
+	for _, d := range dispatchPurposes {
+		if d.ID == p {
+			return d.Label
+		}
+	}
+	return p
+}
+
+// purposeWhere 某用途在设置页里的位置：报错与界面红字都指到这里，用户才知道改哪一行。
+func purposeWhere(p string) string {
+	switch p {
+	case "plan":
+		return whereDispatchPlanDefault
+	case "review":
+		return whereDispatchReviewDefault
+	}
+	return whereDispatchDefault
+}
+
+// normPurposeMode 归一用途配置的 mode：只做大小写与空白处理，**不做同义猜测**
+// （「跟随」「跟随主会话」这类中文一律按脏配置报错，不猜用户意思）。
+func normPurposeMode(s string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "", purposeModeFollow:
+		return purposeModeFollow, nil
+	case purposeModeCustom:
+		return purposeModeCustom, nil
+	}
+	return "", fmt.Errorf("mode 值非法：%q（只能是 %s（跟随执行/通用）或 %s（指定渠道 + 模型），留空＝%s）",
+		strings.TrimSpace(s), purposeModeFollow, purposeModeCustom, purposeModeFollow)
+}
+
 // 待办「任务模型」三档；空串＝跟随派发设置（默认，老数据没有该字段读出来就是空，
 // 天然落在这一档，不需要额外迁移）。
 const (
@@ -83,10 +153,13 @@ const (
 // 错误信息里的「去哪改」：只写一处，文案统一，用户照着点就能到。
 const (
 	whereGlobalDefault   = "「设置 → 模型」→「默认模型」→「全局默认模型」"
-	whereDispatchDefault = "「设置 → 模型」→「默认模型」→「派发任务默认模型」"
-	whereTodoCard        = "待办卡片上的「模型」（编辑弹窗里也能选）"
-	whereDispatchTool    = "本次派发的 model 参数（providerId/modelId 完整格式）"
-	whereSessionModel    = "该会话输入框下方的模型芯片"
+	whereDispatchDefault = "「设置 → 模型」→「默认模型」→「派发任务默认模型 · 执行/通用」"
+	// 方案/审查的定位锚点：报错必须指到那个用途那一行，否则用户不知道改哪儿。
+	whereDispatchPlanDefault   = "「设置 → 模型」→「默认模型」→「派发任务默认模型 · 方案设计」"
+	whereDispatchReviewDefault = "「设置 → 模型」→「默认模型」→「派发任务默认模型 · 审查/审计」"
+	whereTodoCard              = "待办卡片上的「模型」（编辑弹窗里也能选）"
+	whereDispatchTool          = "本次派发的 model 参数（providerId/modelId 完整格式）"
+	whereSessionModel          = "该会话输入框下方的模型芯片"
 )
 
 // errNoGlobalDefault 全局默认模型没设置：手动新建会话与待办派发都会撞到它。
@@ -335,6 +408,120 @@ func (a *App) dispatchDefaultRef() (ModelRef, bool) {
 	return a.withKey(r), true
 }
 
+// purposeCfg 取某用途的配置并归一 mode：execute 没有自己的 mode 键（它的配置就是
+// 老的 dispatchModel：完整＝custom、空＝follow）；plan/review 读各自的配置。
+// mode 非法一律返回错误（带用途定位），绝不降级成 follow。
+func (a *App) purposeCfg(p string) (DispatchPurposeCfg, string, error) {
+	cfg := DispatchPurposeCfg{}
+	if a != nil && a.Cfg != nil {
+		switch p {
+		case "plan":
+			cfg = a.Cfg.DispatchPlanModel
+		case "review":
+			cfg = a.Cfg.DispatchReviewModel
+		default:
+			cfg = DispatchPurposeCfg{ModelRef: a.Cfg.DispatchModel}
+		}
+	}
+	mode, err := normPurposeMode(cfg.Mode)
+	if err != nil {
+		return cfg, "", fmt.Errorf("%s默认模型的 %s（来自%s）", purposeLabel(p), err.Error(), purposeWhere(p))
+	}
+	if p == "execute" {
+		// 执行/通用的「自定义」就是它的模型指向齐全（历史语义，不加 mode 键）。
+		if _, ok := a.dispatchDefaultRef(); ok {
+			mode = purposeModeCustom
+		} else {
+			mode = purposeModeFollow
+		}
+	}
+	cfg.Mode = mode
+	return cfg, mode, nil
+}
+
+// followPurposeText 设置页里「跟随」那个选项的中文说法（两个跟随不是同一个东西）。
+func followPurposeText(p string) string {
+	if p == "execute" {
+		return "跟随主会话"
+	}
+	return "跟随执行/通用"
+}
+
+// purposeRef 用途 → 具体模型指向，或空引用（空＝继续跟主会话，由调用方接
+// inheritSessionModel）。跟随是**配置语义**（plan/review 出厂就是 follow），不是兜底：
+// 本用途没配就显式跟执行/通用，执行/通用也没配才跟主会话。
+// 返回 source/where 供界面与报错说清「这是哪个设置里的值、去哪改」。
+func (a *App) purposeRef(p string) (ref ModelRef, source, where string, err error) {
+	cfg, mode, cerr := a.purposeCfg(p)
+	if cerr != nil {
+		return ModelRef{}, "", purposeWhere(p), cerr
+	}
+	label := purposeLabel(p)
+	where = purposeWhere(p)
+	if mode == purposeModeCustom {
+		ref = a.withKey(cfg.ModelRef)
+		if !ref.Complete() {
+			return ModelRef{}, label + "默认模型", where,
+				fmt.Errorf("%s默认模型选了「指定渠道+模型」，但渠道或模型没选全：请到%s选全（或改回「%s」）",
+					label, where, followPurposeText(p))
+		}
+		return ref, label + "默认模型", where, nil
+	}
+	if p == "execute" {
+		return ModelRef{}, "跟随主会话", "", nil
+	}
+	if r, ok := a.dispatchDefaultRef(); ok {
+		return r, "跟随执行/通用", whereDispatchDefault, nil
+	}
+	return ModelRef{}, "跟随执行/通用（再跟随主会话）", "", nil
+}
+
+// purposeThinking 派发用途的档位链：本次 thinking 参数 > 本用途 thinking >
+// 执行/通用 thinking > 全局默认 thinking > 空（不指定，服务端默认）。
+// own 是已经归一过的本次参数（空＝未传）；空串在整条链上历来就是「不指定」的表示。
+func (a *App) purposeThinking(p, own string) (level, source string, err error) {
+	if own != "" {
+		return own, "本次派发指定", nil
+	}
+	if p != "execute" {
+		cfg, _, cerr := a.purposeCfg(p)
+		if cerr != nil {
+			return "", "", cerr
+		}
+		if t := strings.TrimSpace(cfg.Thinking); t != "" {
+			// 校验用原值（与全局/执行通用的配置口径一致），落会话用去空白后的值。
+			if err := validateDefaultThinking(cfg.Thinking); err != nil {
+				return "", "", fmt.Errorf("%s默认模型的推理强度不可用（来自%s）：%w", purposeLabel(p), purposeWhere(p), err)
+			}
+			return t, purposeLabel(p) + "默认模型", nil
+		}
+	}
+	d := ""
+	if a != nil && a.Cfg != nil {
+		d = a.Cfg.DispatchModel.Thinking
+	}
+	if err := validateDefaultThinking(d); err != nil {
+		return "", "", err
+	}
+	if d != "" {
+		if p == "execute" {
+			return d, "跟随派发设置", nil
+		}
+		return d, "跟随执行/通用", nil
+	}
+	g := ""
+	if a != nil && a.Cfg != nil {
+		g = a.Cfg.DefaultModel.Thinking
+	}
+	if err := validateDefaultThinking(g); err != nil {
+		return "", "", err
+	}
+	if g != "" {
+		return g, "跟随全局默认", nil
+	}
+	return "", "跟随会话默认", nil
+}
+
 // normTodoModelMode 归一待办三档模型取值（空与认不出的都按「跟随派发设置」）。
 func normTodoModelMode(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -482,6 +669,84 @@ func (a *App) dispatchSettingsView() map[string]any {
 	return map[string]any{"mode": "follow", "thinking": a.Cfg.DispatchModel.Thinking, "ref": v}
 }
 
+// refText 一行看得懂的生效值：渠道显示名 · 模型 + 档位后缀（算不到就空）。
+func (a *App) refText(r ModelRef, thinkingText string) string {
+	r = r.norm()
+	if r.Provider == "" || r.Model == "" || a.providerByID(r.Provider) == nil {
+		return ""
+	}
+	return providerLabel(a, r.Provider) + " · " + r.Model + thinkingText
+}
+
+// purposeSettingsView 设置页「派发任务默认模型」的一行：mode / 档位配置值 /
+// 当前实际生效值（模型与档位各自算到底）。execute 直接复用原来的那一行，
+// 保证 GET 里 dispatch 字段与旧前端、待办组件零影响。
+//
+// 脏 mode：mode 原样返回配置里的字符串，ref.Error 写清「配置非法」——界面据此
+// 把那行置红并提示可选值，用户能看出是配置错了而不是自己选错了。
+func (a *App) purposeSettingsView(p string) map[string]any {
+	v := map[string]any{"purpose": p, "label": purposeLabel(p)}
+	if p == "execute" {
+		for k, val := range a.dispatchSettingsView() {
+			v[k] = val
+		}
+		return v
+	}
+	label, where := purposeLabel(p), purposeWhere(p)
+	cfg, mode, err := a.purposeCfg(p)
+	v["thinking"] = cfg.Thinking
+	if err != nil {
+		v["mode"] = strings.TrimSpace(cfg.Mode)
+		v["ref"] = ModelRefView{Source: label + "默认模型", Error: err.Error()}
+		return v
+	}
+	v["mode"] = mode
+	level, thinkingSource, thinkingErr := a.purposeThinking(p, "")
+	thinkingText := thinkingViewText(level, thinkingSource)
+	var rv ModelRefView
+	if mode == purposeModeCustom {
+		ref := a.withKey(cfg.ModelRef)
+		rv = ModelRefView{Source: label + "默认模型", Provider: ref.Provider, ProviderKey: ref.ProviderKey,
+			Model: ref.Model, Thinking: cfg.Thinking, ThinkingText: thinkingText}
+		if ref.Empty() {
+			rv.Error = "未设置"
+		} else {
+			rv.Text = a.refText(ref, thinkingText)
+			if cerr := a.checkModelRef(ref, where); cerr != nil {
+				rv.Error = cerr.Error()
+			} else {
+				rv.Available = true
+			}
+		}
+	} else {
+		// 跟随执行/通用：直接拿执行/通用那一行算到底的值，只把档位换成自己的链。
+		if base, ok := a.dispatchSettingsView()["ref"].(ModelRefView); ok {
+			rv = base
+		}
+		rv.Source = "跟随执行/通用"
+		rv.Thinking = cfg.Thinking
+		rv.ThinkingText = thinkingText
+		if rv.Provider != "" && rv.Model != "" {
+			rv.Text = a.refText(ModelRef{Provider: rv.Provider, ProviderKey: rv.ProviderKey, Model: rv.Model}, thinkingText)
+		}
+	}
+	if thinkingErr != nil {
+		rv.Available = false
+		rv.Error = thinkingErr.Error()
+	}
+	v["ref"] = rv
+	return v
+}
+
+// dispatchPurposesView 三套用途的视图（顺序固定：执行/通用 / 方案设计 / 审查·审计）。
+func (a *App) dispatchPurposesView() []map[string]any {
+	out := make([]map[string]any, 0, len(dispatchPurposes))
+	for _, d := range dispatchPurposes {
+		out = append(out, a.purposeSettingsView(d.ID))
+	}
+	return out
+}
+
 // todoManagerModelView 只读长期助理当前实际目标，不把待办设置套进既有会话。
 func (a *App) todoManagerModelView() ModelRefView {
 	v := ModelRefView{Source: "由长期助理当前模型执行"}
@@ -501,7 +766,7 @@ func (a *App) todoManagerModelView() ModelRefView {
 	}
 	level, _ := normalizeThinkingLevel(m.Thinking)
 	v.Provider, v.ProviderKey, v.Model = tgt.ProviderID, tgt.KeyID, tgt.Model
-	v.Thinking, v.ThinkingText = level, " · " + thinkingLabel(level)
+	v.Thinking, v.ThinkingText = level, " · "+thinkingLabel(level)
 	v.Text = providerLabel(a, tgt.ProviderID) + " · " + tgt.Model + v.ThinkingText
 	v.Available = true
 	return v
@@ -541,10 +806,10 @@ func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
 // 按「不回落」报错。dispatchFollow=true 表示派发默认模型是「跟随主会话」（存空）。
 func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollow bool) error {
 	if err := validateDefaultThinking(global.Thinking); err != nil {
-		return err
+		return fmt.Errorf("全局默认模型（来自%s）：%w", whereGlobalDefault, err)
 	}
 	if err := validateDefaultThinking(dispatch.Thinking); err != nil {
-		return err
+		return fmt.Errorf("派发任务默认模型 · 执行/通用（来自%s）：%w", whereDispatchDefault, err)
 	}
 	g := a.withKey(global)
 	if g.Provider != "" && g.Model == "" {
@@ -568,6 +833,114 @@ func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollo
 		log.Printf("[模型] 默认模型已更新：全局默认=%s，派发默认=跟随主会话", g.Spec())
 	}
 	return nil
+}
+
+// setDispatchPurposes 校验并落装「方案设计 / 审查·审计」两套用途配置：
+// mode 非法或 custom 不全一律报错（不落盘、不改运行值、绝不降级 follow）；
+// follow 时模型三项清空——模型跟随不代表档位也要跟随（Thinking 保留）。
+func (a *App) setDispatchPurposes(plan, review DispatchPurposeCfg) error {
+	for _, item := range []struct {
+		p   string
+		cfg DispatchPurposeCfg
+	}{{"plan", plan}, {"review", review}} {
+		label, where := purposeLabel(item.p), purposeWhere(item.p)
+		mode, err := normPurposeMode(item.cfg.Mode)
+		if err != nil {
+			return fmt.Errorf("%s默认模型的 %s（来自%s）", label, err.Error(), where)
+		}
+		ref := item.cfg.ModelRef
+		if err := validateDefaultThinking(ref.Thinking); err != nil {
+			return fmt.Errorf("%s默认模型：%w（来自%s）", label, err, where)
+		}
+		next := DispatchPurposeCfg{}
+		switch mode {
+		case purposeModeCustom:
+			ref = a.withKey(ref)
+			if !ref.Complete() {
+				return fmt.Errorf("%s默认模型选了「指定渠道+模型」，但渠道或模型没选全：请到%s选全（或改回「%s」）",
+					label, where, followPurposeText(item.p))
+			}
+			next = DispatchPurposeCfg{Mode: purposeModeCustom, ModelRef: ref}
+		default:
+			// 跟随：只留档位（ModelRef 的 Thinking），模型三项清空；磁盘上不写 mode 键，
+			// 与老配置零值同形（回退到旧版 exe 时不会让旧版读到不认识的语义）。
+			next = DispatchPurposeCfg{ModelRef: ModelRef{Thinking: ref.Thinking}}
+		}
+		if item.p == "plan" {
+			a.Cfg.DispatchPlanModel = next
+		} else {
+			a.Cfg.DispatchReviewModel = next
+		}
+	}
+	return nil
+}
+
+// purposePatch 是保存接口里一次用途配置的局部修改：键缺席＝保留，给了就替换。
+type purposePatch struct {
+	Mode        *string `json:"mode"`
+	Provider    *string `json:"provider"`
+	ProviderKey *string `json:"providerKey"`
+	Model       *string `json:"model"`
+	Thinking    *string `json:"thinking"`
+}
+
+// empty 没有任何字段：保存接口把它（与 null）当成「这一项整体清空」。
+func (p purposePatch) empty() bool {
+	return p.Mode == nil && p.Provider == nil && p.ProviderKey == nil && p.Model == nil && p.Thinking == nil
+}
+
+// mergePurposeCfg 逐字段合并一次用途配置（不校验完整度：那是 setDispatchPurposes
+// 的统一关口）。语义与设计 §3.5 一致：
+//   - mode 显式给成 follow/空：清空模型三项（档位保留，本次给了就用本次的）；
+//   - mode 显式给成 custom：按字段替换；
+//   - mode 缺席：纯粹逐字段合并——旧配置已是 custom 时可以直接换模型，不必重报 mode；
+//     旧配置在跟随时只给渠道/模型会被**明确拒绝**（跟随时模型字段不生效，悄悄收下再
+//     清掉就是用户输入静默丢失），要么给 mode=custom 要么先给 mode=follow。
+func mergePurposeCfg(old DispatchPurposeCfg, patch purposePatch, label, where string) (DispatchPurposeCfg, error) {
+	next := old
+	if patch.Mode != nil {
+		mode, err := normPurposeMode(*patch.Mode)
+		if err != nil {
+			return old, fmt.Errorf("%s默认模型的 %s（来自%s）", label, err.Error(), where)
+		}
+		if mode == purposeModeFollow {
+			next = DispatchPurposeCfg{ModelRef: ModelRef{Thinking: old.Thinking}}
+			if patch.Thinking != nil {
+				next.Thinking = *patch.Thinking
+			}
+			return next, nil
+		}
+		next.Mode = purposeModeCustom
+	}
+	if patch.Provider != nil {
+		next.Provider = *patch.Provider
+	}
+	if patch.ProviderKey != nil {
+		next.ProviderKey = *patch.ProviderKey
+	}
+	if patch.Model != nil {
+		next.Model = *patch.Model
+	}
+	if patch.Thinking != nil {
+		next.Thinking = *patch.Thinking
+	}
+	// 只有归一后的目标真的变了才重定位 Key 归属：同值补丁（如 {"model":"shared"} 与旧值
+	// 完全一致）必须保留原 Key——同模型在不同分组可能有不同额度/协议，不能悄悄改。
+	// 显式给了 providerKey 就按它（不重定位）。
+	if patch.ProviderKey == nil {
+		changed := (patch.Provider != nil && strings.TrimSpace(*patch.Provider) != strings.TrimSpace(old.Provider)) ||
+			(patch.Model != nil && strings.TrimSpace(*patch.Model) != strings.TrimSpace(old.Model))
+		if changed {
+			next.ProviderKey = ""
+		}
+	}
+	if patch.Mode == nil && (patch.Provider != nil || patch.ProviderKey != nil || patch.Model != nil) {
+		if mode, _ := normPurposeMode(next.Mode); mode == purposeModeFollow {
+			return old, fmt.Errorf("%s默认模型现在跟随执行/通用，只提交渠道/模型不会生效：要让它生效请同时给 mode=%q（指定渠道 + 模型）；要清空就显式给 mode=%q（来自%s）",
+				label, purposeModeCustom, purposeModeFollow, where)
+		}
+	}
+	return next, nil
 }
 
 // applySessionModelDefault 手动新建会话（HTTP 人工入口）的模型取值：没选（全空）
@@ -602,17 +975,25 @@ func (a *App) applySessionModelDefault(provider, providerKey, model string) (str
 // 只协调此端点；其他供应商/通用配置写入口仍沿用既有保存边界。
 var defaultModelsSaveMu sync.Mutex
 
-// handleDefaultModelsGet 设置页「默认模型」两块的数据：全局默认模型的选中值，
-// 与派发任务默认模型的模式及当前实际生效值（跟随主会话时算到具体模型）。
+// handleDefaultModelsGet 设置页「默认模型」的数据：全局默认模型、三套派发用途
+// （dispatch 键就是执行/通用那一套：结构与改动前完全一致，待办组件在读）与长期
+// 助理当前实际目标；每项都带服务端算好的「当前生效值」。
 func (a *App) handleDefaultModelsGet(w http.ResponseWriter, r *http.Request) {
 	defaultModelsSaveMu.Lock()
 	defer defaultModelsSaveMu.Unlock()
-	writeJSON(w, 200, map[string]any{
-		"thinkingLevels": thinkingLevels(),
-		"global":         a.globalSettingsView(),
-		"dispatch":       a.dispatchSettingsView(),
-		"manager":        a.todoManagerModelView(),
-	})
+	writeJSON(w, 200, a.defaultModelsView())
+}
+
+// defaultModelsView 是 GET 与保存响应共用的视图（保存后前端直接拿它重渲染，
+// 不在前端重算生效值）。
+func (a *App) defaultModelsView() map[string]any {
+	return map[string]any{
+		"thinkingLevels":   thinkingLevels(),
+		"global":           a.globalSettingsView(),
+		"dispatch":         a.dispatchSettingsView(),
+		"dispatchPurposes": a.dispatchPurposesView(),
+		"manager":          a.todoManagerModelView(),
+	}
 }
 
 // handleDefaultModelsSet 保存这两块：只校验格式并补齐 Key 归属，不拦可用性
@@ -648,11 +1029,46 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	// 在副本上归一/校验。写盘失败不能改变运行中的默认值。
+	// 方案/审查两套用途：键缺席＝保留；null 与 {} 都是**整体清空**（回到跟随、档位
+	// 也清，与旧的 dispatch:{} 语义统一）；只给某一项（如 {"thinking":"high"}）
+	// 则逐字段合并。mode 非法或「跟随态只给模型字段」在这里就 400，不落盘。
+	decodePurpose := func(name, purpose string, old DispatchPurposeCfg) (DispatchPurposeCfg, error) {
+		raw, present := body[name]
+		if !present {
+			return old, nil
+		}
+		if strings.TrimSpace(string(raw)) == "null" {
+			return DispatchPurposeCfg{}, nil
+		}
+		var patch purposePatch
+		if err := json.Unmarshal(raw, &patch); err != nil {
+			return old, fmt.Errorf("%s 不是合法的用途配置: %w", name, err)
+		}
+		if patch.empty() {
+			return DispatchPurposeCfg{}, nil
+		}
+		return mergePurposeCfg(old, patch, purposeLabel(purpose), purposeWhere(purpose))
+	}
+	plan, err := decodePurpose("dispatchPlan", "plan", a.Cfg.DispatchPlanModel)
+	if err != nil {
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
+		return
+	}
+	review, err := decodePurpose("dispatchReview", "review", a.Cfg.DispatchReviewModel)
+	if err != nil {
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
+		return
+	}
+	// 在副本上归一/校验：一次保存是个原子整体，任一行不合格就整份不落盘（不做部分
+	// 保存），错误里点名根因在哪一行，用户改完再提交一次。
 	next := *a.Cfg
 	candidate := &App{Cfg: &next}
 	if err := candidate.setDefaultModels(g, d, d.Empty()); err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
+		return
+	}
+	if err := candidate.setDispatchPurposes(plan, review); err != nil {
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
 		return
 	}
 	if err := next.Save(a.CfgPath); err != nil {
@@ -660,13 +1076,9 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.Cfg.DefaultModel, a.Cfg.DispatchModel = next.DefaultModel, next.DispatchModel
+	a.Cfg.DispatchPlanModel, a.Cfg.DispatchReviewModel = next.DispatchPlanModel, next.DispatchReviewModel
 	a.broadcast(Event{Type: "providers"})
-	writeJSON(w, 200, map[string]any{
-		"thinkingLevels": thinkingLevels(),
-		"global":         a.globalSettingsView(),
-		"dispatch":       a.dispatchSettingsView(),
-		"manager":        a.todoManagerModelView(),
-	})
+	writeJSON(w, 200, a.defaultModelsView())
 }
 
 // migrateDefaultModel 把单模型时代那个裸模型名（Config.Model，向导只写过一次）

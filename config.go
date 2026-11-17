@@ -71,13 +71,19 @@ type Config struct {
 	DefaultModel ModelRef `json:"defaultModel"`
 	// DispatchModel 派发任务默认模型：空＝跟随主会话（派发者当前的渠道/模型/Key，
 	// 也就是这个设置出现之前的现状）；非空＝dispatch_task 派出的顶层任务会话用它。
-	DispatchModel ModelRef      `json:"dispatchModel,omitempty"`
-	Providers     []ProviderCfg `json:"providers"`
-	Workspace     string        `json:"workspace"`
-	MaxSteps      int           `json:"maxSteps"` // 步数上限（一条消息触发的任务里连续步数）：0/负数 = 不限制（默认）
-	AllowShell    bool          `json:"allowShell"`
-	DataDir       string        `json:"dataDir"`
-	SkillsDir     string        `json:"skillsDir"` // 技能目录；空 = 可执行文件旁的 技能/（不可写时落数据目录）
+	// 这一项同时是派发用途里「执行/通用」的配置（原键原义不变）。
+	DispatchModel ModelRef `json:"dispatchModel,omitempty"`
+	// DispatchPlanModel / DispatchReviewModel 是派发用途「方案设计 / 审查·审计」
+	// 的默认模型与推理强度（见 defaultmodels.go 的派发用途一节）。老配置没有这两个
+	// 键时读出来是零值＝mode 空＝跟随执行/通用，与改动前完全等价，无需迁移。
+	DispatchPlanModel   DispatchPurposeCfg `json:"dispatchPlanModel,omitempty"`
+	DispatchReviewModel DispatchPurposeCfg `json:"dispatchReviewModel,omitempty"`
+	Providers           []ProviderCfg      `json:"providers"`
+	Workspace           string             `json:"workspace"`
+	MaxSteps            int                `json:"maxSteps"` // 步数上限（一条消息触发的任务里连续步数）：0/负数 = 不限制（默认）
+	AllowShell          bool               `json:"allowShell"`
+	DataDir             string             `json:"dataDir"`
+	SkillsDir           string             `json:"skillsDir"` // 技能目录；空 = 可执行文件旁的 技能/（不可写时落数据目录）
 	// 上下文压缩设置。规则自动压缩为**间隔制**：自上次压缩边界起新增未压缩
 	// 内容达到 CompactInterval（随 CompactUnit 取字数或 token）就触发一次零
 	// 成本规则折叠；模型摘要阈值（CompactLlmPct，默认 80%）仍按窗口百分比，

@@ -35,7 +35,7 @@ func TestProjectLoopPromptWiring(t *testing.T) {
 	for _, mode := range execModeList() {
 		sys := a.systemPrompt(&SessionMeta{ID: "pl-" + mode, Mode: mode})
 		wantAll(t, sys, "模式 "+mode, projectLoopExecHeading,
-			"项目知识会自动注入给你", "随派发回报交给经理", "知识只提建议",
+			"项目知识会自动注入给你", "关键事实带上依据", "随派发回报交给经理", "知识只提建议",
 			"不越级联系经理", "不要声称已通知经理",
 			"没有候选就不填模板", "任务完成不等于用户验收",
 			"## 找经理帮忙")
@@ -47,6 +47,7 @@ func TestProjectLoopPromptWiring(t *testing.T) {
 	as := a.systemPrompt(&SessionMeta{ID: "pl-assistant", Mode: "assistant"})
 	wantAll(t, as, "长期助理", projectLoopMgrHeading,
 		"正文始终只有你能写", "晚到旧事实不倒退当前概况", "任务完成不等于用户验收",
+		"安排项目工作前先读可用的最新知识与相关事件", "任务书里一句提醒它遵循可用的项目知识约束即可",
 		"不用 request_manager 重复报同一件事")
 	// 经理侧与执行侧口径不混：执行侧的两条判据不该出现在经理段里
 	for _, gone := range []string{"随派发回报交给经理", "知识只提建议"} {

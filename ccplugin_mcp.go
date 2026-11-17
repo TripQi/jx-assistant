@@ -113,12 +113,17 @@ func (r *CCPluginRegistry) MCPStartAll() {
 		wg.Add(1)
 		go func(c *mcpClient) {
 			defer wg.Done()
+			// 这些实例按设计是一次性的（mcpClients() 每次新建，工具目录里本来就
+			// 看不到它们），warm-up 完必须回收：否则每次启动/插件重载都留下
+			// 进程与常驻读行 goroutine。工具可见性维持现状，不在本次改动。
+			defer c.shutdown()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := c.start(ctx); err != nil {
 				log.Printf("[CC插件] MCP %s 启动失败: %v", c.fullName, err)
 			} else {
-				log.Printf("[CC插件] MCP %s 已连接，工具 %d 个", c.fullName, len(c.tools))
+				up, tools := c.connSnapshot()
+				log.Printf("[CC插件] MCP %s 已连接（%v，工具 %d 个）", c.fullName, up, len(tools))
 			}
 		}(c)
 	}
@@ -188,10 +193,9 @@ func (r *CCPluginRegistry) mcpCall(ctx context.Context, full string, args json.R
 	for _, c := range r.mcpClients() {
 		prefix := "mcp__" + c.fullName + "__"
 		if strings.HasPrefix(full, prefix) {
-			c.mu.Lock()
-			started := c.started
-			c.mu.Unlock()
-			if !started {
+			// 同样是一次性实例：调用结束即回收（进程与读行 goroutine 都不留）。
+			defer c.shutdown()
+			if up, _ := c.connSnapshot(); !up {
 				if err := c.start(ctx); err != nil {
 					return "", nil, err
 				}

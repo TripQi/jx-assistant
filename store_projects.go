@@ -66,7 +66,23 @@ func ProjectKnowledgeBudget(content string) int64 {
 	return 2*cjk + (other+3)/4
 }
 
-func projectTimestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+// projectClock 是项目时间戳的时钟源（生产恒为 time.Now）。抽成变量只为让回归
+// 测试能固定与回拨时间，验证令牌在同刻、回拨下仍严格递进。
+var projectClock = time.Now
+
+func projectTimestamp() string { return projectClock().UTC().Format(time.RFC3339Nano) }
+
+// projectTimestampAfter 返回严格晚于 prev 的时间戳。updated_at 是项目元数据的
+// CAS 令牌：同一时钟刻度内的连续修改若沿用同一个值，陈旧副本携带的
+// expected_updated_at 仍会匹配 → 冲突校验被放行、新元数据被旧快照覆盖（丢更新）。
+// 时钟回拨（now 不晚于 prev）同样必须前进，否则令牌会复用或倒退。
+func projectTimestampAfter(prev string) string {
+	now := projectClock().UTC()
+	if p, err := time.Parse(time.RFC3339Nano, prev); err == nil && !now.After(p) {
+		now = p.Add(time.Nanosecond)
+	}
+	return now.Format(time.RFC3339Nano)
+}
 
 type projectReader interface {
 	QueryRow(string, ...any) *sql.Row
@@ -255,7 +271,7 @@ func (s *Store) PatchProject(id string, name *string, archived *bool, workspaces
 	if equal {
 		return current, nil
 	}
-	if _, err = tx.Exec(`UPDATE projects SET name=?,archived=?,updated_at=? WHERE id=?`, p.Name, p.Archived, projectTimestamp(), p.ID); err != nil {
+	if _, err = tx.Exec(`UPDATE projects SET name=?,archived=?,updated_at=? WHERE id=?`, p.Name, p.Archived, projectTimestampAfter(current.UpdatedAt), p.ID); err != nil {
 		return Project{}, err
 	}
 	if _, err = tx.Exec(`DELETE FROM project_workspaces WHERE project_id=?`, p.ID); err != nil {

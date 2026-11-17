@@ -270,10 +270,10 @@ func TestProjectMigrationAppendAndChecksum(t *testing.T) {
 	}
 	last := storeMigrations[len(storeMigrations)-1]
 	// 绊线：新迁移只能追加在尾部。每加一条就把这里的期望 id 往下挑一次
-	//（历史：0020 → 0021_project_knowledge → 0022_usage_out_ms），
+	//（历史：0020 → 0021_project_knowledge → 0022_usage_out_ms → 0023_project_events），
 	// 旧条目的 checksum 一个都不许变——下面循环会把它们原样应用并记账，
 	// 再让当前入口跑一遍，变了就在这里报 checksum 不一致。
-	if last.id != "0022_usage_out_ms" {
+	if last.id != "0023_project_events" {
 		t.Fatalf("newcomer migration must append at the tail, got %s", last.id)
 	}
 	oldSums := map[string]string{}
@@ -317,9 +317,13 @@ func TestProjectMigrationAppendAndChecksum(t *testing.T) {
 		t.Fatalf("migration not idempotent: %v", err)
 	}
 	projectTestCreate(t, s, "upgrade")
+	// 旧设计里未实现的 project_events 现在已落地（0023）；仍不保留知识历史正文表。
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('project_events','project_knowledge_history')`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("unexpected event/history table %d %v", count, err)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='project_knowledge_history'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unexpected knowledge history table %d %v", count, err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('project_events','project_event_records','project_event_sources')`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("project event tables missing %d %v", count, err)
 	}
 	if _, err := s.db.Exec(`UPDATE schema_migration SET checksum='tampered' WHERE id=?`, storeMigrations[0].id); err != nil {
 		t.Fatal(err)

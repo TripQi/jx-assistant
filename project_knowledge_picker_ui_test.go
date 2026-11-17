@@ -41,11 +41,34 @@ function parseInto(host, html) {
 }
 var mountTarget=new Element('div'), captured=null;
 var document={createElement:t=>new Element(t),createElementNS:(ns,t)=>new Element(t),body:new Element('body')};
-var window={confirm:()=>true,prompt:()=>'',addEventListener:()=>{},removeEventListener:()=>{}};
+var window={confirm:()=>confirmAnswer,prompt:()=>'',addEventListener:()=>{},removeEventListener:()=>{}};
+var confirmAnswer=true;
 var CX={register:d=>d.init(),registerSettings:d=>{captured=d;if(__MOUNT__) d.mount(mountTarget);}};
+var JX={}; window.JX=JX;
+var registryMountCount=0;
+var registryOpen=false;
+// 项目登记归宿主视图（web/project-registry.js）：从这里建项目，验证两页共用同一套登记。
+function addBinding(path, kind) {
+ var box=all(mountTarget).find(e=>e.tagName==='input'&&e.attrs['aria-label']==='新绑定路径');
+ if(!box) throw Error('binding input missing: '+text(mountTarget).slice(0,400));
+ var line=box.parent, sel=line.children.filter(c=>c.tagName==='select')[0];
+ if(sel&&kind) sel.value=kind;
+ box.value=path; clickLabel('添加绑定');
+}
+function createProject(name, path) {
+ if(!registryOpen) { clickLabel('项目登记 ▸ 展开'); registryOpen=true; }
+ clickLabel('新建项目');
+ field('项目名称').value=name;
+ addBinding(path, 'local');
+ clickLabel('创建项目');
+}
 var state={defaultWs:testDirectory,sessions:[]};
 var lsGet=()=>[];
-var setTimeout=()=>1, clearTimeout=()=>{};
+// 定时器登记表：知识正文的预算预览走 setTimeout 节流，测试用 flushTimers() 把它真正跑起来。
+var timerSeq=0, timerFns={};
+var setTimeout=function(fn){ var id=++timerSeq; timerFns[id]=fn; return id; };
+var clearTimeout=function(id){ delete timerFns[id]; };
+function flushTimers(){ var ids=Object.keys(timerFns); ids.forEach(function(id){ var fn=timerFns[id]; delete timerFns[id]; if(fn) fn(); }); }
 function check(b,msg) { if(!b) throw Error(msg); }
 function buttons() { return all(mountTarget).filter(e=>e.tagName==='button'); }
 function captionOf(e) { return text(e).replace(/⌄/g,'').trim(); }
@@ -53,7 +76,8 @@ function triggers(label) { return buttons().filter(e=>captionOf(e)===label); }
 function byAria(label) { return all(mountTarget).find(e=>e.attrs['aria-label']===label); }
 function field(prefix) { var l=all(mountTarget).find(e=>e.tagName==='label'&&text(e).startsWith(prefix)); if(!l) throw Error('field missing: '+prefix); return l.children[1]; }
 function clickLabel(s) { var b=buttons().find(e=>text(e)===s); if(!b) throw Error('button missing: '+s); b.onclick(); }
-var fetch=(path,opts)=>{opts=opts||{};var r=path==='/api/remotes'?{ok:true,status:200,body:JSON.stringify({remotes:[]})}:request(opts.method||'GET',path,opts.body||'');return Promise.resolve({ok:r.ok,status:r.status,text:()=>Promise.resolve(r.body),json:()=>Promise.resolve(JSON.parse(r.body))});};
+var remoteList=[{user:'u',host:'2001:db8::1',port:2222,dir:'/srv/app'},{user:'root',host:'10.0.0.5',dir:'/opt/x'}];
+var fetch=(path,opts)=>{opts=opts||{};var r=path==='/api/remotes'?{ok:true,status:200,body:JSON.stringify({remotes:remoteList})}:request(opts.method||'GET',path,opts.body||'');return Promise.resolve({ok:r.ok,status:r.status,text:()=>Promise.resolve(r.body),json:()=>Promise.resolve(JSON.parse(r.body))});};
 `
 
 func projectSettingsVM(t *testing.T, a *App, mount bool) (*goja.Runtime, func(string)) {
@@ -75,6 +99,17 @@ func projectSettingsVM(t *testing.T, a *App, mount bool) (*goja.Runtime, func(st
 		flag = "true"
 	}
 	if _, err := vm.RunString(strings.Replace(projectSettingsHarness, "__MOUNT__", flag, 1)); err != nil {
+		t.Fatal(err)
+	}
+	// 两个设置页共用的宿主登记视图先加载，再加载知识库页（它会调用 JX.projectRegistry）。
+	registry, err := os.ReadFile(filepath.Join("web", "project-registry.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vm.RunString(string(registry)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vm.RunString(`JX.projectRegistry.mount=(function(real){return function(el,opts){registryMountCount++;return real(el,opts);};})(JX.projectRegistry.mount);`); err != nil {
 		t.Fatal(err)
 	}
 	source, err := os.ReadFile("组件/project-knowledge/client.js")
@@ -247,9 +282,9 @@ trigger.onclick();check(panel.hidden===true,'再次点击应收起面板');`)
 	})
 
 	t.Run("ListsAndSelectsProjectAfterCreate", func(t *testing.T) {
-		run(`field('新项目名称').value='知识项目';clickLabel('新建项目');`)
-		run(`check(text(mountTarget).includes('项目已新建'),'新建项目失败: '+text(mountTarget));
-var trigger=byAria('请选择项目');check(!!trigger,'项目下拉触发器缺失');
+		vm.Set("testDirectory2", filepath.Join(t.TempDir(), "ws2"))
+		run(`createProject('知识项目', testDirectory);`)
+		run(`var trigger=byAria('请选择项目');check(!!trigger,'项目下拉触发器缺失');
 check(text(trigger).startsWith('知识项目'),'新建后触发器未显示项目名: '+text(trigger));
 check(triggers('请选择项目').length===0,'已有项目时触发器不应再是占位文案');
 var panel=trigger.parent.children[1];check(panel.hidden===true,'新建后下拉面板应保持收起');
@@ -263,7 +298,7 @@ item.onclick();
 check(panel.hidden===true,'选中后面板应收起');
 check(text(mountTarget).includes('项目 ID：'),'选中后没有渲染项目编辑器');`)
 		// 两个项目时才能验证「从面板切到另一个」：面板只列项目项，不再混入占位条目。
-		run(`field('新项目名称').value='知识项目二';clickLabel('新建项目');`)
+		run(`createProject('知识项目二', testDirectory2);`)
 		if list, err := a.Store.ListProjects(true); err != nil || len(list) != 2 {
 			t.Fatalf("项目未通过 UI 落到存储: %+v %v", list, err)
 		} else {

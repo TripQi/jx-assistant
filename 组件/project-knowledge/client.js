@@ -1,4 +1,6 @@
 // 项目登记是实例级用户管理：会话浮窗只引导，不发起任何项目读写请求。
+// 登记本身不在本页重做：挂宿主同一份 JX.projectRegistry 视图（与项目事件页共用），
+// 本页只管项目知识正文与预算。
 // 草稿仅留在当前页面内存（含重挂/切换），不是知识历史或持久备份。
 (function () {
   'use strict';
@@ -22,6 +24,14 @@
     }
     if (data === undefined || data === null) throw new Error('服务器未返回有效 JSON，请稍后重试。');
     return data;
+  }
+  // 项目清单复用宿主登记视图的同一份客户端（JX.projectRegistry.list），
+  // 本页不再自带一套项目读取；未挂登记视图时退回同一 /api/projects 服务。
+  function listProjects() {
+    if (window.JX && window.JX.projectRegistry && typeof window.JX.projectRegistry.list === 'function') {
+      return window.JX.projectRegistry.list();
+    }
+    return api('');
   }
   function node(tag, parent, text, cls) {
     var e = document.createElement(tag);
@@ -85,20 +95,14 @@
     box.onkeydown = function (e) { if (e.key === 'Escape') { list.hidden = true; trigger.setAttribute('aria-expanded', 'false'); trigger.focus(); } };
     return control;
   }
-  function kindPicker(parent, label) {
-    var p = picker(parent, label); p.setOptions([{ value: 'local', label: '本地' }, { value: 'remote', label: '远程', remote: true }]); p.value = 'local'; return p;
-  }
   function time(value) {
     if (!value) return '尚未更新';
     var d = new Date(value);
     return isNaN(d.getTime()) ? String(value) : d.toLocaleString(undefined, { timeZoneName: 'short' });
   }
-  function bindings(project) {
-    return (project.workspaces || []).map(function (w) { return { workspace_kind: w.workspace_kind, display_path: w.display_path }; });
-  }
   function dirty(d) {
-    return d && (d.content !== d.base.content || String(d.budget) !== String(d.base.budget_limit) ||
-      d.name !== d.project.name || JSON.stringify(d.workspaces) !== JSON.stringify(bindings(d.project)));
+    // 只比知识与预算：名称/绑定归宿主登记视图管，不在本页草稿里。
+    return d && (d.content !== d.base.content || String(d.budget) !== String(d.base.budget_limit));
   }
   function mount(el) {
     el.replaceChildren();
@@ -110,7 +114,7 @@
     hosts.forEach(function (h) { if (!h.el.isConnected) { h.stop(); hosts.delete(h); } });
     host.el = el; hosts.add(host);
     var generation = 0, previewSeq = 0, timer, busy = false, loading = false;
-    var projects = [], current = null, preview = null, resolving = 0;
+    var projects = [], current = null, preview = null;
     function alive() { return !disposed && el.isConnected; }
     node('p', el, '短而可靠的项目入场须知：只记录背景和当前有效约束，不是开发日志。秘密和凭据请勿写入。', 'sf-desc');
     node('p', el, '只保留当前正文，不保留历史。保存覆盖后无法由组件恢复；revision 仅用于并发校验。Markdown 导出可作为手动备份。所有改动均使用本页按钮保存，底部全局「保存」不会保存本页草稿。', 'sf-desc');
@@ -119,95 +123,39 @@
     var top = node('div', el); top.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:center';
     var select = picker(top, '请选择项目');
     button(top, '刷新项目列表', function () { refresh(); });
-    var createName = input(el, '新项目名称');
-    node('p', el, '可先在下方选择或输入工作目录，再点击「新建项目」同时绑定；路径留空则仅创建项目。', 'sf-desc');
-    button(el, '新建项目', function () {
-      var name = createName.value.trim();
-      if (!name) return message('请输入项目名称。', true);
-      if (!leave()) return;
-      perform(async function () {
-        var ws = resolvePath.value.trim() ? [{ workspace_kind: resolveKind.value, display_path: resolvePath.value.trim() }] : [];
-        // 先用既有解析接口校验，非法路径不留下一个空项目；实际绑定仍由 PATCH 权威校验。
-        if (ws.length) await api('/resolve', 'POST', ws[0]);
-        var p = await api('', 'POST', { name: name });
-        try {
-          if (ws.length) await api('/' + encodeURIComponent(p.id), 'PATCH', { workspaces: ws, expected_updated_at: p.updated_at });
-        } catch (e) {
-          await refresh(p.id);
-          throw new Error('项目已新建，但目录绑定失败，请在此项目重试保存绑定：' + e.message);
+    // 项目登记不在本页重做：挂宿主同一份 JX.projectRegistry 视图（与项目事件页共用），
+    // 名称/绑定/归档/删除与路径规范化都走同一条服务端路径，不再各写一套再漂移。
+    var registryBox = node('div', el);
+    node('p', registryBox, '项目身份与工作区绑定是全实例唯一的一套：本页直接用宿主登记视图（与项目事件页同一份），不另建第二套登记。', 'sf-desc');
+    var registryHost = node('div', registryBox);
+    registryHost.hidden = true;
+    var registryMounted = false;
+    var registryToggle = button(registryBox, '项目登记 ▸ 展开', function () {
+      registryHost.hidden = !registryHost.hidden;
+      registryToggle.textContent = registryHost.hidden ? '项目登记 ▸ 展开' : '项目登记 ▾ 收起';
+      if (registryHost.hidden || registryMounted) return;
+      if (!(window.JX && window.JX.projectRegistry)) {
+        registryHost.replaceChildren();
+        node('p', registryHost, '宿主未提供项目登记视图，请确认程序为当前版本；本页不另建登记表。', 'sf-desc');
+        return;
+      }
+      window.JX.projectRegistry.mount(registryHost, {
+        onChange: function (list, id) {
+          projects = list || [];
+          var target = id || '';
+          // 登记视图新建/改后要切项目时，先走本页的未保存草稿确认（与下拉切换同一口径）：
+          // 取消就不切项目，草稿按项目留在内存里，切回可继续编辑（复审 N3）。
+          if (target && current && target !== current.project.id && !leave()) {
+            renderOptions(current.project.id);
+            message('登记变更已生效；已保留「' + current.project.name + '」的未保存草稿，可稍后切回继续编辑。');
+            return;
+          }
+          refresh(target);
         }
-        createName.value = '';
-        await refresh(p.id);
-        message(ws.length ? '项目已新建并绑定所选工作目录。' : '项目已新建。');
       });
+      registryMounted = true;
     });
     var editor = node('div', el);
-    var resolveBox = node('div', el, undefined, 'gen-section');
-    node('h4', resolveBox, '检查工作区实际归属');
-    var resolveKind = kindPicker(resolveBox, '工作区类型');
-    var resolvePath = input(resolveBox, '工作目录（可选择或手输绝对路径；远程：user@host:dir、user@host:port:dir；IPv6：user@[2001:db8::1]:2222:/dir）');
-    resolvePath.placeholder = '选择已有目录，或直接输入路径';
-    var directories = picker(resolveBox, '选择已有工作目录');
-    function directoryOptions(remotes) {
-      var items = [], seen = new Set();
-      function add(kind, path) {
-        if (!path || seen.has(kind + ':' + path)) return;
-        seen.add(kind + ':' + path); items.push({ value: String(items.length), label: path, remote: kind === 'remote', kind: kind, path: path });
-      }
-      if (typeof state !== 'undefined') {
-        add('local', state.defaultWs);
-        if (typeof lsGet === 'function') lsGet('jx.wslist', []).forEach(function (p) { add('local', p); });
-        (state.sessions || []).forEach(function (s) { add('local', s.workspace); });
-      }
-      (remotes || []).forEach(function (r) {
-        var host = r.host || ''; if (host.indexOf(':') >= 0 && host[0] !== '[') host = '[' + host + ']';
-        if (host) add('remote', (r.user || 'root') + '@' + host + (r.port && r.port !== 22 ? ':' + r.port : '') + ':' + (r.dir || '/'));
-      });
-      projects.forEach(function (p) { (p.workspaces || []).forEach(function (w) { add(w.workspace_kind, w.display_path); }); });
-      directories.setOptions(items);
-      directories.onchange = function () {
-        var w = items.find(function (x) { return x.value === directories.value; });
-        if (w) { resolveKind.value = w.kind; resolvePath.value = w.path; resolveResult.textContent = '目录已填入，可新建项目并绑定，或添加到当前项目绑定。'; }
-      };
-    }
-    var remoteDirectories = [];
-    async function refreshDirectories() {
-      directoryOptions(remoteDirectories);
-      try {
-        var response = await fetch('/api/remotes', { cache: 'no-store' });
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        var data = await response.json();
-        if (!alive()) return;
-        remoteDirectories = data.remotes || []; directoryOptions(remoteDirectories); lock();
-      } catch (e) { if (alive()) message('远程目录列表读取失败：' + e.message + '；仍可选择本地目录或手输。', true); }
-    }
-    button(resolveBox, '刷新可选目录', refreshDirectories);
-    button(resolveBox, '添加工作目录', async function () {
-      if (typeof isNarrow === 'function' && isNarrow()) return message(typeof NARROW_WS_ADD_NOTICE !== 'undefined' ? NARROW_WS_ADD_NOTICE : '请在电脑宽屏上选择目录，或手动输入。', true);
-      if (typeof pickWorkFolder !== 'function') return message('当前环境无法打开目录选择框，请手动输入。', true);
-      var path = await pickWorkFolder(); if (!alive() || !path) return;
-      if (typeof rememberWorkspace === 'function') rememberWorkspace(path);
-      resolveKind.value = 'local'; resolvePath.value = path; directoryOptions(remoteDirectories); lock();
-    });
-    button(resolveBox, '添加远程工作目录（手动填写）', function () { resolveKind.value = 'remote'; resolvePath.focus(); message('请输入 user@host:dir 或 user@host:port:dir；IPv6 主机请加方括号。不修改聊天的远程挂载。'); });
-    button(resolveBox, '添加到当前项目绑定', function () {
-      if (!current || current.project.archived) return message('请先选择一个使用中的项目。', true);
-      var path = resolvePath.value.trim(); if (!path) return message('请输入或选择工作目录。', true);
-      if (!current.workspaces.some(function (w) { return w.workspace_kind === resolveKind.value && w.display_path === path; })) current.workspaces.push({ workspace_kind: resolveKind.value, display_path: path });
-      renderEditor(); message('目录已加入绑定草稿，请点击「保存名称与绑定」。');
-    });
-    var resolveResult = node('p', resolveBox, '', 'sf-desc');
-    button(resolveBox, '解析归属', async function () {
-      var path = resolvePath.value.trim(), kind = resolveKind.value, seq = ++resolving;
-      if (!path) { resolveResult.textContent = '请输入工作区路径。'; return; }
-      resolveResult.textContent = '解析中…';
-      try {
-        var result = await api('/resolve', 'POST', { workspace_kind: kind, display_path: path });
-        if (!alive() || seq !== resolving || path !== resolvePath.value.trim() || kind !== resolveKind.value) return;
-        resolveResult.textContent = result.project ? '实际归属：' + result.project.name + ' / ' + result.project.id + (result.project.archived ? '（已归档，不回退到外层项目）' : '（使用中）') : '未登记：不会回退到其他项目。';
-      } catch (e) { if (alive() && seq === resolving) resolveResult.textContent = '解析失败：' + e.message; }
-    });
-    node('p', resolveBox, '嵌套绑定按最长目录匹配；本地与远程分别登记。更具体的归档绑定不会回退。目录搬迁只需改绑定；重绑不迁移旧事件。', 'sf-desc');
 
     function leave() {
       return !dirty(current) || window.confirm('当前项目有未保存改动。是否离开？草稿暂留本页面内存，返回该项目可继续编辑；关闭页面会丢失。');
@@ -224,17 +172,16 @@
       finally { busy = false; if (alive()) lock(); }
     }
     function renderOptions(id) {
-      select.setOptions(projects.map(function (p) { return { value: p.id, label: p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id }; }), '还没有项目，可在下方「新项目名称」处新建。');
+      select.setOptions(projects.map(function (p) { return { value: p.id, label: p.name + (p.archived ? '（已归档）' : '') + ' · ' + p.id }; }), '还没有项目：展开上方「项目登记」新建并绑定工作区（与项目事件页同一份登记）。');
       select.value = id || '';
     }
     async function refresh(id) {
       var seq = ++generation; loading = true; lock();
       try {
-        var list = await api('');
+        var list = await listProjects();
         if (!alive() || seq !== generation) return;
         if (!Array.isArray(list)) throw new Error('项目列表格式不正确');
         projects = list;
-        refreshDirectories();
         var chosen = id || (current && current.project.id) || '';
         renderOptions(chosen);
         if (id) await choose(id);
@@ -265,7 +212,7 @@
         if (!p) throw new Error('项目已不在列表中，请刷新');
         var d = drafts.get(id);
         if (!d || !dirty(d)) {
-          d = { project: p, base: k, name: p.name, workspaces: bindings(p), content: k.content || '', budget: String(k.budget_limit), conflict: null };
+          d = { project: p, base: k, content: k.content || '', budget: String(k.budget_limit), conflict: null };
           drafts.set(id, d);
         } else {
           d.project.archived = p.archived;
@@ -302,52 +249,7 @@
       var d = current, p = d.project;
       node('h4', editor, p.name + (p.archived ? '（已归档 · 只读）' : ''));
       node('p', editor, '项目 ID：' + p.id + ' · 创建：' + time(p.created_at) + ' · 项目更新：' + time(p.updated_at), 'sf-desc');
-      var manage = node('div', editor);
-      if (p.archived) manage.setAttribute('data-pk-readonly', '');
-      var name = input(manage, '项目名称'); name.value = d.name; name.oninput = function () { d.name = name.value; };
-      node('p', manage, '绑定路径（必须是绝对路径；远程使用 user@host:dir 或 user@host:port:dir）。删除一行仅解除绑定，不删除目录。', 'sf-desc');
-      var rows = node('div', manage);
-      function drawRows() {
-        rows.replaceChildren();
-        d.workspaces.forEach(function (w, i) {
-          var row = node('div', rows); row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap';
-          var kind = kindPicker(row, '绑定类型');
-          kind.value = w.workspace_kind; kind.onchange = function () { w.workspace_kind = kind.value; };
-          var path = node('input', row, undefined, 'pf-input'); path.style.cssText = 'flex:1;min-width:0;max-width:100%'; path.value = w.display_path; path.setAttribute('aria-label', '绑定绝对路径'); path.oninput = function () { w.display_path = path.value; };
-          button(row, '解除此绑定', function () { d.workspaces.splice(i, 1); drawRows(); lock(); });
-        });
-      }
-      drawRows();
-      button(manage, '添加绑定', function () { d.workspaces.push({ workspace_kind: 'local', display_path: '' }); drawRows(); lock(); });
-      button(manage, '保存名称与绑定', function () {
-        perform(async function () {
-          var newName = d.name.trim(); if (!newName) throw new Error('项目名称不能为空');
-          var ws = d.workspaces.map(function (w) { if (!w.display_path.trim()) throw new Error('绑定路径不能为空'); return { workspace_kind: w.workspace_kind, display_path: w.display_path.trim() }; });
-          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { name: newName, workspaces: ws, expected_updated_at: p.updated_at });
-          d.project = saved; d.name = saved.name; d.workspaces = bindings(saved);
-          projects = projects.map(function (x) { return x.id === saved.id ? saved : x; });
-          renderOptions(saved.id); renderEditor(); message('名称与绑定已保存；知识正文请单独保存。');
-        });
-      });
-      var actions = node('div', editor); actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:12px 0';
-      button(actions, p.archived ? '恢复使用' : '归档项目', function () {
-        if (!leave()) return;
-        if (!window.confirm(p.archived ? '恢复后该项目可正常注入和维护，确认恢复？' : '归档后停止自动注入并只读保留，不中断正在运行的会话。确认归档？')) return;
-        perform(async function () {
-          var saved = await api('/' + encodeURIComponent(p.id), 'PATCH', { archived: !p.archived, expected_updated_at: p.updated_at });
-          d.project = saved;
-          projects = projects.map(function (x) { return x.id === saved.id ? saved : x; }); renderOptions(saved.id); renderEditor();
-          message(saved.archived ? '已归档，未保存草稿仍留在内存；恢复使用后可继续编辑。' : '已恢复使用。');
-        });
-      });
-      button(actions, '永久删除项目…', function () {
-        if (!window.confirm('永久删除「' + p.name + '」？将删除项目、绑定、知识、项目事件及关联，无法恢复；不会删除来源会话、代码、附件或工作区文件。')) return;
-        if (window.prompt('为确认不可恢复的删除，请输入项目名称：', '') !== p.name) return message('未匹配项目名称，已取消删除。');
-        perform(async function () {
-          await api('/' + encodeURIComponent(p.id), 'DELETE', { confirm: true });
-          drafts.delete(p.id); current = null; editor.replaceChildren(); await refresh(); message('项目已永久删除，来源会话和工作区文件不受影响。');
-        });
-      });
+      if (p.archived) node('p', editor, '项目已归档（只读）：名称、工作区绑定、归档与删除请在上方「项目登记」里由用户处理；恢复后可继续维护知识正文。', 'sf-desc');
       node('p', editor, '知识 revision：' + d.base.revision + ' · 更新时间：' + time(d.base.updated_at) + (dirty(d) ? ' · 有未保存草稿' : ''), 'sf-desc');
       var contentBox = node('div', editor);
       if (p.archived) contentBox.setAttribute('data-pk-readonly', '');
@@ -379,11 +281,11 @@
         perform(async function () {
           // 成功读到完整快照后才丢草稿，网络失败不吞掉用户输入。
           var fresh = await api(knowledgePath(d));
-          var list = await api('');
+          var list = await listProjects();
           var project = list.find(function (x) { return x.id === p.id; });
           if (!project) throw new Error('项目已删除，请先导出草稿');
           drafts.delete(p.id); projects = list;
-          current = { project: project, base: fresh, name: project.name, workspaces: bindings(project), content: fresh.content || '', budget: String(fresh.budget_limit), conflict: null };
+          current = { project: project, base: fresh, content: fresh.content || '', budget: String(fresh.budget_limit), conflict: null };
           drafts.set(p.id, current); renderOptions(p.id); renderEditor(); message('已取消未保存改动，并读取最新内容。');
         });
       });
@@ -402,7 +304,7 @@
       button(editor, '导出当前正文草稿 .md', function () {
         var blob = new Blob([d.content], { type: 'text/markdown;charset=utf-8' });
         var url = URL.createObjectURL(blob), a = node('a', document.body);
-        a.href = url; a.download = (d.name || p.id).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) + '.md'; a.click(); a.remove();
+        a.href = url; a.download = (p.name || p.id).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) + '.md'; a.click(); a.remove();
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
         message('已导出当前正文草稿（不含项目绑定、额度或来源会话）。');
       });

@@ -1,0 +1,170 @@
+{
+  "id": "project-events",
+  "name": "项目事件",
+  "version": "1.0.0",
+  "description": "跨项目大目标索引 → 关键推进时间线 → 来源会话/消息。只存一句目标与关键事实，不复制会话正文；严格按需分层读取（总览/单事件/记录/来源），单项目可直查。项目身份与工作区绑定复用项目知识库的同一套登记。",
+  "client": {"js": "client.js"},
+  "capabilities": [
+    {
+      "name": "project_events_overview",
+      "description": "跨项目总览：每个已登记项目一行，给未结束/已完成/取消计数与最多 3 个目标概况预览。项目分页与事件分页相互独立——事件多的项目不会挤掉别的项目；首页不是全量。项目事件组件自己的列表入口，不依赖项目知识库组件是否开启。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
+      "writes": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_keyword": {"type": "string", "description": "名称、ID 或绑定路径关键词"},
+          "event_keyword": {"type": "string", "description": "标题/概况关键词（同时作用于计数与预览）"},
+          "scope": {"type": "string", "enum": ["active", "history", "all"], "description": "active=未结束（默认）/history=已完成与取消/all=全部"},
+          "status": {"type": "string", "enum": ["discussing", "processing", "awaiting", "paused", "done", "cancelled"], "description": "单状态筛选，覆盖 scope 的状态集合"},
+          "include_archived": {"type": "boolean", "description": "是否包含已归档项目（只读）"},
+          "project_limit": {"type": "integer", "description": "本项目分页条数 1—40"},
+          "project_cursor": {"type": "string", "description": "上一页返回的 next_project_cursor"}
+        }
+      }
+    },
+    {
+      "name": "project_events_query",
+      "description": "单项目目标列表（标题与概况层），项目必须显式给出。支持状态/关键词/修改时间/绑定会话筛选，游标翻页并回报总数、已显示与剩余。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
+      "writes": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {"type": "string", "description": "项目ID；普通会话可省略（只能是自身绑定项目）"},
+          "scope": {"type": "string", "enum": ["active", "history", "all"], "description": "缺省 active"},
+          "status": {"type": "string", "description": "单状态筛选"},
+          "keyword": {"type": "string", "description": "标题/概况关键词"},
+          "session_id": {"type": "string", "description": "找出把该会话作为来源的目标"},
+          "updated_from": {"type": "string", "description": "最后修改时间下界（RFC3339，含）"},
+          "updated_to": {"type": "string", "description": "最后修改时间上界（RFC3339，不含）"},
+          "limit": {"type": "integer", "description": "1—40"},
+          "cursor": {"type": "string", "description": "上一页 next_cursor"}
+        }
+      }
+    },
+    {
+      "name": "project_event_get",
+      "description": "读单个目标的当前概况与 revision（不自动展开时间线）。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
+      "writes": false,
+      "parameters": {
+        "type": "object",
+        "properties": {"event_id": {"type": "string", "description": "目标ID"}},
+        "required": ["event_id"]
+      }
+    },
+    {
+      "name": "project_event_records_query",
+      "description": "读一个目标的关键推进时间线（每条一句关键事实），按事实时间正序分页；事实时间未明确的记录标注为记录时间。每条记录带最多 3 个来源入口。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
+      "writes": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {"type": "string", "description": "目标ID"},
+          "kind": {"type": "string", "enum": ["plan", "milestone", "issue", "validation", "blocker", "acceptance", "other"], "description": "记录类型筛选"},
+          "keyword": {"type": "string", "description": "关键事实正文关键词"},
+          "occurred_from": {"type": "string", "description": "事实时间下界（RFC3339，含）；只看已知事实时间的记录"},
+          "occurred_to": {"type": "string", "description": "事实时间上界（RFC3339，不含）"},
+          "direction": {"type": "string", "enum": ["older", "newer"], "description": "older=向过去翻（默认）/newer=向后"},
+          "limit": {"type": "integer", "description": "1—40"},
+          "cursor": {"type": "string", "description": "上一页 next_cursor / newer_cursor"}
+        },
+        "required": ["event_id"]
+      }
+    },
+    {
+      "name": "project_event_sources_query",
+      "description": "读一条推进记录绑定的来源会话/消息（会话ID、标题、消息位置、状态），不返回消息正文。指定 source_id 时定点复核那一条的正文指纹；未复核不等于原文未变。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
+      "writes": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "record_id": {"type": "string", "description": "推进记录ID"},
+          "source_id": {"type": "string", "description": "可选：只复核这一条来源的正文指纹"},
+          "limit": {"type": "integer", "description": "1—40"},
+          "cursor": {"type": "string", "description": "上一页 next_cursor"}
+        },
+        "required": ["record_id"]
+      }
+    },
+    {
+      "name": "project_event_create",
+      "description": "在项目里新建大目标。标题、概况、状态各自独立预算（80/240 单元），超限回执指出已用/上限并给精简方向，不静默截断。非讨论中状态必须同事务附一条有依据的关键事实；AI 的事实必须给出实际依据会话（sources 必填），用户设置页录入的可以无来源。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
+      "writes": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_id": {"type": "string", "description": "项目ID；普通会话只能是自身绑定项目"},
+          "title": {"type": "string", "description": "目标短语，一句话"},
+          "summary": {"type": "string", "description": "当前概况，一句话"},
+          "status": {"type": "string", "enum": ["discussing", "processing", "awaiting", "paused", "done", "cancelled"], "description": "缺省 discussing"},
+          "create_key": {"type": "string", "description": "可选：项目内唯一幂等键，重试不会建出两个目标"},
+          "record": {"type": "object", "description": "可选：同事务附一条关键事实 {kind,text,occurred_at,client_key,sources[]}"}
+        },
+        "required": ["title", "summary"]
+      }
+    },
+    {
+      "name": "project_event_update",
+      "description": "按 expected_revision 修改目标标题/概况/状态，可选同事务附一条关键事实。只有状态发生实际变化（以及直接创建非讨论中事件）才要求事实；仅改标题或概况、哪怕当前状态非讨论中，也不强制补事实。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
+      "writes": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {"type": "string", "description": "目标ID"},
+          "expected_revision": {"type": "integer", "description": "刚读取的 event revision"},
+          "title": {"type": "string", "description": "新标题"},
+          "summary": {"type": "string", "description": "新概况"},
+          "status": {"type": "string", "description": "新状态"},
+          "record": {"type": "object", "description": "可选：同事务追加的关键事实"}
+        },
+        "required": ["event_id", "expected_revision"]
+      }
+    },
+    {
+      "name": "project_event_record_add",
+      "description": "向目标时间线追加一条关键事实（一句、单行），可同时显式更新标题/概况/状态；client_key 必填，重试不重复追加（同键同载荷返回已提交结果，父 revision 后来前进也不误判失败）。AI 必须给出至少一条实际依据会话；用户设置页可记录无来源事实。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
+      "writes": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {"type": "string", "description": "目标ID"},
+          "expected_event_revision": {"type": "integer", "description": "刚读取的 event revision"},
+          "client_key": {"type": "string", "description": "事件内唯一幂等键（重试复用同一个）"},
+          "kind": {"type": "string", "enum": ["plan", "milestone", "issue", "validation", "blocker", "acceptance", "other"], "description": "事实类型"},
+          "text": {"type": "string", "description": "一句关键事实（单行、不分号拼接）"},
+          "occurred_at": {"type": "string", "description": "事实发生时刻（RFC3339 带时区）；不确定就留空"},
+          "sources": {"type": "array", "description": "必填（至少一条）：[{session_id,message_seq}] 本次事实的依据会话与消息位置；不能绑未读的转述或编造位置"},
+          "event": {"type": "object", "description": "可选：同事务 patch {title?,summary?,status?}"}
+        },
+        "required": ["event_id", "expected_event_revision", "client_key", "text"]
+      }
+    },
+    {
+      "name": "project_event_record_update",
+      "description": "原位更正一条推进记录（不保留旧正文历史）并可增删来源；记录与父事件 revision 一并递增。AI 记录不能通过移除来源变成无来源记录（要作废请追加新事实或由用户在设置页删除）。",
+      "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
+      "writes": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "record_id": {"type": "string", "description": "推进记录ID"},
+          "expected_record_revision": {"type": "integer", "description": "刚读取的记录 revision"},
+          "expected_event_revision": {"type": "integer", "description": "刚读取的事件 revision"},
+          "text": {"type": "string", "description": "更正后的关键事实"},
+          "kind": {"type": "string", "description": "更正后的类型"},
+          "occurred_at": {"type": "string", "description": "更正后的事实时刻（空串＝清为未明确）"},
+          "sources_add": {"type": "array", "description": "[{session_id,message_seq}]"},
+          "sources_remove": {"type": "array", "description": "要解绑的来源 source_id 列表"}
+        },
+        "required": ["record_id", "expected_record_revision", "expected_event_revision"]
+      }
+    }
+  ]
+}

@@ -25,7 +25,7 @@
     },
     {
       "name": "project_events_query",
-      "description": "单项目目标列表（标题与概况层），项目必须显式给出。支持状态/关键词/修改时间/绑定会话筛选，游标翻页并回报总数、已显示与剩余。",
+      "description": "单项目目标列表（标题与概况层），项目必须显式给出。支持状态/关键词/修改时间/绑定会话筛选，游标翻页并回报总数、已显示与剩余。项目进度问题先查目标，不凭记忆答。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create", "aux"],
       "writes": false,
       "parameters": {
@@ -92,7 +92,7 @@
     },
     {
       "name": "project_event_create",
-      "description": "在项目里新建大目标。标题、概况、状态各自独立预算（80/240 单元），超限回执指出已用/上限并给精简方向，不静默截断。非讨论中状态必须同事务附一条有依据的关键事实；AI 的事实必须给出实际依据会话（sources 必填），用户设置页录入的可以无来源。",
+      "description": "在项目里新建大目标。承接新任务先查已有目标，能沿用就不新建。标题、概况、状态各自独立预算（80/240 单元），超限回执指出已用/上限并给精简方向，不静默截断。非讨论中状态必须同事务附一条有依据的关键事实；AI 的事实必须给出实际依据会话（sources 必填），用户设置页录入的可以无来源。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
       "writes": true,
       "parameters": {
@@ -128,7 +128,7 @@
     },
     {
       "name": "project_event_record_add",
-      "description": "向目标时间线追加一条关键事实（一句、单行），可同时显式更新标题/概况/状态；client_key 必填，重试不重复追加（同键同载荷返回已提交结果，父 revision 后来前进也不误判失败）。AI 必须给出至少一条实际依据会话；用户设置页可记录无来源事实。",
+      "description": "向目标时间线追加一条关键事实（一句、单行），只记有依据且不重复的事实，按事实时间判断，晚到旧事实不倒退概况；任务完成不等于用户验收。可同时显式更新标题/概况/状态；client_key 必填，重试不重复追加（同键同载荷返回已提交结果，父 revision 后来前进也不误判失败）。AI 必须给出至少一条实际依据会话；用户设置页可记录无来源事实。",
       "modes": ["assistant", "task", "office", "coding", "beginner-coding", "skill-create"],
       "writes": true,
       "parameters": {

@@ -240,7 +240,7 @@ func (r *MCPServersRegistry) Upsert(e mcpServerEntry) error {
 			break
 		}
 	}
-	r.removeClientLocked(e.Name)
+	old := r.takeClientLocked(e.Name)
 	out := r.file.Servers[:0]
 	for _, s := range r.file.Servers {
 		if s.Name != e.Name {
@@ -254,6 +254,7 @@ func (r *MCPServersRegistry) Upsert(e mcpServerEntry) error {
 	r.file.Servers = out
 	err := r.save()
 	r.mu.Unlock()
+	shutdownMCPClients(old) // 锁外关闭：旧握手可能仍在进行（shutdown 会先取消它）
 	if err != nil {
 		return err
 	}
@@ -276,10 +277,11 @@ func (r *MCPServersRegistry) Remove(name string) error {
 		out = append(out, s)
 	}
 	r.file.Servers = out
-	r.removeClientLocked(name)
+	old := r.takeClientLocked(name)
 	delete(r.lastErr, name)
 	err := r.save()
 	r.mu.Unlock()
+	shutdownMCPClients(old)
 	if err != nil {
 		return err
 	}
@@ -299,11 +301,13 @@ func (r *MCPServersRegistry) SetEnabled(name string, on bool) error {
 			hit = s
 		}
 	}
+	var old *mcpClient
 	if !on {
-		r.removeClientLocked(name)
+		old = r.takeClientLocked(name)
 	}
 	err := r.save()
 	r.mu.Unlock()
+	shutdownMCPClients(old)
 	if err != nil {
 		return err
 	}
@@ -316,11 +320,25 @@ func (r *MCPServersRegistry) SetEnabled(name string, on bool) error {
 	return nil
 }
 
-// removeClientLocked 关闭并丢弃一条连接（调用方持锁）。
-func (r *MCPServersRegistry) removeClientLocked(name string) {
-	if c, ok := r.clients[name]; ok {
-		c.shutdown()
-		delete(r.clients, name)
+// takeClientLocked 摘除一条连接并返回它（调用方持锁）。真正的关闭必须在锁外做：
+// c.mu 可能被进行中的握手长期占用（stdio 首帧 120s、HTTP 请求 120s），在 r.mu
+// 里等它会连带卡死环境快照、设置页列表与所有连接器调用。
+func (r *MCPServersRegistry) takeClientLocked(name string) *mcpClient {
+	c, ok := r.clients[name]
+	if !ok {
+		return nil
+	}
+	delete(r.clients, name)
+	return c
+}
+
+// shutdownMCPClients 在注册表锁外关闭摘下来的连接。shutdown 会先取消进行中的
+// 握手（见 mcpclient.go），因此不会把锁卡顿变成同步长等。
+func shutdownMCPClients(cs ...*mcpClient) {
+	for _, c := range cs {
+		if c != nil {
+			c.shutdown()
+		}
 	}
 }
 
@@ -349,44 +367,62 @@ func (r *MCPServersRegistry) connectAsync(name string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := r.connectOne(ctx, name); err != nil {
-			r.mu.Lock()
-			r.lastErr[name] = err.Error()
-			r.mu.Unlock()
+		c, err := r.connectOne(ctx, name)
+		if !r.noteConnectResult(name, c, err) {
+			return // 实例已摘除或已被同名新定义替换：迟到结果不得回填当前状态
+		}
+		if err != nil {
 			log.Printf("[MCP] %s 启动失败: %v", name, err)
 		} else {
-			r.mu.Lock()
-			delete(r.lastErr, name)
-			r.mu.Unlock()
 			log.Printf("[MCP] %s 已连接", name)
 		}
 	}()
 }
 
-// connectOne 建立连接并完成握手（锁外执行；重入安全）。
-func (r *MCPServersRegistry) connectOne(ctx context.Context, name string) error {
+// noteConnectResult 记录一次连接结果，仅在名字当前仍对应同一个连接实例时生效：
+// 同名替换后旧握手的迟到结果不得污染新实例的 lastErr，已摘除的连接器也不得
+// 留下幽灵错误。名字存在不等于实例相等，所以按指针比。
+func (r *MCPServersRegistry) noteConnectResult(name string, c *mcpClient, err error) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := r.clients[name]; !ok || cur != c {
+		return false
+	}
+	if err != nil {
+		r.lastErr[name] = err.Error()
+		return true
+	}
+	delete(r.lastErr, name)
+	return true
+}
+
+// connectOne 建立连接并完成握手（锁外执行；重入安全）。返回本次使用的实例，
+// 便于调用方按实例身份判定结果归属。
+func (r *MCPServersRegistry) connectOne(ctx context.Context, name string) (*mcpClient, error) {
 	r.mu.Lock()
 	e, ok := r.entryOf(name)
 	if !ok || !e.Enabled {
 		r.mu.Unlock()
-		return fmt.Errorf("MCP 服务器 %s 不存在或未启用", name)
+		return nil, fmt.Errorf("MCP 服务器 %s 不存在或未启用", name)
 	}
 	c := r.clientOf(e)
 	r.mu.Unlock()
 	if err := c.start(ctx); err != nil {
-		return err
+		return c, err
 	}
-	return nil
+	return c, nil
 }
 
 // ShutdownAll 关闭全部连接（进程退出前调用；顶层 kill-on-close Job Object
 // 兜底清场，本方法目前无调用方，留作优雅退出的挂点）。
 func (r *MCPServersRegistry) ShutdownAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	cs := make([]*mcpClient, 0, len(r.clients))
 	for name := range r.clients {
-		r.removeClientLocked(name)
+		cs = append(cs, r.takeClientLocked(name))
 	}
+	r.mu.Unlock()
+	shutdownMCPClients(cs...)
 }
 
 // Test 连通性测试：连上并拉工具清单，返回工具名与描述（已连接则直接回）。
@@ -404,14 +440,10 @@ func (r *MCPServersRegistry) Test(name string) ([]mcpToolDef, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := c.start(ctx); err != nil {
-			r.mu.Lock()
-			r.lastErr[name] = err.Error()
-			r.mu.Unlock()
+			r.noteConnectResult(name, c, err)
 			return nil, err
 		}
-		r.mu.Lock()
-		delete(r.lastErr, name)
-		r.mu.Unlock()
+		r.noteConnectResult(name, c, nil)
 	}
 	c.mu.Lock()
 	tools := append([]mcpToolDef(nil), c.tools...)
@@ -421,9 +453,12 @@ func (r *MCPServersRegistry) Test(name string) ([]mcpToolDef, error) {
 
 // List 全部服务器的状态（按名排序，含连通信息）。
 func (r *MCPServersRegistry) List() []mcpServerStatus {
+	type row struct {
+		st mcpServerStatus
+		c  *mcpClient
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]mcpServerStatus, 0, len(r.file.Servers))
+	rows := make([]row, 0, len(r.file.Servers))
 	for _, s := range r.file.Servers {
 		st := mcpServerStatus{
 			Name: s.Name, Description: s.Description, Enabled: s.Enabled,
@@ -433,7 +468,14 @@ func (r *MCPServersRegistry) List() []mcpServerStatus {
 		if st.Type == "" {
 			st.Type = "stdio"
 		}
-		if c, ok := r.clients[s.Name]; ok {
+		rows = append(rows, row{st: st, c: r.clients[s.Name]})
+	}
+	r.mu.Unlock()
+	// 连通信息在注册表锁外读：c.mu 可能被握手占用，不能连带扣着注册表锁。
+	out := make([]mcpServerStatus, 0, len(rows))
+	for _, it := range rows {
+		st, c := it.st, it.c
+		if c != nil {
 			c.mu.Lock()
 			if c.started {
 				st.Connected = true
@@ -470,9 +512,12 @@ const mcpConnectorBodyMax = 8000
 // 模型看不到就不会去试（软性管控）；真正的拦截在 mcp_read_connector /
 // mcp_call_tool 里走 requireCapability（硬性）。sess 为 nil 时按"没有任何能力"处理。
 func (r *MCPServersRegistry) PromptBlock(sess *SessionMeta) string {
+	type item struct {
+		e *mcpServerEntry
+		c *mcpClient
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	var b strings.Builder
+	items := make([]item, 0, len(r.file.Servers))
 	for _, s := range r.file.Servers {
 		if !s.Enabled {
 			continue
@@ -480,16 +525,22 @@ func (r *MCPServersRegistry) PromptBlock(sess *SessionMeta) string {
 		if s.RequiresCap != "" && (sess == nil || !hasCapability(sess, s.RequiresCap)) {
 			continue
 		}
-		b.WriteString("  - " + s.Name)
-		if s.Description != "" {
-			b.WriteString("：" + s.Description)
+		items = append(items, item{e: s, c: r.clients[s.Name]})
+	}
+	r.mu.Unlock()
+	// 工具数在注册表锁外读（c.mu 可能被握手占用）；清单顺序仍按定义顺序。
+	var b strings.Builder
+	for _, it := range items {
+		b.WriteString("  - " + it.e.Name)
+		if it.e.Description != "" {
+			b.WriteString("：" + it.e.Description)
 		}
-		if c, ok := r.clients[s.Name]; ok {
-			c.mu.Lock()
-			if c.started {
-				b.WriteString(fmt.Sprintf("——%d 个工具", len(c.tools)))
+		if it.c != nil {
+			it.c.mu.Lock()
+			if it.c.started {
+				b.WriteString(fmt.Sprintf("——%d 个工具", len(it.c.tools)))
 			}
-			c.mu.Unlock()
+			it.c.mu.Unlock()
 		}
 		b.WriteString("\n")
 	}
@@ -513,20 +564,17 @@ func (r *MCPServersRegistry) ReadConnector(ctx context.Context, name string) (st
 		return "", fmt.Errorf("MCP 连接器 %s 已停用（设置 → MCP 里可开启）", name)
 	}
 	c := r.clientOf(e)
+	r.mu.Unlock()
+	// c.mu 在注册表锁外取：握手期间它一直被占用，在 r.mu 里等会连带卡住环境快照。
 	c.mu.Lock()
 	started := c.started
 	c.mu.Unlock()
-	r.mu.Unlock()
 	if !started {
 		if err := c.start(ctx); err != nil {
-			r.mu.Lock()
-			r.lastErr[name] = err.Error()
-			r.mu.Unlock()
+			r.noteConnectResult(name, c, err)
 			return "", fmt.Errorf("连接器 %s 连接失败: %w", name, err)
 		}
-		r.mu.Lock()
-		delete(r.lastErr, name)
-		r.mu.Unlock()
+		r.noteConnectResult(name, c, nil)
 	}
 	c.mu.Lock()
 	tools := append([]mcpToolDef(nil), c.tools...)
@@ -699,11 +747,12 @@ func (r *MCPServersRegistry) HasSource(source string) bool {
 func (r *MCPServersRegistry) RemoveBySource(source string) []string {
 	r.mu.Lock()
 	names := []string{}
+	old := []*mcpClient{}
 	out := r.file.Servers[:0]
 	for _, s := range r.file.Servers {
 		if s.Source == source {
 			names = append(names, s.Name)
-			r.removeClientLocked(s.Name)
+			old = append(old, r.takeClientLocked(s.Name))
 			delete(r.lastErr, s.Name)
 			continue
 		}
@@ -712,6 +761,7 @@ func (r *MCPServersRegistry) RemoveBySource(source string) []string {
 	r.file.Servers = out
 	err := r.save()
 	r.mu.Unlock()
+	shutdownMCPClients(old...) // 锁外关闭：即使某个连接正在握手也不阻塞注册表
 	if err != nil {
 		log.Printf("[MCP] 市场卸载落盘失败（连接器已移除）: %v", err)
 	}

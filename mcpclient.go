@@ -79,6 +79,18 @@ type mcpClient struct {
 	httpSID string // streamable HTTP 的会话 id（Mcp-Session-Id）
 	nextID  int64
 	tools   []mcpToolDef
+
+	// startMu 串行化握手：同一时刻至多一个 start 在进行，中断句柄归属确定。
+	startMu sync.Mutex
+
+	// lifeMu 保护 cancel/closed。shutdown 必须在**不持 c.mu** 的情况下就能打断
+	// 进行中的握手（它整段持 c.mu），否则摘除一条正在握手的连接要等满读超时。
+	lifeMu sync.Mutex
+	cancel context.CancelFunc
+	closed bool
+
+	lines    chan string   // stdio 读行通道（见 readLoop）
+	readDone chan struct{} // 关闭连接时 close：让读行 goroutine 退出
 }
 
 // jsonrpcRequest / jsonrpcResponse 是 JSON-RPC 2.0 的帧。
@@ -95,7 +107,28 @@ type jsonrpcRequest struct {
 }
 
 // start 建立连接并完成 initialize 握手 + tools/list（幂等；已启动直接返回）。
+// 握手全程持 c.mu（协议字段只此一处写），所以 shutdown 不得直接等它：先把本次
+// 握手的 cancel 登记出去，shutdown 取消后实际 I/O（stdio 读、HTTP 请求）立刻返回。
 func (c *mcpClient) start(ctx context.Context) error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.lifeMu.Lock()
+	if c.closed { // 已摘除的连接不再拉起进程（摘除后要重新连接请新建实例）
+		c.lifeMu.Unlock()
+		return fmt.Errorf("MCP %s 连接已关闭", c.fullName)
+	}
+	c.cancel = cancel
+	c.lifeMu.Unlock()
+	defer func() {
+		c.lifeMu.Lock()
+		c.cancel = nil
+		c.lifeMu.Unlock()
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.started {
@@ -152,7 +185,30 @@ func (c *mcpClient) connect(ctx context.Context) error {
 	c.stdinW = stdin
 	c.stdinC = stdin
 	c.stdout = bufio.NewReaderSize(stdout, 1<<20)
+	c.lines = make(chan string, 16)
+	c.readDone = make(chan struct{})
+	go c.readLoop(c.stdout, c.lines, c.readDone)
 	return nil
+}
+
+// readLoop 持续把 stdio 行送进 lines 通道，连接断开即 close(lines)。
+// 读必须放在旁路 goroutine：readResponse 才能同时盯 ctx 与超时，shutdown 的
+// 取消也就能立刻打断卡住的握手（原来直接阻塞在 ReadString 上，一卡就 120s）。
+func (c *mcpClient) readLoop(stdout *bufio.Reader, lines chan string, done <-chan struct{}) {
+	defer close(lines)
+	for {
+		line, err := stdout.ReadString('\n')
+		if line != "" {
+			select {
+			case lines <- line:
+			case <-done:
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // initialize 完成 MCP 握手（initialize → initialized 通知）。
@@ -295,37 +351,49 @@ func (c *mcpClient) rpc(ctx context.Context, method string, params any) (any, er
 	if _, err := fmt.Fprintln(c.stdinW, line); err != nil {
 		return nil, fmt.Errorf("MCP %s 写入失败: %w", c.fullName, err)
 	}
-	return c.readResponse(id)
+	return c.readResponse(ctx, id)
 }
 
 // readResponse 读 stdio 行直到拿到匹配 id 的响应（跳过服务器的 notification）。
-func (c *mcpClient) readResponse(id int64) (any, error) {
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		line, err := c.stdout.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("MCP %s 连接断开: %w", c.fullName, err)
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var resp jsonrpcRequest
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			continue // 非 JSON 行（服务器日志混入等）：跳过
-		}
-		if resp.ID == 0 || resp.Method != "" {
-			continue // notification / 服务器发起的请求：本客户端只做应答方以外的角色
-		}
-		if resp.ID != id {
-			continue
-		}
-		if resp.Error != nil {
-			return nil, fmt.Errorf("MCP %s 错误 %d: %s", c.fullName, resp.Error.Code, resp.Error.Message)
-		}
-		return resp.Result, nil
+// 读行由 readLoop 旁路送出，本函数只等行、ctx 与总超时：握手被取消时能立即
+// 返回，不再死等服务器的首帧。
+func (c *mcpClient) readResponse(ctx context.Context, id int64) (any, error) {
+	lines := c.lines // 取本地引用：shutdownLocked 会把字段清空，通道本身仍会关闭
+	if lines == nil {
+		return nil, fmt.Errorf("MCP %s 连接已关闭", c.fullName)
 	}
-	return nil, fmt.Errorf("MCP %s 响应超时", c.fullName)
+	timeout := time.NewTimer(120 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("MCP %s 等待响应被取消: %w", c.fullName, ctx.Err())
+		case <-timeout.C:
+			return nil, fmt.Errorf("MCP %s 响应超时", c.fullName)
+		case raw, ok := <-lines:
+			if !ok {
+				return nil, fmt.Errorf("MCP %s 连接断开", c.fullName)
+			}
+			line := strings.TrimSpace(raw)
+			if line == "" {
+				continue
+			}
+			var resp jsonrpcRequest
+			if err := json.Unmarshal([]byte(line), &resp); err != nil {
+				continue // 非 JSON 行（服务器日志混入等）：跳过
+			}
+			if resp.ID == 0 || resp.Method != "" {
+				continue // notification / 服务器发起的请求：本客户端只做应答方以外的角色
+			}
+			if resp.ID != id {
+				continue
+			}
+			if resp.Error != nil {
+				return nil, fmt.Errorf("MCP %s 错误 %d: %s", c.fullName, resp.Error.Code, resp.Error.Message)
+			}
+			return resp.Result, nil
+		}
+	}
 }
 
 // httpRPC 走 streamable HTTP：POST 请求体，响应为 JSON 或 SSE（取匹配 id 的 data）。
@@ -432,14 +500,28 @@ func (c *mcpClient) shutdownLocked() {
 		_, _ = c.cmd.Process.Wait()
 		c.cmd = nil
 	}
+	if c.readDone != nil {
+		close(c.readDone) // 让 readLoop 退出（它随后 close(lines)，等行的一侧立即收到）
+		c.readDone = nil
+	}
+	c.lines = nil
 	c.stdout = nil
 	c.stdinW = nil
 	c.started = false
 	c.tools = nil
 }
 
-// shutdown 对外关闭。
+// shutdown 对外关闭。先在不持 c.mu 的情况下标记关闭并取消握手（stdio 读与 HTTP
+// 请求都会随 ctx 立即返回），再取 c.mu 清理进程与管道——否则一次卡住的握手会让
+// 调用方（包括持注册表锁的摘除流程）跟着等满读超时。
 func (c *mcpClient) shutdown() {
+	c.lifeMu.Lock()
+	c.closed = true
+	cancel := c.cancel
+	c.lifeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.shutdownLocked()

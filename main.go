@@ -61,6 +61,12 @@ func main() {
 		attachParentConsole() // GUI 子系统构建时挂回终端，保证 CLI 回显
 		os.Exit(runSandboxCLI(os.Args[2:]))
 	}
+	// 编码探测子命令（隐藏，run_command 起自身调用）：只做一件事——读 stdin 的候选
+	// 路径、回报编码。必须放在解析 flag / 加载配置 / 单实例检查 / 绑端口之前，绝不能
+	// 走进常规启动，也不碰配置与数据目录（见 encodingprobe.go / encodingprobe_spawn.go）。
+	if len(os.Args) > 1 && os.Args[1] == encodingProbeSubcommand {
+		os.Exit(runEncodingProbeChild(os.Stdin, os.Stdout))
+	}
 	// APK 元数据查看子命令：jx-assistant.exe apkinfo <file.apk>
 	if len(os.Args) > 1 && os.Args[1] == "apkinfo" {
 		attachParentConsole()

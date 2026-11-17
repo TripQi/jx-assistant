@@ -119,7 +119,7 @@ func TestProbeTextFileSplitsMultibyteAtProbeWindow(t *testing.T) {
 	if got := probeTextFile(p); got != EncGBK {
 		t.Fatalf("大 GBK 文件应探测为 GBK，实得 %v", got)
 	}
-	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content big_gbk.txt`, ""); m != encodingModeGBK {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content big_gbk.txt`, "", nil); m != encodingModeGBK {
 		t.Fatalf("大 GBK 文件应走 gbk 读面，实得 %q", m)
 	}
 }
@@ -161,7 +161,7 @@ func TestExtractPathCandidates(t *testing.T) {
 		`Get-Content ` + a,
 		"Get-Content '旧脚本.bat'",
 	} {
-		got := extractPathCandidates(cmd, dir)
+		got, _ := extractPathCandidates(cmd, dir)
 		if len(got) == 0 {
 			t.Fatalf("%q: 应抓到至少一个候选路径", cmd)
 		}
@@ -171,9 +171,11 @@ func TestExtractPathCandidates(t *testing.T) {
 			}
 		}
 	}
-	// 不存在的文件、通配符、纯参数都不该被抓
-	if got := extractPathCandidates(`Get-Content -Raw 不存在.txt *.log`, dir); len(got) != 0 {
-		t.Fatalf("应抓不到候选，实得 %v", got)
+	// 通配符与纯参数不该被抓；不存在的文件名字合法，现在交给子进程判存在性
+	// （子进程回 missing 时父侧静默忽略，端到端行为仍是"不出提示、不影响读面"，
+	// 见 TestDetectEncodingModeKeepsNormalFiles 的"不存在路径不出提示"用例）。
+	if got, _ := extractPathCandidates(`Get-Content -Raw 不存在.txt *.log`, dir); len(got) != 1 || filepath.Base(got[0]) != "不存在.txt" {
+		t.Fatalf("*.log 不该被抓、不存在.txt 应交给子进程判存在性，实得 %v", got)
 	}
 }
 
@@ -249,16 +251,21 @@ func TestDetectEncodingMode(t *testing.T) {
 	if err := os.WriteFile(gbkFile, gbkBytes(t, "echo 中文\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql"`, ""); m != encodingModeUTF8 {
-		t.Fatalf("UTF-8 文件应走 utf8，实得 %q", m)
+	for _, c := range []struct {
+		cmd  string
+		want string
+	}{
+		{`Get-Content "u.sql"`, encodingModeUTF8},
+		{`Get-Content "g.bat"`, encodingModeGBK},
+	} {
+		if m, _ := detectEncodingMode(context.Background(), dir, c.cmd, "", nil); m != c.want {
+			t.Fatalf("%q: 期望 %q，实得 %q", c.cmd, c.want, m)
+		}
 	}
-	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "g.bat"`, ""); m != encodingModeGBK {
-		t.Fatalf("GBK 文件应走 gbk，实得 %q", m)
-	}
-	if m, hint := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql" ; Get-Content "g.bat"`, ""); m != encodingModeUTF8 || hint == "" {
+	if m, hint := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql" ; Get-Content "g.bat"`, "", nil); m != encodingModeUTF8 || hint == "" {
 		t.Fatalf("混合编码应按 utf8 并给出提示，实得 %q / %q", m, hint)
 	}
-	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql"`, "cmd"); m != encodingModeUTF8 {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql"`, "cmd", nil); m != encodingModeUTF8 {
 		t.Fatalf("cmd 路径不做注入，应返回 utf8，实得 %q", m)
 	}
 }

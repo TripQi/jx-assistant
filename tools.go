@@ -1666,16 +1666,22 @@ func runCommand(t *toolContext, args json.RawMessage) (string, error) {
 		timeout = time.Duration(min(p.TimeoutSec, 600)) * time.Second
 	}
 
-	// 读面编码：命令里出现的文件先探测（encoding.go），据此决定这条 PS 5.1
-	// 命令按 UTF-8 还是按 ANSI(936) 读文件。探测不到（程序内部自己读文件的
-	// 情形：python 脚本、findstr 之类）就靠下面的输出乱码检测 + 重跑兜底。
-	// 探测本身只碰安全的本地普通文件，且有预算/可取消：它跑在启动子进程之前，
-	// 一旦卡住就是整条命令永久挂起（runChild 的超时那时还没开始计时）。
+	// 读面编码：命令里出现的文件先探测（encodingprobe_parent.go / encodingprobe.go），
+	// 据此决定这条 PS 5.1 命令按 UTF-8 还是按 ANSI(936) 读文件。探测不到（程序内部
+	// 自己读文件的情形：python 脚本、findstr 之类）就靠下面的输出乱码检测 + 重跑兜底。
+	// 探测本身跑在一个**可强杀的子进程**里：父侧只做纯字符串候选处理，文件系统工作
+	// （存在性/盘类型/普通文件确认/读头部）全在子进程，按 1.5s 预算杀并 Wait 回收——
+	// 它跑在启动子进程之前，一旦卡住就是整条命令永久挂起（runChild 的超时那时还没
+	// 开始计时）。protectPaths 是助手自身配置/数据目录，探测子进程也不读。
 	tctx := t.ctx
 	if tctx == nil {
 		tctx = context.Background()
 	}
-	encMode, encHint := detectEncodingMode(tctx, cwd, p.Command, p.Shell)
+	var protectRoots []string
+	if t.app != nil {
+		protectRoots = t.app.protectPaths
+	}
+	encMode, encHint := detectEncodingMode(tctx, cwd, p.Command, p.Shell, protectRoots)
 	// 探测阶段会话已被取消（用户点了停止）：绝不能再接着把子进程起起来。
 	if cerr := tctx.Err(); cerr != nil {
 		return "", fmt.Errorf("命令未执行：会话已取消（%v）", cerr)

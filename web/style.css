@@ -1647,6 +1647,11 @@ body.rp-open .w-handle { display: none; }
 .dm-row .pf-input { flex: 0 0 280px; }
 .dm-eff { font-size: 11px; color: var(--text-3); }
 .dm-eff.bad { color: #c22f2f; }
+/* 派发用途三行（执行/通用、方案设计、审查·审计）：同构的「模型来源 + 模型 + 档位 + 生效值」 */
+.dm-purpose + .dm-purpose { margin-top: 12px; }
+.dm-purpose-label { font-size: 12px; color: var(--text-2); margin: 0 0 6px; }
+/* 配置脏值（mode 认不出来）：下拉整只置红，与右侧红字原因一起让人看得见是哪行错了 */
+.dm-row select.bad { color: #c22f2f; border-color: #c22f2f; }
 /* 这两行比其余表单项宽（右边要摆「当前生效」文字），不被 .set-field 的 420px 卡住 */
 #default-model-block .set-field { max-width: none; }
 

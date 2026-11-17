@@ -305,10 +305,12 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.apiRoute(mux, "GET /api/voicetype/history/wav", a.handleVoicetypeHistoryWav, apiMeta{Summary: "第 i 条记录的原始语音（wav，试听）", Params: "i=序号", Perm: permReadOnly})
 	a.apiRoute(mux, "POST /api/voicetype/history/reidentify", a.handleVoicetypeHistoryReidentify, apiMeta{Summary: "重新识别第 i 条记录", Params: "i=序号；输入法在跑则交它做（走完整分发）", Perm: permReadOnly})
 	a.apiRoute(mux, "GET /api/models", a.handleModels, apiMeta{Summary: "模型清单（全部渠道）", Perm: permReadOnly})
-	// 默认模型（defaultmodels.go）：设置页「模型」页两块——全局默认模型与派发任务默认
-	// 模型，连同算好的「当前生效值」一起下发（跟随主会话时算到具体模型，不让用户自己推）。
-	a.apiRoute(mux, "GET /api/default-models", a.handleDefaultModelsGet, apiMeta{Summary: "默认模型（全局默认 / 派发任务默认）与当前生效值", Perm: permReadOnly})
-	a.apiRoute(mux, "POST /api/default-models", a.handleDefaultModelsSet, apiMeta{Summary: "保存默认模型（全局默认模型 / 派发任务默认模型）", Params: "global（provider/providerKey/model）、dispatch（mode=follow|provider+model）", Perm: permWorkspace})
+	// 默认模型（defaultmodels.go）：设置页「模型」页——全局默认模型与派发任务默认
+	// 模型（按用途分三套：执行/通用、方案设计、审查·审计），连同算好的「当前生效值」
+	// 一起下发（跟随时算到具体模型，不让用户自己推）。dispatch 键就是执行/通用那一套，
+	// 结构与改动前一致（待办组件在读）。
+	a.apiRoute(mux, "GET /api/default-models", a.handleDefaultModelsGet, apiMeta{Summary: "默认模型（全局默认 / 派发任务默认·三套用途）与当前生效值", Perm: permReadOnly})
+	a.apiRoute(mux, "POST /api/default-models", a.handleDefaultModelsSet, apiMeta{Summary: "保存默认模型（全局默认模型 / 派发任务默认模型的三个用途）", Params: "global（provider/providerKey/model/thinking）、dispatch（mode=follow|provider+model）、dispatchPlan / dispatchReview（mode=follow|custom + provider/providerKey/model/thinking，缺省＝保留；mode 非法即 400）", Perm: permWorkspace})
 	// 用户记忆（组件 user-memory，usermemory.go）：设置页与长期助理（call_api
 	// 整文件通道）共用；未启用时 404。
 	a.apiRoute(mux, "GET /api/user-memory", a.handleUserMemoryGet, apiMeta{Summary: "读用户记忆（用户称呼/身份与喜好/AI 名字/AI 身份/对话气泡颜色）", Perm: permReadOnly})

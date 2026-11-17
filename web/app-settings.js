@@ -859,14 +859,23 @@ async function reloadProviders() {
   await loadDefaultModels(); // 渠道/模型变了：默认模型下拉与「当前生效」跟着算一次
 }
 
-/* ---------- 模型页：默认模型（全局默认 / 派发任务默认） ----------
-   两个显式默认都由服务端算好「当前实际生效值」（跟随主会话时也算到具体模型，
-   不让用户自己推）。保存是即时接口，不跟着卡片底部的「保存」。 */
+/* ---------- 模型页：默认模型（全局默认 / 派发任务默认·三套用途） ----------
+   全局默认一行；派发任务默认按用途三行（执行/通用、方案设计、审查·审计），
+   方案/审查默认跟随执行/通用。每行都由服务端算好「当前实际生效值」（跟随一路算到
+   具体模型），不让用户自己推。保存是即时接口，不跟卡片底部的「保存」。 */
 let dmCache = null;
 let dmReady = false;
 let dmLoadVersion = 0;
 let dmSaving = false;
 let dmPending = {};
+
+// 设置页派发用途三行：key 是保存接口的字段名（execute 沿用老的 dispatch 键，
+// 老 exe 回退时读到的仍是同一份配置）；follow 是该行下拉里「跟随」选项的说法。
+const DM_ROWS = [
+  { purpose: 'execute', key: 'dispatch', follow: '跟随主会话' },
+  { purpose: 'plan', key: 'dispatchPlan', follow: '跟随执行/通用' },
+  { purpose: 'review', key: 'dispatchReview', follow: '跟随执行/通用' },
+];
 
 async function loadDefaultModels() {
   if (dmSaving) return; // 保存队列持有最新用户意图，期间不读取中间态快照
@@ -947,31 +956,73 @@ function dmSelectThinking(el, level) {
   el.disabled = !dmReady;
 }
 
+// 一行的四个控件（id 统一为 set-dispatch-<purpose>-*，三行同构）。
+function dmRowEls(purpose) {
+  return {
+    mode: $('set-dispatch-' + purpose + '-mode'),
+    model: $('set-dispatch-' + purpose + '-model'),
+    thinking: $('set-dispatch-' + purpose + '-thinking'),
+    eff: $('set-dispatch-' + purpose + '-eff'),
+  };
+}
+
+// 某个用途的视图项：服务端下发的 dispatchPurposes 里那一项；老服务端/旧缓存
+// 没有它时，execute 回退到原来的 dispatch 键，其余按空（＝跟随）。
+function dmPurposeView(purpose) {
+  const list = (dmCache && dmCache.dispatchPurposes) || [];
+  const hit = list.find((x) => x && x.purpose === purpose);
+  if (hit) return hit;
+  if (purpose === 'execute') {
+    const d = (dmCache && dmCache.dispatch) || {};
+    return { purpose, mode: d.mode, thinking: d.thinking, ref: d.ref };
+  }
+  return {};
+}
+
+// 模型来源下拉：只认 follow/custom；脏配置（手改出来的原值）原样显示成一项并置红，
+// 让用户看得见“是配置错了”而不是自己选错了。用户改回 follow/custom 才提交。
+function dmSetMode(el, mode, followLabel, rawMode) {
+  el.innerHTML = '<option value="follow">' + esc(followLabel) + '</option><option value="custom">指定渠道 + 模型</option>';
+  let value = mode === 'custom' ? 'custom' : 'follow';
+  if (mode !== 'custom' && mode !== 'follow') {
+    const option = document.createElement('option');
+    option.value = '__bad__';
+    option.textContent = '配置非法：' + (rawMode === undefined || rawMode === null ? '' : rawMode);
+    el.appendChild(option);
+    value = '__bad__';
+  }
+  el.value = value;
+  el.classList.toggle('bad', value === '__bad__');
+}
+
 function renderDefaultModels() {
   const selG = $('set-default-model');
-  const modeSel = $('set-dispatch-mode');
-  const selD = $('set-dispatch-model');
-  if (!selG || !modeSel || !selD) return;
+  if (!selG) return;
   const g = (dmCache && dmCache.global) || {};
-  const d = (dmCache && dmCache.dispatch) || {};
   const opts = defaultModelOptions();
   selG.innerHTML = opts;
   dmSelectRef(selG, g);
-  modeSel.value = d.mode === 'custom' ? 'custom' : 'follow';
-  selD.innerHTML = opts;
-  const eff = d.ref || {};
-  dmSelectRef(selD, eff);
-  // 配置值与生效值分开：派发 ref.thinking 可能已继承，不能拿来回填下拉。
   dmSelectThinking($('set-default-thinking'), g.thinking);
-  dmSelectThinking($('set-dispatch-thinking'), d.thinking);
-  selG.disabled = modeSel.disabled = selD.disabled = !dmReady;
-  selD.style.display = modeSel.value === 'custom' ? '' : 'none';
+  selG.disabled = $('set-default-thinking').disabled = !dmReady;
   dmSetEff($('set-default-model-eff'), dmReady ? g : { error: '读取默认模型失败，请重新打开设置后再修改' }, '');
-  dmSetEff($('set-dispatch-model-eff'), eff, modeSel.value === 'custom' ? '' : '跟随主会话');
+  for (const row of DM_ROWS) {
+    const els = dmRowEls(row.purpose);
+    if (!els.mode) continue;
+    const item = dmPurposeView(row.purpose);
+    dmSetMode(els.mode, item.mode, row.follow, item.mode);
+    els.model.innerHTML = opts;
+    const eff = item.ref || {};
+    dmSelectRef(els.model, eff);
+    // 配置值与生效值分开：ref.thinking 可能是继承来的，不能拿来回填下拉。
+    dmSelectThinking(els.thinking, item.thinking);
+    els.mode.disabled = els.model.disabled = els.thinking.disabled = !dmReady;
+    els.model.style.display = els.mode.value === 'custom' ? '' : 'none';
+    dmSetEff(els.eff, eff, els.mode.value === 'custom' ? '' : row.follow);
+  }
 }
 
 async function saveDefaultModels(field, thinkingOnly = false) {
-  if (!dmReady || (field !== 'global' && field !== 'dispatch')) return;
+  if (!dmReady) return;
   const toRef = (v) => {
     const p = v ? v.split('|') : [];
     return { provider: p[0] || '', providerKey: p[1] || '', model: p[2] || '' };
@@ -979,18 +1030,33 @@ async function saveDefaultModels(field, thinkingOnly = false) {
   if (field === 'global') {
     dmPending.global = { ...toRef($('set-default-model').value || ''), thinking: $('set-default-thinking').value };
   } else {
-    const custom = $('set-dispatch-mode').value === 'custom';
-    const model = $('set-dispatch-model').value;
-    if (custom && !model && !thinkingOnly) return;
+    const row = DM_ROWS.find((r) => r.key === field);
+    if (!row) return;
+    const els = dmRowEls(row.purpose);
+    if (!els.mode) return;
+    // 配置非法（下拉停在原值）时不动：等用户自己改回 follow/custom 再提交，
+    // 不要把一个看不懂的值再发出去（服务端同样会 400）。
+    if (els.mode.value !== 'follow' && els.mode.value !== 'custom') return;
+    const mode = els.mode.value;
+    const model = els.model.value;
+    const thinking = els.thinking.value;
+    if (mode === 'custom' && !model && !thinkingOnly) return;
+    const saved = dmPurposeView(row.purpose) || {};
+    const savedRef = saved.ref || {};
     // 尚未选全自定义模型时，改档位仍可独立保存，但不提交这个未完成的模型选择。
-    const saved = (dmCache && dmCache.dispatch) || {};
-    const ref = custom && !model
-      ? (dmPending.dispatch || (saved.mode === 'custom' ? saved.ref : {}) || {})
-      : (custom ? toRef(model) : {});
-    dmPending.dispatch = {
+    const ref = mode === 'custom' && !model
+      ? (dmPending[field] || (saved.mode === 'custom' ? savedRef : {}) || {})
+      : (mode === 'custom' ? toRef(model) : {});
+    const patch = {
       ...(ref.provider ? toRef(modelKeyOf(ref.provider, ref.providerKey, ref.model)) : {}),
-      thinking: $('set-dispatch-thinking').value,
+      thinking,
     };
+    if (row.purpose === 'execute') {
+      // 执行/通用沿用旧请求形状：custom 才带模型三项，follow 只带档位（服务端按空判跟随）。
+      dmPending.dispatch = patch;
+    } else {
+      dmPending[field] = { mode, ...patch };
+    }
   }
   ++dmLoadVersion;
   if (dmSaving) return;
@@ -1021,15 +1087,19 @@ async function saveDefaultModels(field, thinkingOnly = false) {
 if ($('set-default-model')) {
   $('set-default-model').onchange = () => { void saveDefaultModels('global'); };
   $('set-default-thinking').onchange = () => { void saveDefaultModels('global', true); };
-  $('set-dispatch-model').onchange = () => { void saveDefaultModels('dispatch'); };
-  $('set-dispatch-thinking').onchange = () => { void saveDefaultModels('dispatch', true); };
-  // 切到「指定渠道 + 模型」但还没选模型时不存（服务端会拒「没选全」），等选完再存
-  $('set-dispatch-mode').onchange = () => {
-    const custom = $('set-dispatch-mode').value === 'custom';
-    $('set-dispatch-model').style.display = custom ? '' : 'none';
-    if (custom && !$('set-dispatch-model').value) return;
-    void saveDefaultModels('dispatch');
-  };
+  for (const row of DM_ROWS) {
+    const els = dmRowEls(row.purpose);
+    if (!els.mode) continue;
+    els.model.onchange = () => { void saveDefaultModels(row.key); };
+    els.thinking.onchange = () => { void saveDefaultModels(row.key, true); };
+    // 切到「指定渠道 + 模型」但还没选模型时不存（服务端会拒「没选全」），等选完再存
+    els.mode.onchange = () => {
+      const custom = els.mode.value === 'custom';
+      els.model.style.display = custom ? '' : 'none';
+      if (custom && !els.model.value) return;
+      void saveDefaultModels(row.key);
+    };
+  }
 }
 
 function renderProvCards() {

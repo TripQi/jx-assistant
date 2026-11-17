@@ -41,7 +41,8 @@ function parseInto(host, html) {
 }
 var mountTarget=new Element('div'), captured=null;
 var document={createElement:t=>new Element(t),createElementNS:(ns,t)=>new Element(t),body:new Element('body')};
-var window={confirm:()=>true,prompt:()=>'',addEventListener:()=>{},removeEventListener:()=>{}};
+var window={confirm:()=>confirmAnswer,prompt:()=>'',addEventListener:()=>{},removeEventListener:()=>{}};
+var confirmAnswer=true;
 var CX={register:d=>d.init(),registerSettings:d=>{captured=d;if(__MOUNT__) d.mount(mountTarget);}};
 var JX={}; window.JX=JX;
 var registryMountCount=0;
@@ -63,7 +64,11 @@ function createProject(name, path) {
 }
 var state={defaultWs:testDirectory,sessions:[]};
 var lsGet=()=>[];
-var setTimeout=()=>1, clearTimeout=()=>{};
+// 定时器登记表：知识正文的预算预览走 setTimeout 节流，测试用 flushTimers() 把它真正跑起来。
+var timerSeq=0, timerFns={};
+var setTimeout=function(fn){ var id=++timerSeq; timerFns[id]=fn; return id; };
+var clearTimeout=function(id){ delete timerFns[id]; };
+function flushTimers(){ var ids=Object.keys(timerFns); ids.forEach(function(id){ var fn=timerFns[id]; delete timerFns[id]; if(fn) fn(); }); }
 function check(b,msg) { if(!b) throw Error(msg); }
 function buttons() { return all(mountTarget).filter(e=>e.tagName==='button'); }
 function captionOf(e) { return text(e).replace(/⌄/g,'').trim(); }
@@ -71,7 +76,8 @@ function triggers(label) { return buttons().filter(e=>captionOf(e)===label); }
 function byAria(label) { return all(mountTarget).find(e=>e.attrs['aria-label']===label); }
 function field(prefix) { var l=all(mountTarget).find(e=>e.tagName==='label'&&text(e).startsWith(prefix)); if(!l) throw Error('field missing: '+prefix); return l.children[1]; }
 function clickLabel(s) { var b=buttons().find(e=>text(e)===s); if(!b) throw Error('button missing: '+s); b.onclick(); }
-var fetch=(path,opts)=>{opts=opts||{};var r=path==='/api/remotes'?{ok:true,status:200,body:JSON.stringify({remotes:[]})}:request(opts.method||'GET',path,opts.body||'');return Promise.resolve({ok:r.ok,status:r.status,text:()=>Promise.resolve(r.body),json:()=>Promise.resolve(JSON.parse(r.body))});};
+var remoteList=[{user:'u',host:'2001:db8::1',port:2222,dir:'/srv/app'},{user:'root',host:'10.0.0.5',dir:'/opt/x'}];
+var fetch=(path,opts)=>{opts=opts||{};var r=path==='/api/remotes'?{ok:true,status:200,body:JSON.stringify({remotes:remoteList})}:request(opts.method||'GET',path,opts.body||'');return Promise.resolve({ok:r.ok,status:r.status,text:()=>Promise.resolve(r.body),json:()=>Promise.resolve(JSON.parse(r.body))});};
 `
 
 func projectSettingsVM(t *testing.T, a *App, mount bool) (*goja.Runtime, func(string)) {

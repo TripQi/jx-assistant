@@ -1081,6 +1081,26 @@ func eventDigest(parts ...any) string {
 	return messageDigest("event-request", string(b))
 }
 
+// eventRequestDigest 是一条事实请求的幂等语义摘要：事实载荷 + 同事务 event patch。
+// patch 进了摘要，重试时只改了概况/状态也会被判成「同键不同载荷」而冲突，不会被当成
+// 已提交结果静默丢掉 patch（设计 §7.1、复审 N1）。patch 为空时与旧口径逐字一致，
+// 已落库的行照样能幂等命中。
+func eventRequestDigest(rec ProjectEventRecordInput, patch ProjectEventPatchInput) string {
+	parts := []any{rec.Kind, rec.Text, rec.OccurredAt, rec.Sources}
+	if patch.Title != nil || patch.Summary != nil || patch.Status != nil {
+		parts = append(parts, []any{optionalString(patch.Title), optionalString(patch.Summary), optionalString(patch.Status)})
+	}
+	return eventDigest(parts...)
+}
+
+// optionalString 把可空 patch 字段转成稳定可序列化的值（nil 保持 nil，不与空串混淆）。
+func optionalString(v *string) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
 // prepareRecordAsUser 是设置页用户录入的同一套字段校验；来源只需真实存在（用户身份
 // 已由路由层卡住），不按 AI 的项目资格过滤。
 func (a *App) prepareRecordAsUser(args eventRecordArgs) (ProjectEventRecordInput, error) {

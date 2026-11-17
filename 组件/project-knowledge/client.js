@@ -142,7 +142,15 @@
       window.JX.projectRegistry.mount(registryHost, {
         onChange: function (list, id) {
           projects = list || [];
-          refresh(id || '');
+          var target = id || '';
+          // 登记视图新建/改后要切项目时，先走本页的未保存草稿确认（与下拉切换同一口径）：
+          // 取消就不切项目，草稿按项目留在内存里，切回可继续编辑（复审 N3）。
+          if (target && current && target !== current.project.id && !leave()) {
+            renderOptions(current.project.id);
+            message('登记变更已生效；已保留「' + current.project.name + '」的未保存草稿，可稍后切回继续编辑。');
+            return;
+          }
+          refresh(target);
         }
       });
       registryMounted = true;

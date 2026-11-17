@@ -1094,6 +1094,13 @@ func (s *Store) mutateProjectEvent(eventID string, expectedRevision int64, patch
 	if p.Archived {
 		return ProjectEvent{}, none, false, ErrProjectEventArchived
 	}
+	// 幂等语义必须覆盖同事务的 event patch：同键同事实但 patch 变了属于「同键不同载荷」，
+	// 要明确冲突，而不是命中后静默把这次 patch 丢掉（复审 N1）。
+	if rec != nil {
+		normalized := *rec
+		normalized.RequestDigest = eventRequestDigest(normalized, patch)
+		rec = &normalized
+	}
 	// 幂等命中先于父 revision 校验：同键同载荷是「已提交请求的重发」，父事件后来前进
 	// 不能把它误判成新请求（设计 §7.1）；授权、项目状态与幂等仍先核。
 	if rec != nil && rec.ClientKey != "" {

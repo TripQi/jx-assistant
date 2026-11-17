@@ -73,11 +73,21 @@
     return { workspace_kind: kind, display_path: path };
   }
 
+  // 已登记远程目录的展示路径：与聊天工作目录面板同一写法（IPv6 加方括号、默认端口 22 不写）。
+  function remoteDisplay(r) {
+    let host = String((r && r.host) || '');
+    if (host.indexOf(':') >= 0 && host[0] !== '[') host = '[' + host + ']';
+    if (!host) return '';
+    const port = r.port && Number(r.port) !== 22 ? ':' + r.port : '';
+    return (r.user || 'root') + '@' + host + port + ':' + (r.dir || '/');
+  }
+
   function mount(el, opts) {
     opts = opts || {};
     el.replaceChildren();
-    const state = { projects: [], editing: null, draftBindings: [], busy: false };
+    const state = { projects: [], editing: null, draftBindings: [], busy: false, remotes: [] };
     let disposed = false;
+    let fillRemotesCurrent = null; // 当前打开表单里的「已有远程目录」下拉，远程列表刷新后重填
     function alive() { return !disposed && el.isConnected; }
 
     node('p', el, '项目登记是全实例唯一的一套：项目名、多工作区绑定与归档状态由这里管理，项目知识库与项目事件共用同一份登记。', 'sf-desc');
@@ -95,6 +105,24 @@
     const actions = node('div', el);
     actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0';
     button(actions, '新建项目', function () { startCreate(); });
+
+    // 已登记的远程目录（GET /api/remotes，与聊天工作目录面板同一份数据）：
+    // 登记视图自己拉一次，两个设置页都能从下拉选已有远程目录，不用手输。
+    async function loadRemotes() {
+      try {
+        const res = await fetch('/api/remotes', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        state.remotes = (data && data.remotes) || [];
+      } catch (e) {
+        state.remotes = [];
+        if (alive()) message('读取已有远程目录失败：' + e.message + '；仍可手输远程路径。', true);
+        return false;
+      }
+      if (alive() && fillRemotesCurrent) fillRemotesCurrent();
+      return true;
+    }
+    loadRemotes();
 
     async function reload(selectId) {
       try {
@@ -229,6 +257,36 @@
             newPath.value = path;
             if (typeof rememberWorkspace === 'function') rememberWorkspace(path);
           } catch (e) { message('选择目录失败：' + e.message, true); }
+        });
+        const remoteLine = node('div', bindBox);
+        remoteLine.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0';
+        const remoteSel = node('select', remoteLine, undefined, 'pf-input');
+        remoteSel.setAttribute('aria-label', '选择已有远程目录');
+        function fillRemotes() {
+          remoteSel.replaceChildren();
+          const head = document.createElement('option');
+          head.value = '';
+          head.textContent = state.remotes.length ? '已有远程目录（选中后填入上方的路径）' : '还没有已登记的远程目录';
+          remoteSel.appendChild(head);
+          state.remotes.forEach(function (r) {
+            const path = remoteDisplay(r);
+            if (!path) return;
+            const opt = document.createElement('option');
+            opt.value = path;
+            opt.textContent = path;
+            remoteSel.appendChild(opt);
+          });
+        }
+        fillRemotesCurrent = fillRemotes;
+        fillRemotes();
+        remoteSel.onchange = function () {
+          if (!remoteSel.value) return;
+          newKind.value = 'remote';
+          newPath.value = remoteSel.value;
+        };
+        button(remoteLine, '刷新远程目录', async function () {
+          const ok = await loadRemotes();
+          message(ok ? '已刷新 ' + state.remotes.length + ' 个已登记远程目录。' : '远程目录刷新失败，见上面提示。', !ok);
         });
       }
       renderBindings();

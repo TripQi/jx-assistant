@@ -924,10 +924,15 @@ func mergePurposeCfg(old DispatchPurposeCfg, patch purposePatch, label, where st
 	if patch.Thinking != nil {
 		next.Thinking = *patch.Thinking
 	}
-	// 换渠道或换模型时重新定位 Key 归属（旧的归属属于旧模型的，沿用它会让新模型
-	// 落到不提供它的分组）；前端总是三件套一起发，这里只服务 call_api/脚本的单字段补丁。
-	if (patch.Provider != nil || patch.Model != nil) && patch.ProviderKey == nil {
-		next.ProviderKey = ""
+	// 只有归一后的目标真的变了才重定位 Key 归属：同值补丁（如 {"model":"shared"} 与旧值
+	// 完全一致）必须保留原 Key——同模型在不同分组可能有不同额度/协议，不能悄悄改。
+	// 显式给了 providerKey 就按它（不重定位）。
+	if patch.ProviderKey == nil {
+		changed := (patch.Provider != nil && strings.TrimSpace(*patch.Provider) != strings.TrimSpace(old.Provider)) ||
+			(patch.Model != nil && strings.TrimSpace(*patch.Model) != strings.TrimSpace(old.Model))
+		if changed {
+			next.ProviderKey = ""
+		}
 	}
 	if patch.Mode == nil && (patch.Provider != nil || patch.ProviderKey != nil || patch.Model != nil) {
 		if mode, _ := normPurposeMode(next.Mode); mode == purposeModeFollow {

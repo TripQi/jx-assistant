@@ -563,12 +563,47 @@ func TestPurposeMergeSemantics(t *testing.T) {
 	if got := a.Cfg.DispatchPlanModel; got.Mode != purposeModeCustom || got.Model != "shared" || got.ProviderKey != "k1" || got.Thinking != "xhigh" {
 		t.Fatalf("custom 态换模型应保留其余字段：%+v", got)
 	}
-	// thinking 单字段补丁不动模型
+	// 同值补丁不能改 Key 归属：router 里 shared 同属 k1/k2，旧 k2 必须保留（N1）
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: purposeModeCustom,
+		ModelRef: ModelRef{Provider: "router", ProviderKey: "k2", Model: "shared"}}
+	if w := defaultPatch(a, `{"dispatchPlan":{"model":"shared"}}`); w.Code != 200 {
+		t.Fatalf("同值 model 补丁应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.ProviderKey != "k2" {
+		t.Fatalf("同值补丁不该改 Key 归属：%+v", got)
+	}
+	if w := defaultPatch(a, `{"dispatchPlan":{"provider":"router"}}`); w.Code != 200 {
+		t.Fatalf("同值 provider 补丁应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.ProviderKey != "k2" {
+		t.Fatalf("同值 provider 补丁不该改 Key 归属：%+v", got)
+	}
+	// 实际换模型（shared → claude-x，后者只在 k2）：仍要重定位
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: purposeModeCustom,
+		ModelRef: ModelRef{Provider: "router", ProviderKey: "k1", Model: "shared"}}
+	if w := defaultPatch(a, `{"dispatchPlan":{"model":"claude-x"}}`); w.Code != 200 {
+		t.Fatalf("换模型应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.Model != "claude-x" || got.ProviderKey != "k2" {
+		t.Fatalf("换模型时应重定位 Key 归属：%+v", got)
+	}
+	// 显式 key 按现有契约：给了就用给的，不被重定位覆盖
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: purposeModeCustom,
+		ModelRef: ModelRef{Provider: "router", ProviderKey: "k1", Model: "shared"}}
+	if w := defaultPatch(a, `{"dispatchPlan":{"model":"claude-x","providerKey":"k1"}}`); w.Code != 200 {
+		t.Fatalf("显式 key 应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.ProviderKey != "k1" || got.Model != "claude-x" {
+		t.Fatalf("显式 key 应原样保留：%+v", got)
+	}
+	// thinking 单字段补丁不动模型（也不动 Key 归属）
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: purposeModeCustom,
+		ModelRef: ModelRef{Provider: "router", ProviderKey: "k1", Model: "shared", Thinking: "xhigh"}}
 	if w := defaultPatch(a, `{"dispatchPlan":{"thinking":"low"}}`); w.Code != 200 {
 		t.Fatalf("档位补丁应接受：%d %s", w.Code, w.Body.String())
 	}
-	if got := a.Cfg.DispatchPlanModel; got.Model != "shared" || got.Thinking != "low" {
-		t.Fatalf("档位补丁不该动模型：%+v", got)
+	if got := a.Cfg.DispatchPlanModel; got.Model != "shared" || got.Thinking != "low" || got.ProviderKey != "k1" {
+		t.Fatalf("档位补丁不该动模型与 Key 归属：%+v", got)
 	}
 	// {} 与 null 都整体清空（与旧的 dispatch:{} 语义统一）
 	if w := defaultPatch(a, `{"dispatchPlan":{}}`); w.Code != 200 {

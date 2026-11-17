@@ -93,6 +93,9 @@ const DM={global:G,dispatch:{mode:'custom',ref:P},dispatchPurposes:[
 
 	// P8：接口没有返回用途配置（或缺某一项）时不静默回落「跟随」，而是明确报错并禁用该行；
 	// 配置未加载时也不允许把该行当 follow 提交。
-	run(`dmCache={global:G,dispatch:{mode:'follow',ref:G}};dmReady=true;renderDefaultModels();expect($('set-dispatch-plan-mode').value==='__missing__','缺用途配置应明确报错');expect($('set-dispatch-plan-mode').className.includes('bad'),'应置红');expect($('set-dispatch-plan-mode').options.some(o=>o.textContent==='配置未加载'),'应显示可读原因');saveDefaultModels('dispatchPlan');expect(requests.length===3,'配置未加载不该提交');`)
+	run(`dmCache={global:G,dispatch:{mode:'follow',ref:G}};dmReady=true;renderDefaultModels();expect($('set-dispatch-plan-mode').value==='__missing__','缺用途配置应明确报错');expect($('set-dispatch-plan-mode').className.includes('bad'),'应置红');expect($('set-dispatch-plan-mode').options.some(o=>o.textContent==='配置未加载'),'应显示可读原因');expect($('set-dispatch-plan-mode').disabled && $('set-dispatch-plan-model').disabled && $('set-dispatch-plan-thinking').disabled,'该行所有控件应禁用');saveDefaultModels('dispatchPlan');expect(requests.length===3,'配置未加载不该提交');`)
+	// 即使程序化把下拉改成一个可提交的值，也不允许把它（实际已存在于服务端的真实配置）
+	// 清成 follow（N4）。
+	run(`const m=$('set-dispatch-plan-mode');m.options.push({value:'follow',textContent:'跟随执行/通用'});m.value='follow';dmSaving=false;saveDefaultModels('dispatchPlan');expect(requests.length===3,'配置未加载时程序化改值也不该提交');`)
 	run(`dmCache={global:G,dispatch:{mode:'follow',ref:G},dispatchPurposes:[{purpose:'execute',label:'执行/通用',mode:'follow',thinking:'',ref:G}]};renderDefaultModels();expect($('set-dispatch-execute-mode').value==='follow','execute 正常回填');expect($('set-dispatch-review-mode').value==='__missing__','缺该项应明确报错');`)
 }

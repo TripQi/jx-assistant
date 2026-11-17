@@ -1012,15 +1012,16 @@ function renderDefaultModels() {
     if (!els.mode) continue;
     const item = dmPurposeView(row.purpose);
     if (item.missing) {
-      // 协议/加载问题：明确报错、禁用该行，不假装成「跟随」（P8）。
+      // 协议/加载问题：明确报错、禁用整行（含 mode）、且绝不提交（P8/N4）。
       els.mode.innerHTML = '<option value="__missing__">配置未加载</option>';
       els.mode.value = '__missing__';
       els.mode.classList.toggle('bad', true);
       els.model.innerHTML = opts;
       els.model.style.display = 'none';
-      els.model.disabled = els.thinking.disabled = true;
-      els.mode.disabled = !dmReady;
       dmSelectThinking(els.thinking, '');
+      // 放在 dmSelectThinking 之后：它会按 dmReady 重置 thinking.disabled，
+      // 本行整行禁用的约定不能被它覆盖。
+      els.mode.disabled = els.model.disabled = els.thinking.disabled = true;
       dmSetEff(els.eff, { error: item.missing }, '');
       continue;
     }
@@ -1049,6 +1050,10 @@ async function saveDefaultModels(field, thinkingOnly = false) {
     if (!row) return;
     const els = dmRowEls(row.purpose);
     if (!els.mode) return;
+    // 配置未加载（接口没返回该用途）：无论 UI 上看起来是什么（包括程序化改了
+    // 下拉），都绝不提交——否则会用一份“看不到”的配置把服务端真实配置清掉。
+    const item = dmPurposeView(row.purpose);
+    if (item.missing) return;
     // 配置非法（下拉停在原值）时不动：等用户自己改回 follow/custom 再提交，
     // 不要把一个看不懂的值再发出去（服务端同样会 400）。
     if (els.mode.value !== 'follow' && els.mode.value !== 'custom') return;
@@ -1056,7 +1061,7 @@ async function saveDefaultModels(field, thinkingOnly = false) {
     const model = els.model.value;
     const thinking = els.thinking.value;
     if (mode === 'custom' && !model && !thinkingOnly) return;
-    const saved = dmPurposeView(row.purpose) || {};
+    const saved = item;
     const savedRef = saved.ref || {};
     // 尚未选全自定义模型时，改档位仍可独立保存，但不提交这个未完成的模型选择。
     const ref = mode === 'custom' && !model

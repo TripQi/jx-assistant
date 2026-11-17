@@ -13,12 +13,18 @@ package main
 // TestMCPStdioHungHelper 只在被当作连接器子进程拉起时干活：握手永不返回。
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,10 +36,33 @@ func TestMCPStdioHungHelper(t *testing.T) {
 	if os.Getenv("JX_MCP_HUNG_HELPER") != "1" {
 		t.Skip("仅作 MCP 握手卡住的子进程用")
 	}
-	// 在连接器工作目录里留个标记：父用例据此确认「子进程已拉起」（即握手已经
-	// 开始并持有 c.mu——该锁内根本读不到 c.cmd），不必用固定 sleep 猜时序。
-	_ = os.WriteFile("handshake-ready", []byte("1"), 0644)
+	// 在连接器工作目录里留下自己的 pid：父用例据此确认「子进程已拉起」（即握手
+	// 已经开始并持有 c.mu——该锁内根本读不到 c.cmd），并可在摘除后核对进程已退出，
+	// 不必用固定 sleep 猜时序。
+	_ = os.WriteFile("handshake-ready", []byte(strconv.Itoa(os.Getpid())), 0644)
 	time.Sleep(60 * time.Second) // 父进程摘除连接器时会杀掉本进程
+}
+
+// hungStdioDef 是「握手永不返回」的 stdio 连接器定义（子进程即本测试二进制）。
+func hungStdioDef() map[string]mcpServerDef {
+	return map[string]mcpServerDef{"hung": {
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestMCPStdioHungHelper"},
+		Env:     map[string]string{"JX_MCP_HUNG_HELPER": "1"},
+	}}
+}
+
+// hungMarker 读子进程留下的 pid 标记（0 = 还没写出来）。
+func hungMarker(r *MCPServersRegistry) int {
+	data, err := os.ReadFile(filepath.Join(r.Root(), "handshake-ready"))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
 // waitMCP 有界轮询一个条件，避免用固定 sleep 猜时序。
@@ -62,20 +91,12 @@ func mcpStatusOf(list []mcpServerStatus, name string) mcpServerStatus {
 // 退出（进程杀灭之外没有别的路径），所以这条同时验证取消打到了实际 I/O。
 func TestMCPRemoveNotBlockedByHungStdioHandshake(t *testing.T) {
 	r := newTestMCPR(t)
-	defs := map[string]mcpServerDef{"hung": {
-		Command: os.Args[0],
-		Args:    []string{"-test.run=TestMCPStdioHungHelper"},
-		Env:     map[string]string{"JX_MCP_HUNG_HELPER": "1"},
-	}}
-	if _, err := r.UpsertFromDefs(defs, "market:hung", "握手不返回的连接器"); err != nil {
+	if _, err := r.UpsertFromDefs(hungStdioDef(), "market:hung", "握手不返回的连接器"); err != nil {
 		t.Fatalf("注册失败: %v", err)
 	}
 	// 等到握手确实在进行：子进程已拉起即意味着 start 已持 c.mu 并卡在读上
 	// （c.cmd 在 c.mu 内写入，这里不能拿 c.mu，否则轮询本身就阻塞）。
-	waitMCP(t, 10*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(r.Root(), "handshake-ready"))
-		return err == nil
-	}, "握手没有进入进行中状态")
+	waitMCP(t, 10*time.Second, func() bool { return hungMarker(r) != 0 }, "握手没有进入进行中状态")
 
 	done := make(chan []string, 1)
 	go func() { done <- r.RemoveBySource("market:hung") }()
@@ -196,5 +217,196 @@ func TestMCPStaleConnectResultIgnored(t *testing.T) {
 	r.mu.Unlock()
 	if ghost {
 		t.Fatal("已摘除的连接器不得留下幽灵 lastErr")
+	}
+}
+
+// 环境组装与设置页列表不能挂在握手的 deadline 上：握手进行中（c.mu 被对手
+// 握全程持有）也必须立即返回真实状态——未连接、无工具数，而不是等握手结束。
+// 修前实测阻塞 ≈ 握手方 ctx（connectAsync 30s，懒启动最长 120s）。
+func TestMCPPromptBlockAndListNotBlockedByHandshake(t *testing.T) {
+	r := newTestMCPR(t)
+	if _, err := r.UpsertFromDefs(hungStdioDef(), "market:hung", "握手不返回的连接器"); err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+	waitMCP(t, 10*time.Second, func() bool { return hungMarker(r) != 0 }, "握手没有进入进行中状态")
+
+	pb := make(chan string, 1)
+	go func() { pb <- r.PromptBlock(nil) }()
+	select {
+	case got := <-pb:
+		if !strings.Contains(got, "hung") {
+			t.Fatalf("连接器清单应列出尚未连上的连接器: %q", got)
+		}
+		if strings.Contains(got, "个工具") {
+			t.Fatalf("握手未完成却报出工具数（不许伪装成已连接）: %q", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("PromptBlock 被进行中的握手挡住：环境组装不能依赖握手长锁")
+	}
+
+	ls := make(chan []mcpServerStatus, 1)
+	go func() { ls <- r.List() }()
+	select {
+	case list := <-ls:
+		if st := mcpStatusOf(list, "hung"); st.Connected || st.ToolCount != 0 || len(st.Tools) != 0 {
+			t.Fatalf("握手未完成的状态应如实报未连接: %+v", st)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("List 被进行中的握手挡住：设置页列表不能依赖握手长锁")
+	}
+	if removed := r.RemoveBySource("market:hung"); len(removed) != 1 {
+		t.Fatalf("摘除失败: %v", removed)
+	}
+}
+
+// 快照的另一半：真连上之后 PromptBlock/List 必须如实报出工具数与清单
+// （不许因为改读快照而永远显示"未连接"）。
+func TestMCPPromptBlockAndListShowConnectedState(t *testing.T) {
+	r := newTestMCPR(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		var frame struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(body, &frame)
+		w.Header().Set("Content-Type", "application/json")
+		if frame.ID == 0 { // notification：无响应体
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"tools":[{"name":"ping","description":"p"}]}}`, frame.ID)
+	}))
+	t.Cleanup(srv.Close)
+	if err := r.Upsert(mcpServerEntry{Name: "live", Enabled: true, Type: "http", URL: srv.URL}); err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+	waitMCP(t, 10*time.Second, func() bool { return mcpStatusOf(r.List(), "live").Connected }, "连接器没有连上")
+
+	st := mcpStatusOf(r.List(), "live")
+	if st.ToolCount != 1 || len(st.Tools) != 1 || st.Tools[0] != "ping" {
+		t.Fatalf("已连接状态报错: %+v", st)
+	}
+	if got := r.PromptBlock(nil); !strings.Contains(got, "1 个工具") {
+		t.Fatalf("环境快照没有如实报出工具数: %q", got)
+	}
+}
+
+// 反复「起握手 → 摘除」不得留下常驻读行/连接 goroutine：本次引入 readLoop
+// 后必须有正式回归守着，而不是只在开发探针里看过。
+func TestMCPHandshakeGoroutinesReclaimed(t *testing.T) {
+	r := newTestMCPR(t)
+	base := runtime.NumGoroutine()
+	for i := 0; i < 3; i++ {
+		_ = os.Remove(filepath.Join(r.Root(), "handshake-ready"))
+		if _, err := r.UpsertFromDefs(hungStdioDef(), "market:hung", "握手不返回的连接器"); err != nil {
+			t.Fatalf("第 %d 轮注册失败: %v", i+1, err)
+		}
+		waitMCP(t, 10*time.Second, func() bool { return hungMarker(r) != 0 }, "握手没有进入进行中状态")
+		if removed := r.RemoveBySource("market:hung"); len(removed) != 1 {
+			t.Fatalf("第 %d 轮摘除失败: %v", i+1, removed)
+		}
+		_ = os.Remove(filepath.Join(r.Root(), "handshake-ready"))
+	}
+	limit := base + 2 // 允许运行时/调度器自身的少量抖动
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && runtime.NumGoroutine() > limit {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if now := runtime.NumGoroutine(); now > limit {
+		t.Fatalf("反复摘除后 goroutine 未回收（可能有常驻读行循环）: base=%d now=%d", base, now)
+	}
+	if r.Count() != 0 {
+		t.Fatalf("注册表应清空: %d", r.Count())
+	}
+}
+
+// TestMCPStdioEchoHelper 是可应答的 stdio MCP 子进程：握手与工具调用都能正常完成，
+// 工具结果回显调用时给的工具名，便于核对响应归属。
+func TestMCPStdioEchoHelper(t *testing.T) {
+	if os.Getenv("JX_MCP_ECHO_HELPER") != "1" {
+		t.Skip("仅作 MCP stdio 子进程用")
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	for sc.Scan() {
+		var frame struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &frame); err != nil || frame.ID == 0 {
+			continue
+		}
+		res := "{}"
+		switch frame.Method {
+		case "tools/list":
+			res = `{"tools":[{"name":"ping","description":"p"}]}`
+		case "tools/call":
+			res = fmt.Sprintf(`{"content":[{"type":"text","text":%q}]}`, frame.Params.Name)
+		}
+		fmt.Fprintf(os.Stdout, `{"jsonrpc":"2.0","id":%d,"result":%s}`+"\n", frame.ID, res)
+	}
+}
+
+// echoMCPClient 起一个应答正常的 stdio 连接（工具结果回显工具名）。
+func echoMCPClient(t *testing.T) *mcpClient {
+	t.Helper()
+	c := &mcpClient{fullName: "echo", def: mcpServerDef{
+		Command: os.Args[0],
+		Args:    []string{"-test.run=TestMCPStdioEchoHelper"},
+		Env:     map[string]string{"JX_MCP_ECHO_HELPER": "1"},
+	}, host: mcpPlainHost{dir: t.TempDir()}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := c.start(ctx); err != nil {
+		t.Fatalf("echo 连接器启动失败: %v", err)
+	}
+	t.Cleanup(c.shutdown)
+	return c
+}
+
+// 并发调用与关闭相邻时的保护（trMu 的定向验证）：不许写空管道 panic、不许数据
+// 竞争（-race 下验）、不许无界阻塞；关闭后再发请求必须报错。
+//
+// 注意：stdio 连接上的**并发工具调用本身**不在本用例范围——响应只按 id 过滤、
+// 由先读到的一方拿走，串不串属既有设计（改成按 id 分发是架构改动）。这里只断言
+// 并发不崩、不死等，且喂完之后串行调用仍然路由正确。
+func TestMCPConcurrentCallsAndRpcAfterShutdown(t *testing.T) {
+	c := echoMCPClient(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("tool-%d", i)
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			// 成功或报超时都算正常收束；panic / 死等 / 数据竞争才算问题。
+			_, _, _ = c.callTool(ctx, name, nil)
+		}(name)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("并发工具调用没有在 20 秒内收束")
+	}
+	// 并发风波过后，串行调用仍必须拿到自己的结果（没串台 / 没卡死）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	text, _, err := c.callTool(ctx, "after", nil)
+	if err != nil {
+		t.Fatalf("并发后的串行调用失败: %v", err)
+	}
+	if text != "after" {
+		t.Fatalf("并发后的串行调用串台: %q", text)
+	}
+	// 关闭后再发请求：必须是错误，而不是写空管道
+	c.shutdown()
+	if _, err := c.rpc(context.Background(), "tools/list", map[string]any{}); err == nil {
+		t.Fatal("连接已关闭时 rpc 应返回错误（不许写空管道）")
 	}
 }

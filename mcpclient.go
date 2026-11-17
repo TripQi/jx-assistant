@@ -91,6 +91,20 @@ type mcpClient struct {
 
 	lines    chan string   // stdio 读行通道（见 readLoop）
 	readDone chan struct{} // 关闭连接时 close：让读行 goroutine 退出
+
+	// trMu 保护「传输句柄」：stdio 写入口、读行通道、HTTP 会话 id、请求序号。
+	// 它们要在 c.mu 之外被用（rpc/readResponse/httpPost 会在调用期无 c.mu 运行），
+	// 而 c.mu 可能被握手长期占用——只取 trMu 既避竞争又不被握手拖住。
+	// 锁序：c.mu → trMu（connect/shutdownLocked）；trMu 内不再取其他锁。
+	trMu sync.Mutex
+
+	// stateMu 保护连接状态快照（connUp/connTools）。环境快照与设置页列表拿它
+	// 而不是拿 c.mu：握手全程持 c.mu（stdio 首帧 120s、HTTP 120s），在 c.mu 里
+	// 读状态等于把每次交互的环境组装挂在握手的 deadline 上。快照只在状态真正
+	// 改变的两处更新（握手成功、关闭），读者据此只报真实状态，不猜不伪。
+	stateMu   sync.Mutex
+	connUp    bool
+	connTools []mcpToolDef
 }
 
 // jsonrpcRequest / jsonrpcResponse 是 JSON-RPC 2.0 的帧。
@@ -148,11 +162,31 @@ func (c *mcpClient) start(ctx context.Context) error {
 	}
 	c.tools = tools
 	c.started = true
+	c.setConnState(true, tools)
 	return nil
+}
+
+// setConnState 更新连接状态快照（只在握手成功与关闭两处改变）。
+func (c *mcpClient) setConnState(up bool, tools []mcpToolDef) {
+	c.stateMu.Lock()
+	c.connUp = up
+	c.connTools = tools
+	c.stateMu.Unlock()
+}
+
+// connSnapshot 读连接状态快照。不碰 c.mu，握手进行中也能立即返回。
+// 返回的 tools 是发布时整块替换的不可变切片，调用方可直接读。
+func (c *mcpClient) connSnapshot() (bool, []mcpToolDef) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.connUp, c.connTools
 }
 
 // connect 建立传输（spawn 进程或准备 HTTP 会话）。
 func (c *mcpClient) connect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("MCP %s 连接已取消: %w", c.fullName, err)
+	}
 	if c.def.Type == "http" || c.def.Type == "sse" {
 		return nil // http 无预连接，逐请求进行
 	}
@@ -182,12 +216,17 @@ func (c *mcpClient) connect(ctx context.Context) error {
 		return fmt.Errorf("启动 MCP 服务器 %s 失败: %w", c.fullName, err)
 	}
 	c.cmd = cmd
-	c.stdinW = stdin
 	c.stdinC = stdin
 	c.stdout = bufio.NewReaderSize(stdout, 1<<20)
-	c.lines = make(chan string, 16)
-	c.readDone = make(chan struct{})
-	go c.readLoop(c.stdout, c.lines, c.readDone)
+	lines := make(chan string, 16)
+	readDone := make(chan struct{})
+	// 传输句柄在 trMu 下发布：rpc/readResponse 会不持 c.mu 地取用它们。
+	c.trMu.Lock()
+	c.stdinW = stdin
+	c.lines = lines
+	c.trMu.Unlock()
+	c.readDone = readDone
+	go c.readLoop(c.stdout, lines, readDone)
 	return nil
 }
 
@@ -340,15 +379,22 @@ func mcpResultContent(res any) (string, []mcpImage, error) {
 }
 
 // rpc 发一个 JSON-RPC 请求并等匹配 id 的响应。
+// 写入端与序号在 trMu 下取：本函数在调用期不持 c.mu（握手期则已在 c.mu 下），
+// 两侧都只能靠 trMu 才能既正确又不等握手。
 func (c *mcpClient) rpc(ctx context.Context, method string, params any) (any, error) {
-	if c.def.Type == "http" || c.def.Type == "sse" {
-		c.nextID++
-		return c.httpRPC(ctx, jsonrpcRequest{JSONRPC: "2.0", ID: c.nextID, Method: method, Params: params})
-	}
+	c.trMu.Lock()
 	c.nextID++
 	id := c.nextID
+	w := c.stdinW
+	c.trMu.Unlock()
+	if c.def.Type == "http" || c.def.Type == "sse" {
+		return c.httpRPC(ctx, jsonrpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+	}
+	if w == nil { // 连接刚被关闭（卸载/替换时恰好有调用在飞）：不往空管道写
+		return nil, fmt.Errorf("MCP %s 连接已关闭", c.fullName)
+	}
 	line := rpcLine(jsonrpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
-	if _, err := fmt.Fprintln(c.stdinW, line); err != nil {
+	if _, err := fmt.Fprintln(w, line); err != nil {
 		return nil, fmt.Errorf("MCP %s 写入失败: %w", c.fullName, err)
 	}
 	return c.readResponse(ctx, id)
@@ -358,7 +404,9 @@ func (c *mcpClient) rpc(ctx context.Context, method string, params any) (any, er
 // 读行由 readLoop 旁路送出，本函数只等行、ctx 与总超时：握手被取消时能立即
 // 返回，不再死等服务器的首帧。
 func (c *mcpClient) readResponse(ctx context.Context, id int64) (any, error) {
-	lines := c.lines // 取本地引用：shutdownLocked 会把字段清空，通道本身仍会关闭
+	c.trMu.Lock() // 取本地引用：关闭时字段会被置空，通道本身仍会关闭
+	lines := c.lines
+	c.trMu.Unlock()
 	if lines == nil {
 		return nil, fmt.Errorf("MCP %s 连接已关闭", c.fullName)
 	}
@@ -427,8 +475,8 @@ func (c *mcpClient) httpPost(ctx context.Context, req jsonrpcRequest, wantRespon
 	for k, v := range c.def.Headers {
 		hreq.Header.Set(k, c.host.ExpandVars(v))
 	}
-	if c.httpSID != "" {
-		hreq.Header.Set("Mcp-Session-Id", c.httpSID)
+	if sid := c.httpSIDValue(); sid != "" {
+		hreq.Header.Set("Mcp-Session-Id", sid)
 	}
 	resp, err := http.DefaultClient.Do(hreq)
 	if err != nil {
@@ -436,7 +484,9 @@ func (c *mcpClient) httpPost(ctx context.Context, req jsonrpcRequest, wantRespon
 	}
 	defer resp.Body.Close()
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.trMu.Lock()
 		c.httpSID = sid
+		c.trMu.Unlock()
 	}
 	if !wantResponse {
 		return nil, nil
@@ -489,6 +539,13 @@ func rpcLine(req jsonrpcRequest) string {
 	return string(data)
 }
 
+// httpSIDValue 读当前 HTTP 会话 id（trMu 下）。
+func (c *mcpClient) httpSIDValue() string {
+	c.trMu.Lock()
+	defer c.trMu.Unlock()
+	return c.httpSID
+}
+
 // shutdownLocked 关闭连接（调用方持锁）。
 func (c *mcpClient) shutdownLocked() {
 	if c.stdinC != nil {
@@ -504,11 +561,14 @@ func (c *mcpClient) shutdownLocked() {
 		close(c.readDone) // 让 readLoop 退出（它随后 close(lines)，等行的一侧立即收到）
 		c.readDone = nil
 	}
-	c.lines = nil
-	c.stdout = nil
+	c.trMu.Lock()
 	c.stdinW = nil
+	c.lines = nil
+	c.trMu.Unlock()
+	c.stdout = nil
 	c.started = false
 	c.tools = nil
+	c.setConnState(false, nil)
 }
 
 // shutdown 对外关闭。先在不持 c.mu 的情况下标记关闭并取消握手（stdio 读与 HTTP

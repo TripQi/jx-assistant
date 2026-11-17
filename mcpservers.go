@@ -434,9 +434,9 @@ func (r *MCPServersRegistry) Test(name string) ([]mcpToolDef, error) {
 		return nil, fmt.Errorf("MCP 服务器 %s 不存在", name)
 	}
 	c := r.clientOf(e)
-	started := c.started
 	r.mu.Unlock()
-	if !started {
+	// 状态走快照，不拿 c.mu：握手进行中也立即返回（真开始则交由 start 串行排队）。
+	if up, _ := c.connSnapshot(); !up {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := c.start(ctx); err != nil {
@@ -471,21 +471,20 @@ func (r *MCPServersRegistry) List() []mcpServerStatus {
 		rows = append(rows, row{st: st, c: r.clients[s.Name]})
 	}
 	r.mu.Unlock()
-	// 连通信息在注册表锁外读：c.mu 可能被握手占用，不能连带扣着注册表锁。
+	// 连通信息读连接状态快照：不碰 c.mu，握手进行中也能立即返回（握手方可能
+	// 正持它到自己的 deadline）。只报真实状态：握手未完成就是未连接、工具数 0。
 	out := make([]mcpServerStatus, 0, len(rows))
 	for _, it := range rows {
 		st, c := it.st, it.c
 		if c != nil {
-			c.mu.Lock()
-			if c.started {
+			if up, tools := c.connSnapshot(); up {
 				st.Connected = true
-				st.ToolCount = len(c.tools)
-				for _, t := range c.tools {
+				st.ToolCount = len(tools)
+				for _, t := range tools {
 					st.Tools = append(st.Tools, t.Name)
 				}
 				st.LastError = ""
 			}
-			c.mu.Unlock()
 		}
 		out = append(out, st)
 	}
@@ -528,7 +527,7 @@ func (r *MCPServersRegistry) PromptBlock(sess *SessionMeta) string {
 		items = append(items, item{e: s, c: r.clients[s.Name]})
 	}
 	r.mu.Unlock()
-	// 工具数在注册表锁外读（c.mu 可能被握手占用）；清单顺序仍按定义顺序。
+	// 工具数读连接状态快照（c.mu 可能被握手占用）；清单顺序仍按定义顺序。
 	var b strings.Builder
 	for _, it := range items {
 		b.WriteString("  - " + it.e.Name)
@@ -536,11 +535,9 @@ func (r *MCPServersRegistry) PromptBlock(sess *SessionMeta) string {
 			b.WriteString("：" + it.e.Description)
 		}
 		if it.c != nil {
-			it.c.mu.Lock()
-			if it.c.started {
-				b.WriteString(fmt.Sprintf("——%d 个工具", len(it.c.tools)))
+			if up, tools := it.c.connSnapshot(); up {
+				b.WriteString(fmt.Sprintf("——%d 个工具", len(tools)))
 			}
-			it.c.mu.Unlock()
 		}
 		b.WriteString("\n")
 	}
@@ -565,11 +562,8 @@ func (r *MCPServersRegistry) ReadConnector(ctx context.Context, name string) (st
 	}
 	c := r.clientOf(e)
 	r.mu.Unlock()
-	// c.mu 在注册表锁外取：握手期间它一直被占用，在 r.mu 里等会连带卡住环境快照。
-	c.mu.Lock()
-	started := c.started
-	c.mu.Unlock()
-	if !started {
+	// 状态走快照，不碰 c.mu：握手进行中也立刻返回（真开始则交由 start 排队）。
+	if up, _ := c.connSnapshot(); !up {
 		if err := c.start(ctx); err != nil {
 			r.noteConnectResult(name, c, err)
 			return "", fmt.Errorf("连接器 %s 连接失败: %w", name, err)

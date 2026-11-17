@@ -310,7 +310,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// 一起下发（跟随时算到具体模型，不让用户自己推）。dispatch 键就是执行/通用那一套，
 	// 结构与改动前一致（待办组件在读）。
 	a.apiRoute(mux, "GET /api/default-models", a.handleDefaultModelsGet, apiMeta{Summary: "默认模型（全局默认 / 派发任务默认·三套用途）与当前生效值", Perm: permReadOnly})
-	a.apiRoute(mux, "POST /api/default-models", a.handleDefaultModelsSet, apiMeta{Summary: "保存默认模型（全局默认模型 / 派发任务默认模型的三个用途）", Params: "global（provider/providerKey/model/thinking）、dispatch（mode=follow|provider+model）、dispatchPlan / dispatchReview（mode=follow|custom + provider/providerKey/model/thinking，缺省＝保留；mode 非法即 400）", Perm: permWorkspace})
+	a.apiRoute(mux, "POST /api/default-models", a.handleDefaultModelsSet, apiMeta{Summary: "保存默认模型（全局默认模型 / 派发任务默认模型的三个用途）", Params: "global（provider/providerKey/model/thinking）、dispatch（mode=follow|provider+model）、dispatchPlan / dispatchReview（mode=follow|custom + provider/providerKey/model/thinking；键缺省＝保留；null 与 {} ＝该项整体清空；其余逐字段合并，跟随态只给模型字段＝400）。一次保存是原子整体：任一行不合格就 400、整份不落盘，报错点名根因那一行", Perm: permWorkspace})
 	// 用户记忆（组件 user-memory，usermemory.go）：设置页与长期助理（call_api
 	// 整文件通道）共用；未启用时 404。
 	a.apiRoute(mux, "GET /api/user-memory", a.handleUserMemoryGet, apiMeta{Summary: "读用户记忆（用户称呼/身份与喜好/AI 名字/AI 身份/对话气泡颜色）", Perm: permReadOnly})

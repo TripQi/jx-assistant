@@ -680,6 +680,12 @@ func runDispatchTask(t *toolContext, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 所选用途的配置结构在派发前校验（脏 mode 一律拒绝），即使本次给了显式
+	// model/thinking 覆盖——用户配置坏了就该看见。这里只校验结构、不判可用性，
+	// 所以不会因为「本次用不到的默认模型不可用」拦下显式覆盖。
+	if _, _, cerr := t.app.purposeCfg(purpose); cerr != nil {
+		return "", fmt.Errorf("%w；本次派发未创建任务", cerr)
+	}
 	ownThinking, err := resolveDispatchThinking(p.Thinking)
 	if err != nil {
 		return "", err

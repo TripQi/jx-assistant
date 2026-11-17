@@ -15,7 +15,12 @@ import (
 )
 
 func TestDefaultModelsJSPurposeRows(t *testing.T) {
-	raw, err := os.ReadFile("web/app-settings.js")
+	// 与 token_combo_test 同一套做法：允许环境变量指向副本，mutation 验证用（不改工作树）。
+	path := "web/app-settings.js"
+	if p := os.Getenv("JX_DM_SETTINGS_SOURCE"); p != "" {
+		path = p
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +38,7 @@ function select() {
   classList:{ toggle(c,on){ const s=new Set(className.split(' ')); if(on)s.add(c);else s.delete(c); className=[...s].join(' '); } },
   get className(){return className}, set className(x){className=x},
   get value(){return v}, set value(x){v=this.options.some(o=>o.value===x)?x:''},
-  get innerHTML(){return html}, set innerHTML(x){html=x;this.options=[];for(const m of x.matchAll(/<option value="([^"]*)"/g))this.options.push({value:m[1],textContent:''});v=''},
+  get innerHTML(){return html}, set innerHTML(x){html=x;this.options=[];for(const m of x.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)</g))this.options.push({value:m[1],textContent:m[2]});v=''},
   appendChild(o){this.options.push(o)} };
 }
 const $=id=>nodes[id]||(nodes[id]=select());
@@ -85,4 +90,9 @@ const DM={global:G,dispatch:{mode:'custom',ref:P},dispatchPurposes:[
 	run(`$('set-dispatch-plan-mode').value='follow';saveDefaultModels('dispatchPlan');expect(requests.length===2,'plan 请求缺失');expect(requests[1].body.dispatchPlan.mode==='follow' && !requests[1].body.dispatchPlan.provider,'plan follow 不该带模型');`)
 	run(`requests[1].resolve(DM);`)
 	run(`$('set-dispatch-execute-mode').value='follow';saveDefaultModels('dispatch');expect(requests.length===3,'execute 请求缺失');expect(!('mode' in requests[2].body.dispatch) && !('provider' in requests[2].body.dispatch),'执行/通用应沿用旧请求形状');`)
+
+	// P8：接口没有返回用途配置（或缺某一项）时不静默回落「跟随」，而是明确报错并禁用该行；
+	// 配置未加载时也不允许把该行当 follow 提交。
+	run(`dmCache={global:G,dispatch:{mode:'follow',ref:G}};dmReady=true;renderDefaultModels();expect($('set-dispatch-plan-mode').value==='__missing__','缺用途配置应明确报错');expect($('set-dispatch-plan-mode').className.includes('bad'),'应置红');expect($('set-dispatch-plan-mode').options.some(o=>o.textContent==='配置未加载'),'应显示可读原因');saveDefaultModels('dispatchPlan');expect(requests.length===3,'配置未加载不该提交');`)
+	run(`dmCache={global:G,dispatch:{mode:'follow',ref:G},dispatchPurposes:[{purpose:'execute',label:'执行/通用',mode:'follow',thinking:'',ref:G}]};renderDefaultModels();expect($('set-dispatch-execute-mode').value==='follow','execute 正常回填');expect($('set-dispatch-review-mode').value==='__missing__','缺该项应明确报错');`)
 }

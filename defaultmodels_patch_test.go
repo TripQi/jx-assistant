@@ -169,7 +169,10 @@ const api=(path,opts)=>{if(!opts){if(holdGet)return new Promise(resolve=>gets.pu
 const loadModels=()=>Promise.resolve();
 const alert=()=>{};
 function expect(v,s){if(!v)throw new Error(s)}
-function view(g,d){return {global:g,dispatch:{mode:d?'custom':'follow',ref:d||g}}}
+function view(g,d){return {global:g,dispatch:{mode:d?'custom':'follow',ref:d||g},dispatchPurposes:[
+ {purpose:'execute',label:'执行/通用',mode:d?'custom':'follow',thinking:'',ref:d||g},
+ {purpose:'plan',label:'方案设计',mode:'follow',thinking:'',ref:{}},
+ {purpose:'review',label:'审查/审计',mode:'follow',thinking:'',ref:{}}]}}
 const A={provider:'p',providerKey:'k',model:'A'}, B={provider:'gone',providerKey:'lost',model:'B'}, C={provider:'p',providerKey:'k',model:'C'}, D={provider:'p',providerKey:'k',model:'D'};
 `
 	if _, err = vm.RunString(harness + "\n" + src[start:end]); err != nil {

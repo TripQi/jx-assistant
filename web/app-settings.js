@@ -966,17 +966,19 @@ function dmRowEls(purpose) {
   };
 }
 
-// 某个用途的视图项：服务端下发的 dispatchPurposes 里那一项；老服务端/旧缓存
-// 没有它时，execute 回退到原来的 dispatch 键，其余按空（＝跟随）。
+// 某个用途的视图项：服务端下发的 dispatchPurposes 里那一项。这里**不做「缺了就当
+// 跟随」的静默回退**——前后端同版本发布，接口没有这一项就是版本/加载问题，要明确
+// 告诉用户，不能把数据缺失伪装成用户自己配错了。
 function dmPurposeView(purpose) {
-  const list = (dmCache && dmCache.dispatchPurposes) || [];
-  const hit = list.find((x) => x && x.purpose === purpose);
-  if (hit) return hit;
-  if (purpose === 'execute') {
-    const d = (dmCache && dmCache.dispatch) || {};
-    return { purpose, mode: d.mode, thinking: d.thinking, ref: d.ref };
+  const list = (dmCache && dmCache.dispatchPurposes) || null;
+  if (!list || !list.length) {
+    return { purpose, missing: '接口没有返回用途配置（前后端版本不一致或加载失败，请重启到同一版本后重试）' };
   }
-  return {};
+  const hit = list.find((x) => x && x.purpose === purpose);
+  if (!hit) {
+    return { purpose, missing: '接口缺少「' + purpose + '」用途的配置（前后端版本不一致，请重启到同一版本后重试）' };
+  }
+  return hit;
 }
 
 // 模型来源下拉：只认 follow/custom；脏配置（手改出来的原值）原样显示成一项并置红，
@@ -1009,6 +1011,19 @@ function renderDefaultModels() {
     const els = dmRowEls(row.purpose);
     if (!els.mode) continue;
     const item = dmPurposeView(row.purpose);
+    if (item.missing) {
+      // 协议/加载问题：明确报错、禁用该行，不假装成「跟随」（P8）。
+      els.mode.innerHTML = '<option value="__missing__">配置未加载</option>';
+      els.mode.value = '__missing__';
+      els.mode.classList.toggle('bad', true);
+      els.model.innerHTML = opts;
+      els.model.style.display = 'none';
+      els.model.disabled = els.thinking.disabled = true;
+      els.mode.disabled = !dmReady;
+      dmSelectThinking(els.thinking, '');
+      dmSetEff(els.eff, { error: item.missing }, '');
+      continue;
+    }
     dmSetMode(els.mode, item.mode, row.follow, item.mode);
     els.model.innerHTML = opts;
     const eff = item.ref || {};

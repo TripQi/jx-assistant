@@ -806,10 +806,10 @@ func (a *App) todoModelView(mode string, custom ModelRef) ModelRefView {
 // 按「不回落」报错。dispatchFollow=true 表示派发默认模型是「跟随主会话」（存空）。
 func (a *App) setDefaultModels(global ModelRef, dispatch ModelRef, dispatchFollow bool) error {
 	if err := validateDefaultThinking(global.Thinking); err != nil {
-		return err
+		return fmt.Errorf("全局默认模型（来自%s）：%w", whereGlobalDefault, err)
 	}
 	if err := validateDefaultThinking(dispatch.Thinking); err != nil {
-		return err
+		return fmt.Errorf("派发任务默认模型 · 执行/通用（来自%s）：%w", whereDispatchDefault, err)
 	}
 	g := a.withKey(global)
 	if g.Provider != "" && g.Model == "" {
@@ -884,8 +884,18 @@ type purposePatch struct {
 	Thinking    *string `json:"thinking"`
 }
 
+// empty 没有任何字段：保存接口把它（与 null）当成「这一项整体清空」。
+func (p purposePatch) empty() bool {
+	return p.Mode == nil && p.Provider == nil && p.ProviderKey == nil && p.Model == nil && p.Thinking == nil
+}
+
 // mergePurposeCfg 逐字段合并一次用途配置（不校验完整度：那是 setDispatchPurposes
-// 的统一关口）。mode 归一为 follow 时清空模型三项，但保留档位（含本次给出的）。
+// 的统一关口）。语义与设计 §3.5 一致：
+//   - mode 显式给成 follow/空：清空模型三项（档位保留，本次给了就用本次的）；
+//   - mode 显式给成 custom：按字段替换；
+//   - mode 缺席：纯粹逐字段合并——旧配置已是 custom 时可以直接换模型，不必重报 mode；
+//     旧配置在跟随时只给渠道/模型会被**明确拒绝**（跟随时模型字段不生效，悄悄收下再
+//     清掉就是用户输入静默丢失），要么给 mode=custom 要么先给 mode=follow。
 func mergePurposeCfg(old DispatchPurposeCfg, patch purposePatch, label, where string) (DispatchPurposeCfg, error) {
 	next := old
 	if patch.Mode != nil {
@@ -893,7 +903,14 @@ func mergePurposeCfg(old DispatchPurposeCfg, patch purposePatch, label, where st
 		if err != nil {
 			return old, fmt.Errorf("%s默认模型的 %s（来自%s）", label, err.Error(), where)
 		}
-		next.Mode = mode
+		if mode == purposeModeFollow {
+			next = DispatchPurposeCfg{ModelRef: ModelRef{Thinking: old.Thinking}}
+			if patch.Thinking != nil {
+				next.Thinking = *patch.Thinking
+			}
+			return next, nil
+		}
+		next.Mode = purposeModeCustom
 	}
 	if patch.Provider != nil {
 		next.Provider = *patch.Provider
@@ -907,12 +924,16 @@ func mergePurposeCfg(old DispatchPurposeCfg, patch purposePatch, label, where st
 	if patch.Thinking != nil {
 		next.Thinking = *patch.Thinking
 	}
-	mode, err := normPurposeMode(next.Mode)
-	if err != nil {
-		return old, fmt.Errorf("%s默认模型的 %s（来自%s）", label, err.Error(), where)
+	// 换渠道或换模型时重新定位 Key 归属（旧的归属属于旧模型的，沿用它会让新模型
+	// 落到不提供它的分组）；前端总是三件套一起发，这里只服务 call_api/脚本的单字段补丁。
+	if (patch.Provider != nil || patch.Model != nil) && patch.ProviderKey == nil {
+		next.ProviderKey = ""
 	}
-	if mode == purposeModeFollow {
-		next.Provider, next.ProviderKey, next.Model = "", "", ""
+	if patch.Mode == nil && (patch.Provider != nil || patch.ProviderKey != nil || patch.Model != nil) {
+		if mode, _ := normPurposeMode(next.Mode); mode == purposeModeFollow {
+			return old, fmt.Errorf("%s默认模型现在跟随执行/通用，只提交渠道/模型不会生效：要让它生效请同时给 mode=%q（指定渠道 + 模型）；要清空就显式给 mode=%q（来自%s）",
+				label, purposeModeCustom, purposeModeFollow, where)
+		}
 	}
 	return next, nil
 }
@@ -1003,8 +1024,9 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	// 方案/审查两套用途：键缺席＝保留；null＝整体清空（回到跟随、档位也清）；
-	// 对象＝逐字段合并。mode 非法在这里就 400，不落盘也不降级 follow。
+	// 方案/审查两套用途：键缺席＝保留；null 与 {} 都是**整体清空**（回到跟随、档位
+	// 也清，与旧的 dispatch:{} 语义统一）；只给某一项（如 {"thinking":"high"}）
+	// 则逐字段合并。mode 非法或「跟随态只给模型字段」在这里就 400，不落盘。
 	decodePurpose := func(name, purpose string, old DispatchPurposeCfg) (DispatchPurposeCfg, error) {
 		raw, present := body[name]
 		if !present {
@@ -1017,27 +1039,31 @@ func (a *App) handleDefaultModelsSet(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(raw, &patch); err != nil {
 			return old, fmt.Errorf("%s 不是合法的用途配置: %w", name, err)
 		}
+		if patch.empty() {
+			return DispatchPurposeCfg{}, nil
+		}
 		return mergePurposeCfg(old, patch, purposeLabel(purpose), purposeWhere(purpose))
 	}
 	plan, err := decodePurpose("dispatchPlan", "plan", a.Cfg.DispatchPlanModel)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
 		return
 	}
 	review, err := decodePurpose("dispatchReview", "review", a.Cfg.DispatchReviewModel)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
 		return
 	}
-	// 在副本上归一/校验。写盘失败不能改变运行中的默认值。
+	// 在副本上归一/校验：一次保存是个原子整体，任一行不合格就整份不落盘（不做部分
+	// 保存），错误里点名根因在哪一行，用户改完再提交一次。
 	next := *a.Cfg
 	candidate := &App{Cfg: &next}
 	if err := candidate.setDefaultModels(g, d, d.Empty()); err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
 		return
 	}
 	if err := candidate.setDispatchPurposes(plan, review); err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "本次保存未生效（整份默认模型都未改动，磁盘也没写入）——"+err.Error())
 		return
 	}
 	if err := next.Save(a.CfgPath); err != nil {

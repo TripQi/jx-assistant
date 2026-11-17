@@ -230,6 +230,17 @@ func TestDispatchPurposeErrorsBeforeCreate(t *testing.T) {
 			args:    map[string]any{"task": "x", "purpose": "plan"},
 			errMust: []string{"方案设计默认模型不可用", "手动停用"},
 		},
+		{
+			// 用户拍板：所选用途的 mode 结构即使本次给了显式 model/thinking 覆盖也
+			// 必须派发前报错（配置坏了不能静默放过）。
+			name: "脏 mode 即使有显式 model 与 thinking 也拒绝",
+			setup: func(a *App) {
+				addMockProvider(a, "okp", "okm")
+				a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: "跟随"}
+			},
+			args:    map[string]any{"task": "x", "purpose": "plan", "model": "okp/okm", "thinking": "none"},
+			errMust: []string{"方案设计", "mode", "本次派发未创建任务"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,6 +433,23 @@ func TestDefaultModelsPurposeView(t *testing.T) {
 		t.Fatalf("review 行不对：%+v", purposes[2])
 	}
 
+	// 方案设计的独立档位：跟随时也要显示自己的档位链（P7：去掉这行文本就红）
+	a.Cfg.DispatchModel.Thinking = "low"
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{ModelRef: ModelRef{Thinking: "xhigh"}}
+	_, purposes = get()
+	if !strings.Contains(purposes[1].Ref.ThinkingText, "方案设计默认模型 · Xhigh") {
+		t.Fatalf("方案设计行的档位文本应来自自己的链：%+v", purposes[1].Ref)
+	}
+	if !strings.Contains(purposes[1].Ref.Text, "Xhigh") {
+		t.Fatalf("方案设计行的生效值旧该带自己的档位：%+v", purposes[1].Ref)
+	}
+	// 自己没配档位就跟执行/通用（不是直接跟全局）
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{}
+	_, purposes = get()
+	if !strings.Contains(purposes[1].Ref.ThinkingText, "跟随执行/通用 · Low") {
+		t.Fatalf("方案设计行档位应跟随执行/通用：%+v", purposes[1].Ref)
+	}
+
 	// 脏 mode：原样返回配置值 + ref 说明非法（界面据此置红）
 	a.Cfg.DispatchReviewModel = DispatchPurposeCfg{Mode: "Custom2"}
 	_, purposes = get()
@@ -500,5 +528,116 @@ func TestDefaultModelsSetReturnsPurposeView(t *testing.T) {
 	}
 	if len(body.Purposes) != 3 || body.Purposes[2].Thinking != "high" || body.Purposes[2].Mode != "follow" {
 		t.Fatalf("保存响应应带三套用途视图：%+v", body.Purposes)
+	}
+}
+
+// 保存接口的逐字段合并语义（P1/P2）：
+//   - mode 缺席时跟随态只给模型字段＝400（不静默丢弃），custom 态可按字段换模型；
+//   - {} 与 null 都是整体清空，thinking 单字段补丁可独立使用；
+//   - 失败响应说明整份未保存（原子保存）。
+func TestPurposeMergeSemantics(t *testing.T) {
+	a := defaultPatchApp(t)
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{} // 起点：跟随、无档位
+	if w := defaultPatch(a, `{"dispatchPlan":{"provider":"router","model":"claude-x"}}`); w.Code != 400 ||
+		!strings.Contains(w.Body.String(), "跟随执行/通用") ||
+		!strings.Contains(w.Body.String(), "本次保存未生效") {
+		t.Fatalf("跟随态只给模型字段应 400 并说明整份未保存：%d %s", w.Code, w.Body.String())
+	}
+	if a.Cfg.DispatchPlanModel != (DispatchPurposeCfg{}) {
+		t.Fatalf("拒绝不该改动配置：%+v", a.Cfg.DispatchPlanModel)
+	}
+	// 跟随态只给档位：可以（档位与模型来源解耦）
+	if w := defaultPatch(a, `{"dispatchPlan":{"thinking":"xhigh"}}`); w.Code != 200 {
+		t.Fatalf("跟随时只给档位应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.Mode != "" || got.Thinking != "xhigh" {
+		t.Fatalf("跟随时档位应独立生效：%+v", got)
+	}
+	// custom 后 mode 缺席只换模型：按字段合并（不必重报 mode）
+	if w := defaultPatch(a, `{"dispatchPlan":{"mode":"custom","provider":"router","model":"claude-x"}}`); w.Code != 200 {
+		t.Fatalf("完整 custom 应接受：%d %s", w.Code, w.Body.String())
+	}
+	if w := defaultPatch(a, `{"dispatchPlan":{"model":"shared"}}`); w.Code != 200 {
+		t.Fatalf("custom 态只换模型应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.Mode != purposeModeCustom || got.Model != "shared" || got.ProviderKey != "k1" || got.Thinking != "xhigh" {
+		t.Fatalf("custom 态换模型应保留其余字段：%+v", got)
+	}
+	// thinking 单字段补丁不动模型
+	if w := defaultPatch(a, `{"dispatchPlan":{"thinking":"low"}}`); w.Code != 200 {
+		t.Fatalf("档位补丁应接受：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got.Model != "shared" || got.Thinking != "low" {
+		t.Fatalf("档位补丁不该动模型：%+v", got)
+	}
+	// {} 与 null 都整体清空（与旧的 dispatch:{} 语义统一）
+	if w := defaultPatch(a, `{"dispatchPlan":{}}`); w.Code != 200 {
+		t.Fatalf("{} 应整体清空：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got != (DispatchPurposeCfg{}) {
+		t.Fatalf("{} 应清空模型与档位：%+v", got)
+	}
+	a.Cfg.DispatchPlanModel = DispatchPurposeCfg{Mode: purposeModeCustom, ModelRef: ModelRef{Provider: "router", Model: "claude-x", Thinking: "high"}}
+	if w := defaultPatch(a, `{"dispatchPlan":null}`); w.Code != 200 {
+		t.Fatalf("null 应整体清空：%d %s", w.Code, w.Body.String())
+	}
+	if got := a.Cfg.DispatchPlanModel; got != (DispatchPurposeCfg{}) {
+		t.Fatalf("null 应清空：%+v", got)
+	}
+	// 顶层键缺席：其它项不动
+	review := DispatchPurposeCfg{Mode: purposeModeCustom, ModelRef: ModelRef{Provider: "zhipu", Model: "glm-5.3"}}
+	a.Cfg.DispatchReviewModel = review
+	if w := defaultPatch(a, `{"dispatchPlan":{}}`); w.Code != 200 || a.Cfg.DispatchReviewModel != review {
+		t.Fatalf("缺席的用途不该被改动：%d %+v", w.Code, a.Cfg.DispatchReviewModel)
+	}
+}
+
+// 显式覆盖不受「本次用不到的默认模型不可用」拖累（P5 的另一半）：执行/通用指向
+// 停用渠道、审查配置也坏着，显式 model+thinking 的 plan 派发照样成功。
+func TestExplicitOverrideBypassesUnusedDefaults(t *testing.T) {
+	a, main := newDispatchTestApp(t)
+	addMockProvider(a, "okp", "okm")
+	a.Cfg.Providers[0].Enabled = boolPtr(false) // 全局默认渠道停用
+	a.Cfg.DispatchModel = ModelRef{Provider: "mock-prov", Model: "mock-model"}
+	a.Cfg.DispatchReviewModel = DispatchPurposeCfg{Mode: purposeModeCustom,
+		ModelRef: ModelRef{Provider: "mock-prov", Model: "mock-model"}}
+	got, err := dispatchPurposeCase(t, a, main, map[string]any{"task": "x", "purpose": "plan", "model": "okp/okm", "thinking": "none"})
+	if err != nil {
+		t.Fatalf("显式覆盖应不受未使用默认拖累：%v", err)
+	}
+	if got.Provider != "okp" || got.Model != "okm" || got.Thinking != "none" {
+		t.Fatalf("显式覆盖落库不对：%+v", got)
+	}
+}
+
+// 派发注记：用途与本次档位只在非默认时出现（P6）：直接断言这两项，注记丢了就红。
+func TestDispatchTaskNotePurposeAndThinking(t *testing.T) {
+	cases := []struct {
+		name, purpose, thinking string
+		want, notWant           string
+	}{
+		{"都默认＝空串", "execute", "", "", "用途"},
+		{"方案设计", "plan", "", "用途：「方案设计」（plan）", ""},
+		{"审查+指定档位", "review", "none", "档位：「本次指定 None」", ""},
+		{"转录+高档位", "plan", "max", "档位：「本次指定 Max」", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dispatchTaskNote("task", permWorkspace, "", false, 0, "", tc.purpose, tc.thinking)
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("注记应含 %q：%q", tc.want, got)
+			}
+			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
+				t.Fatalf("注记不该含 %q：%q", tc.notWant, got)
+			}
+			if tc.want == "" && got != "" {
+				t.Fatalf("全默认时应返回空串：%q", got)
+			}
+		})
+	}
+	// execute + 指定档位：只出现档位，不出现用途
+	got := dispatchTaskNote("task", permWorkspace, "", false, 0, "", "execute", "high")
+	if !strings.Contains(got, "档位：「本次指定 High」") || strings.Contains(got, "用途：") {
+		t.Fatalf("execute 指定档位时注记不对：%q", got)
 	}
 }

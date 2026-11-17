@@ -744,7 +744,8 @@
           <!-- 默认模型（defaultmodels.go）：手动新建会话用全局默认模型；dispatch_task
                按用途用三套默认（执行/通用＝原来那一项、方案设计、审查·审计），
                方案/审查默认跟随执行/通用，也可以各自指定渠道+模型与独立推理强度。
-               每项推理强度独立选择，不随模型或跟随方式清除。每行右侧灰字是服务端
+               每项推理强度独立选择，不随模型或跟随方式清除；不指定时沿用途链继承
+               （本用途 → 执行/通用 → 全局默认）。每行右侧灰字是服务端
                算好的当前实际生效值，不可用时红字（含脏配置的具体原因）。 -->
           <div class="gen-section" id="default-model-block">
             <h4>默认模型</h4>
@@ -781,7 +782,7 @@
                   </select>
                   <select id="set-dispatch-plan-model" class="pf-input" aria-label="方案设计默认模型"></select>
                   <label for="set-dispatch-plan-thinking">推理强度</label>
-                  <select id="set-dispatch-plan-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型和跟随方式；不指定时继承全局默认档位"></select>
+                  <select id="set-dispatch-plan-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型和跟随方式；不指定时先跟执行/通用的档位，再跟全局默认"></select>
                   <span class="dm-eff" id="set-dispatch-plan-eff"></span>
                 </div>
               </div>
@@ -794,7 +795,7 @@
                   </select>
                   <select id="set-dispatch-review-model" class="pf-input" aria-label="审查/审计默认模型"></select>
                   <label for="set-dispatch-review-thinking">推理强度</label>
-                  <select id="set-dispatch-review-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型和跟随方式；不指定时继承全局默认档位"></select>
+                  <select id="set-dispatch-review-thinking" class="pf-input" style="flex:0 1 180px" title="独立于模型和跟随方式；不指定时先跟执行/通用的档位，再跟全局默认"></select>
                   <span class="dm-eff" id="set-dispatch-review-eff"></span>
                 </div>
               </div>

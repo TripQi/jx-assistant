@@ -1669,7 +1669,17 @@ func runCommand(t *toolContext, args json.RawMessage) (string, error) {
 	// 读面编码：命令里出现的文件先探测（encoding.go），据此决定这条 PS 5.1
 	// 命令按 UTF-8 还是按 ANSI(936) 读文件。探测不到（程序内部自己读文件的
 	// 情形：python 脚本、findstr 之类）就靠下面的输出乱码检测 + 重跑兜底。
-	encMode, encHint := detectEncodingMode(cwd, p.Command, p.Shell)
+	// 探测本身只碰安全的本地普通文件，且有预算/可取消：它跑在启动子进程之前，
+	// 一旦卡住就是整条命令永久挂起（runChild 的超时那时还没开始计时）。
+	tctx := t.ctx
+	if tctx == nil {
+		tctx = context.Background()
+	}
+	encMode, encHint := detectEncodingMode(tctx, cwd, p.Command, p.Shell)
+	// 探测阶段会话已被取消（用户点了停止）：绝不能再接着把子进程起起来。
+	if cerr := tctx.Err(); cerr != nil {
+		return "", fmt.Errorf("命令未执行：会话已取消（%v）", cerr)
+	}
 	runOnce := func(mode string) (string, error) {
 		return t.app.runChild(t.ctx, sandboxRun{
 			Dir: cwd, Command: p.Command, Shell: strings.ToLower(strings.TrimSpace(p.Shell)),

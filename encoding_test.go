@@ -119,7 +119,7 @@ func TestProbeTextFileSplitsMultibyteAtProbeWindow(t *testing.T) {
 	if got := probeTextFile(p); got != EncGBK {
 		t.Fatalf("大 GBK 文件应探测为 GBK，实得 %v", got)
 	}
-	if m, _ := detectEncodingMode(dir, `Get-Content big_gbk.txt`, ""); m != encodingModeGBK {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content big_gbk.txt`, ""); m != encodingModeGBK {
 		t.Fatalf("大 GBK 文件应走 gbk 读面，实得 %q", m)
 	}
 }
@@ -249,16 +249,16 @@ func TestDetectEncodingMode(t *testing.T) {
 	if err := os.WriteFile(gbkFile, gbkBytes(t, "echo 中文\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := detectEncodingMode(dir, `Get-Content "u.sql"`, ""); m != encodingModeUTF8 {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql"`, ""); m != encodingModeUTF8 {
 		t.Fatalf("UTF-8 文件应走 utf8，实得 %q", m)
 	}
-	if m, _ := detectEncodingMode(dir, `Get-Content "g.bat"`, ""); m != encodingModeGBK {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "g.bat"`, ""); m != encodingModeGBK {
 		t.Fatalf("GBK 文件应走 gbk，实得 %q", m)
 	}
-	if m, hint := detectEncodingMode(dir, `Get-Content "u.sql" ; Get-Content "g.bat"`, ""); m != encodingModeUTF8 || hint == "" {
+	if m, hint := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql" ; Get-Content "g.bat"`, ""); m != encodingModeUTF8 || hint == "" {
 		t.Fatalf("混合编码应按 utf8 并给出提示，实得 %q / %q", m, hint)
 	}
-	if m, _ := detectEncodingMode(dir, `Get-Content "u.sql"`, "cmd"); m != encodingModeUTF8 {
+	if m, _ := detectEncodingMode(context.Background(), dir, `Get-Content "u.sql"`, "cmd"); m != encodingModeUTF8 {
 		t.Fatalf("cmd 路径不做注入，应返回 utf8，实得 %q", m)
 	}
 }

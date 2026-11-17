@@ -14,11 +14,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -256,17 +259,123 @@ func encodeText(s string, enc TextEncoding) ([]byte, error) {
 	}
 }
 
-// probeTextFile 读文件头部（64KB）探测编码；文件不存在返回 EncUnknown。
+// ---------- 探测的边界：只碰安全的普通文件，且有界、可取消 ----------
+//
+// 为什么必须有这道边界：编码探测发生在 run_command **启动子进程之前**，探测一卡
+// 就是整条命令永久挂起，而 runChild 的超时那时还没开始计时（2026-11-17 实锤：
+// 提交说明正文里出现的 Windows 保留设备名被当成了文件候选，os.Open 打开的是
+// AUX 设备，Read 等设备数据永不返回，命令行一个子进程都没起）。三道闸门按顺序
+// 收紧：
+//  1. 路径名先判（probePathBlocked，纯字符串、不碰文件系统）：DOS 保留设备名、
+//     设备命名空间前缀、备用数据流、远程卷一律拒掉，连 Stat 都不做；
+//  2. 打开后确认 Mode().IsRegular()：设备（ModeDevice）、目录、管道都不读；
+//  3. 读头部放进看门狗：超时/取消先关句柄、再等读线程退出——绝不"返回空结果、
+//     把读线程和句柄丢在那儿"（Windows 同步句柄的 Close 未必能打断阻塞中的
+//     Read，所以第 1、2 条才是主防线，看门狗是最后一道）。
+const (
+	probeTotalBudget = 2 * time.Second         // 一条命令的全部候选共用
+	probeFileBudget  = 1200 * time.Millisecond // 单个候选
+	probeCancelGrace = 500 * time.Millisecond  // 超时关句柄后等读线程退出
+)
+
+// probeJobFn 是一次候选探测的本体（打开 → 确认普通文件 → 读头部）。抽成变量
+// 只为给"读永久阻塞"留一个可控注入点：真实设备/串口被路径闸门（probePathBlocked）
+// 与普通文件确认挡在外面，测试绝不能去碰（用 os.Pipe 模拟阻塞，验证看门狗确实
+// 关句柄并等读线程退出）。
+var probeJobFn = probeJob
+
+// probeJob 真实探测：打开候选、确认是普通文件、读头部判编码。register 把句柄
+// 交给看门狗保管，返回 false 表示已被放弃（超时/取消），必须立刻收场、不要再读。
+func probeJob(path string, register func(*os.File) bool) (TextEncoding, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return EncUnknown, ""
+	}
+	if !register(f) {
+		return EncUnknown, ""
+	}
+	defer f.Close()
+	// 设备/目录/管道不开读：用已打开的句柄取类型（不再按路径解析一次，
+	// 盖住"Stat 时是普通文件、打开时已被换成设备"的空档）。
+	if fi, serr := f.Stat(); serr != nil || !fi.Mode().IsRegular() {
+		return EncUnknown, "不是普通文件（设备/目录/管道）"
+	}
+	return probeFileHead(f), ""
+}
+
+// probeTextFile 读文件头部（64KB）探测编码；文件不存在或不是安全普通文件返回
+// EncUnknown。丢弃跳过原因（read/write 这类调用方只需要编码）。
+func probeTextFile(path string) TextEncoding {
+	enc, _ := probeTextFileBounded(context.Background(), path)
+	return enc
+}
+
+// probeTextFileBounded 是带边界的探测：返回编码，以及"为什么没探成"的注记
+// （注记只在候选被拒/超时时非空，供 run_command 的编码提示行说明本条为何按
+// UTF-8 兜底）。
+func probeTextFileBounded(ctx context.Context, path string) (TextEncoding, string) {
+	if why := probePathBlocked(path); why != "" {
+		return EncUnknown, why
+	}
+	type probeResult struct {
+		enc  TextEncoding
+		note string
+	}
+	done := make(chan probeResult, 1) // 带缓冲：读线程永远能写完退出，不堵在发送上
+	var (
+		mu      sync.Mutex
+		opened  *os.File
+		abandon bool
+	)
+	// register 把句柄交给看门狗；返回 false 说明已经放弃（超时/取消），
+	// 调用方必须立刻关句柄收场——否则句柄会一直开着。
+	register := func(f *os.File) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if abandon {
+			f.Close()
+			return false
+		}
+		opened = f
+		return true
+	}
+	go func() {
+		enc, note := probeJobFn(path, register)
+		done <- probeResult{enc, note}
+	}()
+	timer := time.NewTimer(probeFileBudget)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.enc, r.note
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+	// 超时/取消：先关句柄（阻塞中的读会因此返回），再等读线程退出——只把
+	// goroutine 晾在那儿就是永久泄漏（句柄占着设备、读线程不返回）。
+	mu.Lock()
+	abandon = true
+	f := opened
+	mu.Unlock()
+	if f != nil {
+		f.Close()
+	}
+	grace := time.NewTimer(probeCancelGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return EncUnknown, "探测超时"
+	case <-grace.C:
+		return EncUnknown, "探测超时且读线程未退出"
+	}
+}
+
+// probeFileHead 读头部 64KB 判编码（f 已确认是普通文件）。
 // 尾部可能正好切开一个多字节字符（GBK 双字节 / GB18030 四字节），结构校验会
 // 因此整块判否——退掉 1~3 个尾字节重试，让大 GBK 文件不被误判成「编码未知」
 // （误判的后果是 run_command 的读面按 UTF-8 走：只读命令靠乱码检测重跑兜底，
 // 写类命令不重跑，于是 GBK 内容被按 UTF-8 误解后写出去）。
-func probeTextFile(path string) TextEncoding {
-	f, err := os.Open(path)
-	if err != nil {
-		return EncUnknown
-	}
-	defer f.Close()
+func probeFileHead(f *os.File) TextEncoding {
 	buf := make([]byte, 64*1024)
 	n, _ := f.Read(buf)
 	b := buf[:n]
@@ -359,7 +468,14 @@ func extractPathCandidates(command, cwd string) []string {
 		if seen[p] {
 			continue
 		}
-		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+		// 设备名/设备命名空间/远程卷必须在碰文件系统之前就拒掉（probePathBlocked）：
+		// 这条命令的正文（含提交说明）是模型随手写的，一个保留设备名就能让后面的
+		// Stat/Open 摸到真实设备。
+		if probePathBlocked(p) != "" {
+			continue
+		}
+		// 只留真普通文件：fi.IsDir() 挡不住设备（设备 Stat 成功、ModeDevice 非目录）。
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
 		seen[p] = true
@@ -446,8 +562,10 @@ const (
 //   - 全是 UTF-8 族 / 没有可探测文件 → utf8（默认）
 //   - 混在一起 → utf8（多数资产是 UTF-8），由输出乱码检测 + 重跑兜底
 //
-// 返回的 hint 只在混合/未知时给出（正常情况为空，不制造噪音）。
-func detectEncodingMode(cwd, command, shell string) (mode string, hint string) {
+// ctx 是调用方的会话上下文：探测必须能随会话取消、且有总预算（probeTotalBudget），
+// 否则探测卡住就等于命令在启动子进程前永久挂起。
+// 返回的 hint 只在混合/未知/有候选被跳过时给出（正常情况为空，不制造噪音）。
+func detectEncodingMode(ctx context.Context, cwd, command, shell string) (mode string, hint string) {
 	if !isPS51Shell(shell) {
 		return encodingModeUTF8, ""
 	}
@@ -455,10 +573,26 @@ func detectEncodingMode(cwd, command, shell string) (mode string, hint string) {
 	if len(paths) == 0 {
 		return encodingModeUTF8, ""
 	}
+	// 全部候选共用一个截止期限：探测总耗时才有上界。候选都是本地普通文件时
+	// 是毫秒级，这条只兜"候选其实是设备/网络文件"这类意外。
+	ctx, cancel := context.WithTimeout(ctx, probeTotalBudget)
+	defer cancel()
 	var gbFiles, utf8Files, otherFiles []string
+	gbEnc := EncUnknown
+	note := ""
 	for _, p := range paths {
-		switch probeTextFile(p) {
+		enc, n := probeTextFileBounded(ctx, p)
+		if n != "" {
+			// 同一类跳过原因只报第一条，不把提示刷成清单
+			if note == "" {
+				note = filepath.Base(p) + " " + n
+			}
+		}
+		switch enc {
 		case EncGBK, EncGB18030:
+			if len(gbFiles) == 0 {
+				gbEnc = enc
+			}
 			gbFiles = append(gbFiles, p)
 		case EncUTF8, EncUTF8BOM, EncUTF16LE, EncUTF16BE:
 			utf8Files = append(utf8Files, p)
@@ -468,15 +602,25 @@ func detectEncodingMode(cwd, command, shell string) (mode string, hint string) {
 	}
 	switch {
 	case len(gbFiles) > 0 && len(utf8Files) == 0:
-		return encodingModeGBK, ""
+		mode = encodingModeGBK
 	case len(gbFiles) > 0 && len(utf8Files) > 0:
-		return encodingModeUTF8, "命令同时涉及 UTF-8 与 GBK 文件（" + filepath.Base(gbFiles[0]) +
-			" 是 " + probeTextFile(gbFiles[0]).String() + "）：本条按 UTF-8 读；读该文件请加 -Encoding Default 或改用 read 工具"
+		mode = encodingModeUTF8
+		hint = "命令同时涉及 UTF-8 与 GBK 文件（" + filepath.Base(gbFiles[0]) +
+			" 是 " + gbEnc.String() + "）：本条按 UTF-8 读；读该文件请加 -Encoding Default 或改用 read 工具"
 	case len(otherFiles) > 0 && len(utf8Files) == 0:
-		return encodingModeUTF8, "命令里的文件编码无法确定（" + filepath.Base(otherFiles[0]) +
+		mode = encodingModeUTF8
+		hint = "命令里的文件编码无法确定（" + filepath.Base(otherFiles[0]) +
 			"）：按 UTF-8 读取，遇到乱码会自动换编码重跑一次"
+	default:
+		mode = encodingModeUTF8
 	}
-	return encodingModeUTF8, ""
+	if note != "" {
+		if hint != "" {
+			hint += "；"
+		}
+		hint += note + "，已跳过该候选"
+	}
+	return mode, hint
 }
 
 // isPS51Shell 与三处注入点的判定口径保持一致：空 shell 与 powershell 走 PS 5.1。

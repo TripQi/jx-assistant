@@ -571,10 +571,18 @@ WebView2 内核渲染（浏览器组件已全部内嵌进 exe，整个程序就
   5.1 的 `-Encoding utf8` 会写 BOM，落到 `.bat/.cmd/.ps1` 上就是命令失败。
   并注入 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`（`appendEnvUnique` 先摘后加，
   环境块重复变量"先见为准"）。
-  读面编码怎么定（`encoding.go`）：`detectEncodingMode` 从命令串里抓字面出现的
-  文件路径（`extractPathCandidates`）→ 读 64KB 头探测（BOM→严格 UTF-8→GBK/
-  GB18030 结构→UTF-16 启发→二进制）→ 全是 GB 族就整条切 GBK，混合按 UTF-8 并
-  给一句提示。**探测不到的（程序内部自己读文件）靠输出乱码检测兜底**：
+  读面编码怎么定（`encodingprobe_parent.go` + `encodingprobe.go`）：
+  `detectEncodingMode` 从命令串里纯字符串抓字面出现的文件路径
+  （`extractPathCandidates`：正则 + 名称闸门，**不碰文件系统**）→ 交一个
+  **可强杀的探测子进程**（`__jx-probe-encoding`，隐藏子命令，先于 flag/配置/
+  单实例分派）读 64KB 头探测（BOM→严格 UTF-8→GBK/GB18030 结构→UTF-16 启发→
+  二进制）→ 全是 GB 族就整条切 GBK，混合按 UTF-8 并给一句提示。子进程按 1.5s
+  预算被强杀 + Wait 回收，子进程内闸门：名称（设备名/命名空间/ADS）→ 受保护
+  路径 → 网络盘/普通文件确认。**为什么不在进程内探测**：Windows 的 CreateFile/
+  同步 Read/同步 Close 不可取消，进程内看门狗只能让调用方先返回、收不回线程
+  与句柄；而探测跑在启动命令之前，卡住就是整条命令永久挂起（见
+  `encoding_probe_guard_test.go`，含 AST 级"父侧不碰文件系统"不变式）。
+  **探测不到的（程序内部自己读文件）靠输出乱码检测兜底**：
   `looksMojibake` 命中且 `isReadOnlyCommand` 且本地前台 → 换另一种编码
   **重跑一次**，两次都脏如实报告；写/安装/提交/启服务/后台作业**绝不重跑**
   （重跑=执行两遍），只附一句诊断。

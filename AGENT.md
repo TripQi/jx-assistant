@@ -299,7 +299,7 @@ android/other/无后缀文件），构建脚本零改动。拆包（建 android/
   WebView2
   运行时开原生桌面窗口：标题「AI数字助理」（exe 文件名切换期：软件属性名/
   窗口标题已是新名，文件名一周内仍为「坚祥数字助理GO.exe」，见
-  《exe名切换-AI数字助理-一周后操作清单.md》），窗口/任务栏图标取 exe
+  `Docs/exe名切换-AI数字助理-一周后操作清单.md`），窗口/任务栏图标取 exe
   内嵌 LOGO 资源（`打包/make_icon.py` 由 web/logo.png 生成多尺寸 ico
   （打包/app.ico），go-winres 按 `go-winres.json` 嵌入为 RT_GROUP_ICON #1；
   `-browser` 参数可强制回浏览器形态）。
@@ -953,7 +953,7 @@ DSH 官方的远程工作区只在 mac/Linux 宿主上可用；本产品用纯 G
   **别把时间改回环境快照或挂钟**：前者让每条用户消息多一条环境差分，后者让
   「每分钟跨过分钟边界」变成一次环境变化、重发变成时间驱动。
 - **前后端消息类型契约**：数据库怎么存（`messages.kind`）、SSE 怎么发、前端
-  用什么样式展示，统一定义在**《消息类型规范.md》**（对话内容 chat·aiuser /
+  用什么样式展示，统一定义在 **`Docs/消息类型规范.md`**（对话内容 chat·aiuser /
   上下文注入 prompt·env·summary·time / 系统注入 report / 审计工件 request·audit；
   report 与 aiuser 按 origin 分子类）；前端按 kind 分发渲染（`ROW_ITEM_BUILDERS` 注册表），
   改展示只动前端、加类型只动后端；**改类型必先改规范再动代码，禁止按正文

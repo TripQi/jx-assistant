@@ -151,6 +151,11 @@ func (a *App) buildContextUpTo(sess *SessionMeta, sys string, upTo int64) []Mess
 }
 
 func (a *App) buildContext(sess *SessionMeta, sys string, upTo int64) []Message {
+	return a.buildContextWithThinking(sess, sys, upTo, nil)
+}
+
+// thinking 仅是当前执行轮按 seq 选中的请求 overlay，普通历史仍过滤空 assistant。
+func (a *App) buildContextWithThinking(sess *SessionMeta, sys string, upTo int64, thinking map[int64]string) []Message {
 	raw, err := a.Store.RawMessagesAll(sess.ID)
 	if err != nil {
 		return []Message{TextMessage("system", sys)}
@@ -221,6 +226,10 @@ func (a *App) buildContext(sess *SessionMeta, sys string, upTo int64) []Message 
 		// 空正文且无工具调用（例如只留下思考过程的行）：对模型没有信息，
 		// 直接跳过，避免发出空 content 被网关拒绝
 		if m.Role == "assistant" && strings.TrimSpace(m.Text()) == "" && len(m.ToolCalls) == 0 {
+			if original, ok := thinking[m.Seq]; ok && m.Thinking == original {
+				t := original
+				out = append(out, Message{Role: "assistant", Content: "", ReasoningContent: &t, thinkingOverlaySeq: m.Seq})
+			}
 			continue
 		}
 		msg := m.Message

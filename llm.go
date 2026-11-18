@@ -36,8 +36,9 @@ type ToolCall struct {
 // Message 同时用于本地持久化与 LLM 请求体。Content 用 any 是因为
 // 带工具调用的 assistant 消息需要 content 为 null，而其余角色是字符串。
 type Message struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role               string `json:"role"`
+	thinkingOverlaySeq int64  `json:"-"` // 仅请求组装校验身份，不落库、不上网
+	Content            any    `json:"content"`
 	// 思考模式历史回传：DeepSeek V4/flash、智谱 GLM-5.x 等要求带 tools 的请求
 	// 把此前 assistant 回合的思考原文原样传回（否则 400「reasoning_content in
 	// the thinking mode must be passed back」/ 智谱的保留式思考校验）。仅
@@ -93,6 +94,9 @@ type ChatRequest struct {
 	MaxTokens   int      `json:"max_tokens,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
 	ToolChoice  string   `json:"tool_choice,omitempty"`
+	// AutoContinuation 只约束纯思考后的新增请求，不改变普通网络重试语义。
+	AutoContinuation    bool   `json:"-"`
+	ContinuationBaseURL string `json:"-"` // 上一可信响应实际地址，不受其他会话主备偏好变化影响
 }
 
 type StreamOptionsCfg struct {
@@ -128,6 +132,10 @@ func (r *ChatRequest) ApplyThinking(level string) {
 type StreamCompletion struct {
 	Reason string
 	Ended  bool
+	// 原始 chat 流的观察值：无工具名的半截片段也不能误判为纯思考。
+	HadToolFragments bool
+	HadText          bool
+	InvalidFrame     bool // 不能把被解析器跳过的损坏数据当成可信纯思考响应
 }
 
 // StreamCallbacks 把流式输出回调给调用方：思考增量、正文增量、完整的工具调用
@@ -301,13 +309,16 @@ func StreamChat(ctx context.Context, target LLMTarget, req ChatRequest, cb Strea
 	if altFirst {
 		first, second = alt, primary
 	}
+	if req.AutoContinuation && req.ContinuationBaseURL != "" {
+		first, second = req.ContinuationBaseURL, ""
+	}
 	attemptsLeft := connRetryMaxAttempts
 	err = streamProtoOnceBudget(ctx, first, target.APIKey, body, proto, cb, &attemptsLeft)
 	if err == nil {
 		markAltPreferred(target, first == alt && alt != "")
 		return nil
 	}
-	if second == "" || !isConnFailure(err) || ctx.Err() != nil || attemptsLeft == 0 {
+	if req.AutoContinuation || second == "" || !isConnFailure(err) || ctx.Err() != nil || attemptsLeft == 0 {
 		return err
 	}
 	log.Printf("[模型] %s 连接失败，改走备用地址 %s", safeConnURL(first), safeConnURL(second))
@@ -854,11 +865,13 @@ func containsAnyFold(s string, words []string) bool {
 }
 
 type streamChunk struct {
+	Error   json.RawMessage `json:"error"`
 	Choices []struct {
 		Delta struct {
-			Content          string `json:"content"`
-			Reasoning        string `json:"reasoning"`         // OpenAI 新版/部分网关
-			ReasoningContent string `json:"reasoning_content"` // DeepSeek/GLM 风格
+			Content          string          `json:"content"`
+			Reasoning        string          `json:"reasoning"`         // OpenAI 新版/部分网关
+			ReasoningContent string          `json:"reasoning_content"` // DeepSeek/GLM 风格
+			FunctionCall     json.RawMessage `json:"function_call"`     // 旧式调用也视作工具片段，不用于新增执行路径
 			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -892,11 +905,20 @@ func parseSSE(r io.Reader, cb StreamCallbacks) error {
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			completion.InvalidFrame = true
 			continue
 		}
+		if (len(chunk.Error) > 0 && string(chunk.Error) != "null") || (len(chunk.Choices) == 0 && chunk.Usage == nil) || len(chunk.Choices) > 1 {
+			completion.InvalidFrame = true
+		}
 		for _, ch := range chunk.Choices {
+			completion.HadToolFragments = completion.HadToolFragments || len(ch.Delta.ToolCalls) > 0 || (len(ch.Delta.FunctionCall) > 0 && string(ch.Delta.FunctionCall) != "null")
+			completion.HadText = completion.HadText || strings.TrimSpace(ch.Delta.Content) != ""
 			if reason, ok := ch.FinishReason.(string); ok && reason != "" {
 				completion.Reason = reason
+				if reason != "stop" && reason != "length" {
+					completion.InvalidFrame = true
+				}
 			}
 			if ch.Delta.Content != "" && cb.OnText != nil {
 				cb.OnText(ch.Delta.Content)

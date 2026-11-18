@@ -65,17 +65,33 @@ type Assembly struct {
 // （内容有变化才落新快照行，见 maybeAppendEnvSnapshot；快照按追加式进上下文，
 // 渲染逻辑在 buildContext）。RunAgent 每步调用一次。
 func (e *ContextEngine) Assemble(sess *SessionMeta, emit func(Event)) *Assembly {
+	return e.assembleThinking(sess, emit, nil, false)
+}
+
+func (e *ContextEngine) assembleThinking(sess *SessionMeta, emit func(Event), thinking map[int64]string, instruction bool) *Assembly {
 	sys, envRaw, tools := e.materials(sess)
+	if instruction {
+		sys += "\n\n" + thinkingContinueInstruction
+	}
 	env := e.app.maybeAppendEnvSnapshot(sess, envRaw, emit)
-	msgs := e.app.buildContext(sess, sys, 0)
+	msgs := e.app.buildContextWithThinking(sess, sys, 0, thinking)
 	// 图片内联跟随当前会话的模型能力；模型不可用时不内联（真正的报错在调模型时给）
 	inlineTarget := LLMTarget{}
 	if t, err := e.app.resolveTarget(sess); err == nil {
 		inlineTarget = t
 	}
 	msgs = inlineImagesForRequest(e.app, msgs, inlineTarget)
+	est := estimateTokens(msgs)
+	if len(thinking) > 0 {
+		// estimateTokens 的旧口径不计 reasoning；续接包须计入真实回传材料。
+		for _, m := range msgs {
+			if m.ReasoningContent != nil {
+				est += len([]rune(*m.ReasoningContent)) * 3 / 4
+			}
+		}
+	}
 	return &Assembly{Sys: sys, Env: env, Tools: toolDefsOf(tools), Msgs: msgs,
-		EstTokens: estimateTokens(msgs), SysHash: promptHash(sys), EnvHash: promptHash(env)}
+		EstTokens: est, SysHash: promptHash(sys), EnvHash: promptHash(env)}
 }
 
 // materials 计算 sys/env/tools 三样纯材料，无任何留痕副作用——Assemble

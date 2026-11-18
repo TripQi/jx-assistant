@@ -26,14 +26,15 @@ type sessionRun struct {
 	startedAt time.Time
 	done      chan struct{} // 执行结束即关闭，订阅者据此退出等待
 
-	mu       sync.Mutex
-	subs     map[int]chan Event
-	nextSub  int
-	partial  string // 当前步骤已流出的正文（重连时补发，避免丢半句）
-	thinking string // 当前步骤已流出的思考原文
-	stopped  bool   // 是否由用户显式停止
-	killed   bool   // 是否已被停止看门狗强制终结（执行体迟到醒来后据此跳过终态交代）
-	cleanEnd bool   // 本轮是否正常收尾（没出错、没被停止）：收口时据此决定要不要兜底续发队列
+	mu               sync.Mutex
+	subs             map[int]chan Event
+	nextSub          int
+	partial          string // 当前步骤已流出的正文（重连时补发，避免丢半句）
+	thinking         string // 当前步骤已流出的思考原文
+	thinkingContinue Event  // 仅本轮有效的续接提示；不落库，不与 retry 混用
+	stopped          bool   // 是否由用户显式停止
+	killed           bool   // 是否已被停止看门狗强制终结（执行体迟到醒来后据此跳过终态交代）
+	cleanEnd         bool   // 本轮是否正常收尾（没出错、没被停止）：收口时据此决定要不要兜底续发队列
 
 	modelAbort *modelAbortEntry // 模型调用进行中的步级打断句柄（插话立即打断用）。只在主循环调模型的窗口内非 nil——工具执行段为 nil，插话此刻到达就不打断、照旧等下一步调用模型前注入
 
@@ -146,6 +147,7 @@ func (a *App) finishRunOf(id string, r *sessionRun) {
 // 兜底续发。
 func (a *App) closeRun(id string, r *sessionRun) {
 	a.dropManagerTurnOf(id, r) // 经理代批授权随轮撤销（mgrnotify.go）：收口即失去代决窗口
+	r.clearThinkingContinue(id)
 	r.mu.Lock()
 	for i, ch := range r.subs {
 		close(ch)
@@ -225,7 +227,7 @@ func (a *App) stopRun(id string) bool {
 // 取消 + 终止该会话后台作业 + 停止原因落库），只有落库的 Actor/Note 不同——人工点
 // 按钮走 stopActorUser，数字助理的 stop_session 工具按用户指示代停走
 // stopActorAssistant。这样「谁把任务停了」在停止记录、重启恢复与派发回报里都分得开
-//（两者都算人为叫停：Kind 都是 stopByUser，不会被当成故障而重新派发）。
+// （两者都算人为叫停：Kind 都是 stopByUser，不会被当成故障而重新派发）。
 func (a *App) stopRunBy(id, actor, note string) bool {
 	jobsKilled := a.stopSessionJobs(id)
 	r := a.runOf(id)
@@ -236,6 +238,7 @@ func (a *App) stopRunBy(id, actor, note string) bool {
 	first := !r.stopped // 连点停止只记一次，不把计数打花
 	r.stopped = true
 	r.mu.Unlock()
+	r.clearThinkingContinue(id)
 	if first {
 		nowMS := time.Now().UnixMilli()
 		if strings.TrimSpace(note) == "" {
@@ -296,6 +299,7 @@ func (a *App) watchStop(id string, r *sessionRun) {
 //  4. 强制收口（finishRun：摘注册表、关闭订阅者、置空闲、清归属）——之后
 //     执行体再醒来，finishRunOf 认出注册表里已不是自己，收口幂等空转，
 //     不会把状态改回去；终态交代被 wasKilled 拦住，不再写库发事件。
+//
 // 只动这一个会话：其他正在执行的会话、发布流程（隔离目录构建）一概不碰。
 func (a *App) forceStopRun(id string, r *sessionRun) {
 	if !r.markKilled() {
@@ -380,6 +384,7 @@ func (a *App) kickModelStream(id string) {
 	if r == nil {
 		return
 	}
+	r.clearThinkingContinue(id)
 	r.mu.Lock()
 	e := r.modelAbort
 	r.mu.Unlock()
@@ -421,6 +426,15 @@ func stopReportHead(sub *SessionMeta, rec StopRecord, at string, rounds, steps i
 func (r *sessionRun) publish(ev Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// observe 与 publish 分开加锁：停止/插话可能在两者之间撤销提示。
+	if ev.Type == "thinking_continue" && (r.stopped || r.killed ||
+		(ev.Output != "" && r.thinkingContinue.Output != ev.Output)) {
+		ev.Output = ""
+	}
+	r.publishLocked(ev)
+}
+
+func (r *sessionRun) publishLocked(ev Event) {
 	for _, ch := range r.subs {
 		select {
 		case ch <- ev:
@@ -429,10 +443,34 @@ func (r *sessionRun) publish(ev Event) {
 	}
 }
 
-// observe 记录当前步骤已流出的正文/思考，供重连补发。
+// 停止/插话即刻撤下提示，不能等模型流响应取消；只清提示，不动已保存的思考。
+func (r *sessionRun) clearThinkingContinue(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.thinkingContinue.Output == "" {
+		return
+	}
+	r.thinkingContinue = Event{}
+	r.publishLocked(Event{Type: "thinking_continue", SessionID: sessionID})
+}
+
+// observe 记录当前步骤已流出的正文/思考与易逝续接提示，供重连补发。
 func (r *sessionRun) observe(ev Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	switch ev.Type {
+	case "thinking_continue":
+		r.thinkingContinue = ev
+		if r.stopped || r.killed {
+			r.thinkingContinue = Event{}
+		}
+	case "delta", "reasoning", "tool_start", "stopped", "error", "done", "retry":
+		r.thinkingContinue = Event{}
+	case "message":
+		if ev.Kind != "env" {
+			r.thinkingContinue = Event{}
+		}
+	}
 	switch ev.Type {
 	case "delta":
 		r.partial += ev.Delta
@@ -458,6 +496,10 @@ func (r *sessionRun) subscribe() (chan Event, func()) {
 	id := r.nextSub
 	r.nextSub++
 	r.subs[id] = ch
+	// 与登记订阅共用锁：刷新/接回流时先补提示，再消费后续事件。
+	if r.thinkingContinue.Output != "" {
+		ch <- r.thinkingContinue
+	}
 	r.mu.Unlock()
 	return ch, func() {
 		r.mu.Lock()
@@ -572,11 +614,11 @@ func subQueueNote(sub *SessionMeta, note string) string {
 
 // landUserSide 是「用户侧消息落库」的唯一收口：chat（真实用户发言）走
 // appendMessage——锚定本轮环境时间、刷新会话活动时间，与用户自己发完全一致
-//（chat 带 origin 时——如插话 origin=interject——按同口径落库，只是多存一个
+// （chat 带 origin 时——如插话 origin=interject——按同口径落库，只是多存一个
 // 来源标记）；aiuser（AI 发出的用户消息）与注入类（report 等）走 appendRow，
 // 并按 AGENT.md 的约定显式刷新会话时间（touchesActivity 的口径不含这两类行，
 // 不能去改它）。落库后广播同型 message 事件：emit 非空时走本轮订阅通道
-//（执行体内部），否则走全局广播。
+// （执行体内部），否则走全局广播。
 func (a *App) landUserSide(m *SessionMeta, content, kind, origin string, emit func(Event), pendingID ...string) *StoredMessage {
 	if kind == "" {
 		kind = kindChat
@@ -941,7 +983,7 @@ func (a *App) executeRun(m *SessionMeta, run *sessionRun, opening []Event) {
 		// 只在「消息级」里程碑广播会话更新（前端据此刷侧栏/列表）；
 		// delta/reasoning 这类高频事件不广播，否则会打出一串无效请求
 		switch ev.Type {
-		case "delta", "reasoning", "tool_start", "tool_end", "tool_wait", "resume", "pending", "retry", "auto_retry":
+		case "delta", "reasoning", "tool_start", "tool_end", "tool_wait", "resume", "pending", "retry", "auto_retry", "thinking_continue":
 		case "done", "stopped":
 			// 终态原样进全局总线：前端据此点亮「完成未查看」绿点并刷新侧栏
 			a.broadcast(ev)
